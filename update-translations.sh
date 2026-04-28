@@ -425,7 +425,7 @@ log "Listing permissions for $TARGET_PROJECT_ROOT/.git before git status:"
 ls -la "$TARGET_PROJECT_ROOT/.git"
 
 # Maximum files per PR before splitting. CodeRabbit skips review above 150.
-MAX_FILES_PER_PR=${MAX_FILES_PER_PR:-100}
+MAX_FILES_PER_PR=${MAX_FILES_PER_PR:-150}
 
 commit_staged_changes() {
     local msg="$1"
