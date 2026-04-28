@@ -43,14 +43,14 @@ RUN gh --version
 
 # Download and install yq for YAML processing
 RUN set -eux; \
-    YQ_VERSION=v4.44.2; \
+    YQ_VERSION=v4.53.2; \
     YQ_ARCH="$(dpkg --print-architecture)"; \
     YQ_BINARY="yq_linux_${YQ_ARCH}"; \
     curl -sSL -o /usr/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}"; \
     if [ "$YQ_ARCH" = "amd64" ]; then \
-        YQ_SHA256="246b781828353a59fb04ffaada241f78a8f3f25c623047b40306def1f6806e71"; \
+        YQ_SHA256="d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b"; \
     elif [ "$YQ_ARCH" = "arm64" ]; then \
-        YQ_SHA256="d05d9dae44503433e668d097143bfeb102ee7e2d486773ae23aaf81256ed54fd"; \
+        YQ_SHA256="03061b2a50c7a498de2bbb92d7cb078ce433011f085a4994117c2726be4106ea"; \
     else \
         echo "Unsupported architecture for yq: $YQ_ARCH" >&2; \
         exit 1; \

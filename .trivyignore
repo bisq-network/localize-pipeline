@@ -127,3 +127,13 @@ CVE-2026-25679
 # Revisit by: 2026-06-15
 CVE-2026-32280
 CVE-2026-32282
+
+# CVE-2026-32281, CVE-2026-32283: Go stdlib vulnerabilities in vendor-supplied Go binaries.
+# Affects: tx (Go v1.16.15) and gosu (Go v1.24.6). yq has been updated to a
+#          Go 1.26.2 build, while tx and gosu have no newer upstream release.
+# Rationale: Controlled CI/CD context; these binaries are not exposed as
+#            user-facing services and do not process untrusted TLS inputs here.
+# Added: 2026-04-28
+# Revisit by: 2026-06-15
+CVE-2026-32281
+CVE-2026-32283
