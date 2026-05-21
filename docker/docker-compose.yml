@@ -11,7 +11,8 @@ services:
         - DEPLOY_KEY_NAME=${DEPLOY_KEY_NAME:-id_ed25519}
       # Requires DOCKER_BUILDKIT=1 and COMPOSE_DOCKER_CLI_BUILD=1
       secrets:
-        # Make the deploy_key secret available to the build process
+        # Make build-only secrets available without copying them into image layers
+        - gpg_bot_key
         - deploy_key
     # The entrypoint is defined in the Dockerfile.
     # By default, run the main orchestration script. Can be overridden for debugging.
@@ -46,8 +47,10 @@ volumes:
     # Uncomment if volume is managed outside this compose project
     # external: true
 
-# Define the secret for the SSH deploy key.
-# The filename can be controlled via the DEPLOY_KEY_NAME environment variable.
+# Define build-time secrets.
+# The deploy key filename can be controlled via the DEPLOY_KEY_NAME environment variable.
 secrets:
+  gpg_bot_key:
+    file: ../secrets/gpg_bot_key/bot_secret_key.asc
   deploy_key:
-    file: ../secrets/deploy_key/${DEPLOY_KEY_NAME:-id_ed25519} 
+    file: ../secrets/deploy_key/${DEPLOY_KEY_NAME:-id_ed25519}

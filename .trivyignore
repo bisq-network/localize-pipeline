@@ -137,3 +137,30 @@ CVE-2026-32282
 # Revisit by: 2026-06-15
 CVE-2026-32281
 CVE-2026-32283
+
+# CVE-2026-33811, CVE-2026-33814, CVE-2026-39820, CVE-2026-39836, CVE-2026-42499:
+# Go stdlib vulnerabilities in latest vendor-supplied Go binaries.
+# Affects: yq v4.53.2, tx v1.6.17, and gosu 1.19. gh is rebuilt from source with
+#          Go 1.26.3 above, so it is intentionally not covered by this rationale.
+# Rationale: These utilities are only used in controlled CI/CD/container contexts,
+#            are not exposed as services, and do not process untrusted DNS,
+#            HTTP/2, e-mail address, or Windows lookup inputs here.
+# Checked upstream latest releases: 2026-05-21.
+# Added: 2026-05-21
+# Revisit by: 2026-07-15
+CVE-2026-33811
+CVE-2026-33814
+CVE-2026-39820
+CVE-2026-39836
+CVE-2026-42499
+
+# CVE-2026-44973, CVE-2026-45022: go-billy/go-git vulnerabilities embedded in the
+# latest Transifex CLI release (tx v1.6.17).
+# Rationale: tx is used only to synchronize translation files with Transifex in a
+#            controlled repo checkout. It does not accept arbitrary repository
+#            objects or user-selected paths in this deployment flow.
+# Checked upstream latest release: 2026-05-21.
+# Added: 2026-05-21
+# Revisit by: 2026-07-15
+CVE-2026-44973
+CVE-2026-45022
