@@ -27,7 +27,7 @@ distro==1.9.0
     # via openai
 gitdb==4.0.12
     # via gitpython
-gitpython==3.1.45
+gitpython==3.1.50
     # via -r requirements.in
 h11==0.16.0
     # via httpcore
@@ -37,7 +37,7 @@ httpx==0.28.1
     # via
     #   -r requirements.in
     #   openai
-idna==3.10
+idna==3.15
     # via
     #   anyio
     #   httpx
@@ -98,5 +98,5 @@ typing-extensions==4.14.1
     #   typing-inspection
 typing-inspection==0.4.1
     # via pydantic
-urllib3==2.6.3
+urllib3==2.7.0
     # via requests
