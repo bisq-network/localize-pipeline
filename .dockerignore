@@ -31,6 +31,8 @@ build/
 
 # Local config
 config.yaml
+docker/.env*
+secrets/
 
 # Documentation & Tests (if not needed in image)
 # docs/
@@ -38,4 +40,4 @@ config.yaml
 
 # Other
 *.bak
-*.swp 
+*.swp

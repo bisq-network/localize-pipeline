@@ -1,6 +1,6 @@
-FROM golang:1.26.2-bookworm@sha256:4f4ab2c90005e7e63cb631f0b4427f05422f241622ee3ec4727cc5febbf83e34 AS gh-builder
+FROM golang:1.26.3-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b AS gh-builder
 
-ARG GH_VERSION=2.89.0
+ARG GH_VERSION=2.92.0
 ENV CGO_ENABLED=0
 
 RUN GOBIN=/out go install github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}
@@ -93,19 +93,17 @@ RUN TX_VERSION="v1.6.17" && \
     rm "tx-${TX_ARCH}.tar.gz" && \
     tx --version
 
-# === GPG Key Import for Bot ===
-# Copy the GPG secret key into a temporary location
-COPY secrets/gpg_bot_key/bot_secret_key.asc /tmp/bot_secret_key.asc
-
-# Set correct ownership for the key so appuser can read it.
-RUN chown appuser:appuser /tmp/bot_secret_key.asc
-
-# Import the GPG key for the appuser.
-# This step is skipped in CI builds by checking the SKIP_GPG_IMPORT build argument.
-RUN if [ "$SKIP_GPG_IMPORT" = "true" ]; then \
+# Import the GPG key for the appuser using a BuildKit secret mount so the key is
+# never copied into an image layer. This step is skipped for CI builds.
+RUN --mount=type=secret,id=gpg_bot_key,target=/tmp/bot_secret_key.asc,uid=9999,gid=9999,mode=0400,required=false \
+    if [ "$SKIP_GPG_IMPORT" = "true" ]; then \
       echo "Skipping GPG key import for CI build."; \
     else \
       echo "Importing GPG key for appuser..." && \
+      if [ ! -s /tmp/bot_secret_key.asc ]; then \
+        echo "Error: gpg_bot_key build secret is required when SKIP_GPG_IMPORT is false." >&2; \
+        exit 1; \
+      fi && \
       # Switch to appuser to import the key into its own keyring
       su - appuser -c "gpg --batch --import /tmp/bot_secret_key.asc" && \
       \
@@ -120,9 +118,7 @@ RUN if [ "$SKIP_GPG_IMPORT" = "true" ]; then \
         echo "Error: Could not determine GPG key fingerprint after import." >&2; \
         exit 1; \
       fi; \
-    fi && \
-    # Clean up temporary file in all cases
-    rm -f /tmp/bot_secret_key.asc
+    fi
 
 # Make the .ssh directory and set its permissions.
 RUN mkdir -p /home/appuser/.ssh && \

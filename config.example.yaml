@@ -72,6 +72,8 @@ supported_locales:
     name: "German"
   - code: "es"
     name: "Spanish"
+  - code: "id"
+    name: "Indonesian"
   - code: "it"
     name: "Italian"
   - code: "pt_BR"
@@ -97,12 +99,17 @@ style_rules:
   es:
     - "When referring to 'billetera' (wallet), use feminine pronouns (e.g., 'Configúrala', 'restáurala')."
     - "Ensure questions that open with '¿' are properly closed with '?'."
+  id:
+    - "Prefer natural Indonesian phrasing over literal calques; for 'How it works', use 'Cara kerjanya' rather than 'Cara kerja ini'."
   pcm:
     - "Maintain consistency with terms like 'connection' and 'camera' (do not use 'kamera')."
     - "For negative outcomes, prefer the 'no gree work' pattern where appropriate."
+    - "Keep new UI labels in Nigerian Pidgin tone rather than plain English; translate paymentAccounts.details as 'Akaunt details' and paymentAccounts.accountCreationDate as 'Date wey dem create Akaunt' unless nearby established wording requires a better phrase."
   ru:
     - "In a wallet context, prefer hyphenated terms like 'seed-фраза' and 'биткойн-кошелька'."
-  af_ZA: []
+  af_ZA:
+    - "Use standard Afrikaans grammar and spelling throughout."
+    - "Preserve the Afrikaans indefinite article apostrophe: write 'n, including in parenthesized phrases such as ('n per-installasie identifiseerder), never (n ...)."
   it: []
   pt_BR: []
 

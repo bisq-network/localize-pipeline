@@ -248,6 +248,7 @@ style_rules:
   pcm:
     - "Maintain consistency with terms like 'connection' and 'camera' (do not use 'kamera')."
     - "For negative outcomes, prefer the 'no gree work' pattern where appropriate."
+    - "Keep new UI labels in Nigerian Pidgin tone rather than plain English; translate paymentAccounts.details as 'Akaunt details' and paymentAccounts.accountCreationDate as 'Date wey dem create Akaunt' unless nearby established wording requires a better phrase."
   pl:
     - "Use formal 'Pan/Pani' address forms for user interactions."
     - "Maintain consistent grammatical case usage appropriate to context."
@@ -290,7 +291,9 @@ style_rules:
     - "Follow Swahili grammar rules and syntax."
     - "Technical crypto terms may remain in English when commonly used in Swahili context."
     - "Ensure consistent terminology across the application."
-  af_ZA: []
+  af_ZA:
+    - "Use standard Afrikaans grammar and spelling throughout."
+    - "Preserve the Afrikaans indefinite article apostrophe: write 'n, including in parenthesized phrases such as ('n per-installasie identifiseerder), never (n ...)."
   am:
     - "Use Ge'ez/Ethiopic script (Amharic alphabet) throughout."
     - "Maintain formal and polite tone appropriate for financial applications."
@@ -364,6 +367,7 @@ style_rules:
     - "Use standard Indonesian terminology for technical terms when available."
     - "Technical crypto terms may be kept in English when commonly used in Indonesian context."
     - "Ensure consistent terminology across the application."
+    - "Prefer natural Indonesian phrasing over literal calques; for 'How it works', use 'Cara kerjanya' rather than 'Cara kerja ini'."
   ja:
     - "Use appropriate Japanese scripts (Hiragana, Katakana, and Kanji) throughout."
     - "Maintain polite formal tone using です/ます form appropriate for financial applications."
