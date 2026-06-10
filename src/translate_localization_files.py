@@ -459,6 +459,7 @@ def filter_git_changed_keys_by_source(
         git_changed_keys: Set[str],
         source_translations: Dict[str, str],
         ledger_entries: Dict[str, Dict[str, str]],
+        target_translations: Optional[Dict[str, str]] = None,
 ) -> Set[str]:
     """Filter git-changed keys to only those whose source English value changed.
 
@@ -473,6 +474,7 @@ def filter_git_changed_keys_by_source(
     - The ledger entry has no source_hash (legacy/incomplete)
     - The source value is missing (orphaned key, handled downstream)
     - The current source hash differs from the ledger's source hash
+    - The current target value regressed to the English source value
     """
     if not git_changed_keys:
         return set()
@@ -482,6 +484,17 @@ def filter_git_changed_keys_by_source(
         ledger_entry = ledger_entries.get(key)
         previous_source_hash = ledger_entry.get("source_hash") if ledger_entry else None
         source_value = source_translations.get(key)
+        target_value = target_translations.get(key) if target_translations else None
+
+        # If Transifex returns English/source text for a locale, do not let the
+        # unchanged-source filter silently preserve that regression.
+        if (
+                source_value is not None
+                and target_value is not None
+                and normalize_value(source_value) == normalize_value(target_value)
+        ):
+            filtered.add(key)
+            continue
 
         # Include key unless ledger proves the source is unchanged.
         if (previous_source_hash is None
@@ -1788,7 +1801,10 @@ async def process_translation_queue(
         # This prevents an infinite cycle where Transifex community translations
         # are overwritten by AI, then Transifex re-serves the community version.
         git_changed_keys = filter_git_changed_keys_by_source(
-            git_changed_keys, source_translations, file_ledger_entries
+            git_changed_keys,
+            source_translations,
+            file_ledger_entries,
+            target_translations=target_translations
         )
         newly_synchronized_keys = newly_added_keys.union(git_changed_keys)
         if git_changed_keys:
