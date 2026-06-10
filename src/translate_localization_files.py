@@ -43,6 +43,7 @@ from src.properties_parser import parse_properties_file, reassemble_file
 from src.translation_validator import (
     check_placeholder_parity,
     check_encoding_and_mojibake,
+    find_disallowed_control_characters,
     synchronize_keys
 )
 
@@ -159,6 +160,15 @@ def lint_properties_file(file_path: str) -> List[str]:
                     if re.search(r'\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])', value_to_check):
                         errors.append(
                             f"Linter Error: Invalid escape sequence in value for key '{key}' on line {i}."
+                        )
+
+                    control_character_findings = find_disallowed_control_characters(value_to_check)
+                    if control_character_findings:
+                        preview = ", ".join(control_character_findings[:3])
+                        suffix = " ..." if len(control_character_findings) > 3 else ""
+                        errors.append(
+                            f"Linter Error: Disallowed control character artifact in value for key "
+                            f"'{key}' on line {i}: {preview}{suffix}."
                         )
 
     except (IOError, OSError, UnicodeDecodeError) as e:
@@ -928,6 +938,19 @@ def run_per_key_validation(
 
     for key, target_value in final_translations.items():
         source_value = source_translations.get(key, "")
+        control_character_findings = find_disallowed_control_characters(target_value)
+
+        if control_character_findings:
+            failed_keys.append(key)
+            logger.warning(
+                f"Key '{key}' failed validation in '{filename}' - reverting to source due to "
+                f"disallowed control character artifact(s): {', '.join(control_character_findings[:3])}"
+                f"{' ...' if len(control_character_findings) > 3 else ''}.\n"
+                f"  Source: {source_value}\n"
+                f"  Translation: {target_value}"
+            )
+            valid_translations[key] = source_value
+            continue
 
         # Validate placeholder parity for this key
         if check_placeholder_parity(source_value, target_value):

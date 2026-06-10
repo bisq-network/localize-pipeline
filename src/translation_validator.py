@@ -3,6 +3,41 @@ import re
 from collections import Counter
 from src.properties_parser import parse_properties_file, reassemble_file
 
+_ALLOWED_CONTROL_CODEPOINTS = {0x09, 0x0A, 0x0D}
+_UNICODE_ESCAPE_PATTERN = re.compile(r'\\u([0-9a-fA-F]{4})')
+
+
+def _is_disallowed_control_codepoint(codepoint: int) -> bool:
+    return (
+        codepoint not in _ALLOWED_CONTROL_CODEPOINTS
+        and (codepoint < 0x20 or 0x7F <= codepoint <= 0x9F)
+    )
+
+
+def find_disallowed_control_characters(text: str) -> List[str]:
+    """
+    Find real or Java-escaped control characters that would render as UI garbage.
+
+    Java .properties files may contain literal UTF-8 glyphs like "→" or Java
+    Unicode escapes like "\\u2192". Both are valid for printable characters. The
+    broken mobile strings used DEL/STX control characters, e.g. "\\u007f2192" or
+    an actual U+007F before "2192"; those should be rejected.
+    """
+    findings = []
+
+    for index, character in enumerate(text):
+        codepoint = ord(character)
+        if _is_disallowed_control_codepoint(codepoint):
+            findings.append(f"U+{codepoint:04X} at character {index + 1}")
+
+    for match in _UNICODE_ESCAPE_PATTERN.finditer(text):
+        codepoint = int(match.group(1), 16)
+        if _is_disallowed_control_codepoint(codepoint):
+            findings.append(f"escaped U+{codepoint:04X} at character {match.start() + 1}")
+
+    return findings
+
+
 def check_key_coverage(base_keys: Set[str], target_keys: Set[str]) -> Tuple[Set[str], Set[str]]:
     """
     Compares the keys in a target locale file against a base English file.
@@ -213,5 +248,15 @@ def check_encoding_and_mojibake(file_path: str) -> List[str]:
     # 3. Check for the Unicode replacement character
     if '\uFFFD' in content:
         errors.append(f"File '{file_path}' contains the official Unicode replacement character (\uFFFD), indicating a previous encoding/decoding error.")
+
+    # 4. Check for disallowed control characters and escaped control characters
+    control_character_findings = find_disallowed_control_characters(content)
+    if control_character_findings:
+        preview = ", ".join(control_character_findings[:5])
+        suffix = " ..." if len(control_character_findings) > 5 else ""
+        errors.append(
+            f"Disallowed control character artifact detected in '{file_path}': "
+            f"{preview}{suffix}."
+        )
         
     return errors

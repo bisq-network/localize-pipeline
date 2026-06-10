@@ -213,3 +213,43 @@ class TestPerKeyValidation:
 
         assert len(failed_keys) == 0
         assert len(valid_translations) == 2
+
+    def test_control_character_artifact_reverts_key_to_source(self):
+        """Control-character artifacts should not be written to translation files."""
+        source_translations = {
+            "learn.more": "How this works →",
+            "normal": "Simple text"
+        }
+
+        final_translations = {
+            "learn.more": "How this works \x7f2192",
+            "normal": "Texto simple"
+        }
+
+        valid_translations, failed_keys = run_per_key_validation(
+            final_translations,
+            source_translations,
+            "mobile_es.properties"
+        )
+
+        assert failed_keys == ["learn.more"]
+        assert valid_translations["learn.more"] == "How this works →"
+        assert valid_translations["normal"] == "Texto simple"
+
+    def test_utf8_arrow_glyph_is_valid_translation_text(self):
+        source_translations = {
+            "learn.more": "How this works →"
+        }
+
+        final_translations = {
+            "learn.more": "Cómo funciona esto →"
+        }
+
+        valid_translations, failed_keys = run_per_key_validation(
+            final_translations,
+            source_translations,
+            "mobile_es.properties"
+        )
+
+        assert failed_keys == []
+        assert valid_translations["learn.more"] == "Cómo funciona esto →"
