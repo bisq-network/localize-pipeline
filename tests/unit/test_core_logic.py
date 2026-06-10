@@ -842,6 +842,32 @@ class TestFilterGitChangedKeys(unittest.TestCase):
         self.assertIn("key.changed", result)
         self.assertNotIn("key.stable", result)
 
+    def test_includes_git_changed_keys_that_regressed_to_source_when_source_unchanged(self):
+        """Git-dirty locale keys that equal English/source need translation even if source is unchanged."""
+        source_translations = {
+            "key.regressed": "Open trades",
+            "key.localized": "Trade history",
+        }
+        target_translations = {
+            "key.regressed": "Open trades",
+            "key.localized": "Historial de comercio",
+        }
+        ledger_entries = {
+            "key.regressed": {"source_hash": compute_ledger_hash("Open trades")},
+            "key.localized": {"source_hash": compute_ledger_hash("Trade history")},
+        }
+        git_changed_keys = {"key.regressed", "key.localized"}
+
+        result = filter_git_changed_keys_by_source(
+            git_changed_keys,
+            source_translations,
+            ledger_entries,
+            target_translations=target_translations
+        )
+
+        self.assertIn("key.regressed", result)
+        self.assertNotIn("key.localized", result)
+
     def test_includes_keys_with_no_ledger_entry(self):
         """Keys not in the ledger are new — always include them."""
         source_translations = {"key.new": "Brand new key"}

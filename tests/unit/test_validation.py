@@ -112,6 +112,54 @@ class TestValidationLogic(unittest.TestCase):
         self.assertIn("line 1", errors[0])
         self.assertIn("line 3", errors[1])
 
+    def test_linting_detects_control_character_unicode_escape_artifact(self):
+        content = "learn.more=How this works " r"\u007f2192" "\n"
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.properties', encoding='utf-8') as f:
+            f.write(content)
+            temp_path = f.name
+
+        try:
+            errors = lint_properties_file(temp_path)
+        finally:
+            os.remove(temp_path)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Disallowed control character", errors[0])
+        self.assertIn("learn.more", errors[0])
+        self.assertIn("U+007F", errors[0])
+
+    def test_linting_detects_actual_control_character_artifact(self):
+        content = "learn.more=How this works \x7f2192\n"
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.properties', encoding='utf-8') as f:
+            f.write(content)
+            temp_path = f.name
+
+        try:
+            errors = lint_properties_file(temp_path)
+        finally:
+            os.remove(temp_path)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Disallowed control character", errors[0])
+        self.assertIn("learn.more", errors[0])
+        self.assertIn("U+007F", errors[0])
+
+    def test_linting_accepts_utf8_arrow_glyph(self):
+        content = "learn.more=How this works →\n"
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.properties', encoding='utf-8') as f:
+            f.write(content)
+            temp_path = f.name
+
+        try:
+            errors = lint_properties_file(temp_path)
+        finally:
+            os.remove(temp_path)
+
+        self.assertEqual(errors, [])
+
 
 if __name__ == '__main__':
     unittest.main()

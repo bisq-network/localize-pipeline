@@ -117,6 +117,36 @@ class TestTranslationValidator(unittest.TestCase):
         finally:
             os.remove(temp_path)
 
+    def test_control_character_artifacts_are_detected(self):
+        content = (
+            "key.one=How this works " r"\u007f2192" "\n"
+            "key.two=How this works \x02" "192\n"
+        )
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.properties', encoding='utf-8') as f:
+            f.write(content)
+            temp_path = f.name
+
+        try:
+            errors = check_encoding_and_mojibake(temp_path)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("Disallowed control character", errors[0])
+            self.assertIn("U+007F", errors[0])
+            self.assertIn("U+0002", errors[0])
+        finally:
+            os.remove(temp_path)
+
+    def test_utf8_arrow_is_not_reported_as_encoding_artifact(self):
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.properties', encoding='utf-8') as f:
+            f.write("key.one=How this works →\n")
+            temp_path = f.name
+
+        try:
+            errors = check_encoding_and_mojibake(temp_path)
+            self.assertEqual(errors, [])
+        finally:
+            os.remove(temp_path)
+
     def test_key_synchronization(self):
         # Create temporary source and target files
         source_content = "key.one=One\nkey.two=Two\n# comment\nkey.three=Three"

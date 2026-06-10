@@ -164,3 +164,18 @@ CVE-2026-42499
 # Revisit by: 2026-07-15
 CVE-2026-44973
 CVE-2026-45022
+
+# CVE-2026-39823, CVE-2026-39825, CVE-2026-42504:
+# Go stdlib vulnerabilities reported in latest vendor-supplied Go binaries.
+# Affects: tx v1.6.17 and gosu 1.19. gh is rebuilt from source with Go 1.26.4,
+#          and yq has been upgraded to the latest v4.53.3 release above.
+# Rationale: tx and gosu are used only in controlled CI/CD/container contexts
+#            and are not exposed as services. tx talks to Transifex's API using
+#            fixed workflow inputs, while gosu only drops privileges during
+#            container startup. Upstream has no newer patched release for either.
+# Checked upstream latest releases: 2026-06-10.
+# Added: 2026-06-10
+# Revisit by: 2026-08-15
+CVE-2026-39823
+CVE-2026-39825
+CVE-2026-42504

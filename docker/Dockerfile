@@ -1,6 +1,6 @@
-FROM golang:1.26.3-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b AS gh-builder
+FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS gh-builder
 
-ARG GH_VERSION=2.92.0
+ARG GH_VERSION=2.93.0
 ENV CGO_ENABLED=0
 
 RUN GOBIN=/out go install github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}
@@ -43,14 +43,14 @@ RUN gh --version
 
 # Download and install yq for YAML processing
 RUN set -eux; \
-    YQ_VERSION=v4.53.2; \
+    YQ_VERSION=v4.53.3; \
     YQ_ARCH="$(dpkg --print-architecture)"; \
     YQ_BINARY="yq_linux_${YQ_ARCH}"; \
     curl -sSL -o /usr/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}"; \
     if [ "$YQ_ARCH" = "amd64" ]; then \
-        YQ_SHA256="d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b"; \
+        YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"; \
     elif [ "$YQ_ARCH" = "arm64" ]; then \
-        YQ_SHA256="03061b2a50c7a498de2bbb92d7cb078ce433011f085a4994117c2726be4106ea"; \
+        YQ_SHA256="578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea"; \
     else \
         echo "Unsupported architecture for yq: $YQ_ARCH" >&2; \
         exit 1; \
