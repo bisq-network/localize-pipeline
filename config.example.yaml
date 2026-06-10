@@ -53,6 +53,17 @@ dry_run: false
 # only translate newly added keys by default and reduce translation churn.
 retranslate_identical_source_strings: false
 
+# Generated PR quality gate.
+# Calibrated from current bisq2 and bisq-mobile translation files:
+# - Existing raw source-identical values are common in payment/brand keys.
+# - The gate ignores exact glossary values, enum-like uppercase keys, URLs,
+#   placeholders, and non-linguistic tokens before applying these thresholds.
+quality_gate:
+  source_identical_min_block_count: 5
+  source_identical_max_count: 20
+  source_identical_max_ratio: 0.30
+  block_on_pipeline_warnings: true
+
 # Optional persistent per-key hash ledger used to detect source changes
 # without reprocessing already-stable translations.
 translation_key_ledger_file_path: "logs/translation_key_ledger.json"

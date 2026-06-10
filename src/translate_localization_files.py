@@ -923,11 +923,11 @@ def run_post_translation_validation(
 
     return is_valid
 
-def run_per_key_validation(
+def run_per_key_validation_with_summary(
         final_translations: Dict[str, str],
         source_translations: Dict[str, str],
         filename: str
-) -> Tuple[Dict[str, str], List[str]]:
+) -> Tuple[Dict[str, str], Dict[str, object]]:
     """
     Validates each translation key individually and selectively reverts failed keys.
 
@@ -948,6 +948,8 @@ def run_per_key_validation(
     """
     valid_translations = {}
     failed_keys = []
+    control_character_keys = []
+    placeholder_mismatch_keys = []
 
     for key, target_value in final_translations.items():
         source_value = source_translations.get(key, "")
@@ -955,6 +957,7 @@ def run_per_key_validation(
 
         if control_character_findings:
             failed_keys.append(key)
+            control_character_keys.append(key)
             logger.warning(
                 f"Key '{key}' failed validation in '{filename}' - reverting to source due to "
                 f"disallowed control character artifact(s): {', '.join(control_character_findings[:3])}"
@@ -972,6 +975,7 @@ def run_per_key_validation(
         else:
             # Validation failed - revert to source and track the failure
             failed_keys.append(key)
+            placeholder_mismatch_keys.append(key)
 
             # Extract placeholder details for detailed logging
             placeholder_regex = re.compile(r'\{([^{}]+)\}')
@@ -1002,7 +1006,31 @@ def run_per_key_validation(
     else:
         logger.info(f"All {len(final_translations)} keys passed validation in '{filename}'.")
 
-    return valid_translations, failed_keys
+    summary = {
+        "failed_keys": failed_keys,
+        "control_character_keys": control_character_keys,
+        "placeholder_mismatch_keys": placeholder_mismatch_keys,
+        "reverted_keys_count": len(failed_keys),
+        "control_character_findings_count": len(control_character_keys),
+        "placeholder_failures_count": len(placeholder_mismatch_keys),
+    }
+    return valid_translations, summary
+
+
+def run_per_key_validation(
+        final_translations: Dict[str, str],
+        source_translations: Dict[str, str],
+        filename: str
+) -> Tuple[Dict[str, str], List[str]]:
+    """
+    Backward-compatible wrapper returning only the failed key list.
+    """
+    valid_translations, summary = run_per_key_validation_with_summary(
+        final_translations,
+        source_translations,
+        filename
+    )
+    return valid_translations, list(summary["failed_keys"])
 
 async def translate_text_async(
         text: str,
@@ -1701,7 +1729,8 @@ def copy_files_to_translation_queue(
 async def process_translation_queue(
         translation_queue_folder: str,
         translated_queue_folder: str,
-        glossary_file_path: str
+        glossary_file_path: str,
+        validation_summary: Optional[Dict[str, Dict[str, object]]] = None
 ) -> Tuple[int, List[str], Dict[str, List[str]], int]:
     """
     Process all .properties files in the translation queue folder.
@@ -1972,11 +2001,14 @@ async def process_translation_queue(
                         f"(has_tokens={has_protection_tokens}, has_placeholders={has_real_placeholders})")
 
         # Validate each key individually and selectively revert failures
-        valid_translations, failed_keys = run_per_key_validation(
+        valid_translations, per_key_summary = run_per_key_validation_with_summary(
             final_translations,
             source_translations,
             translation_file
         )
+        failed_keys = list(per_key_summary["failed_keys"])
+        if validation_summary is not None:
+            validation_summary[translation_file] = per_key_summary
 
         # Apply validated translations (valid translations + reverted source for failed keys)
         for line in draft_lines:
@@ -2092,6 +2124,24 @@ def generate_translation_summary(
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
 
+def write_translation_validation_summary(
+    summary_path: str,
+    validation_files: Dict[str, Dict[str, object]],
+    skipped_files: Dict[str, List[str]],
+) -> None:
+    """Write structured validation data consumed by the PR quality gate."""
+    summary = {
+        "files": validation_files,
+        "pipeline_warnings": [
+            {"file": filename, "errors": errors}
+            for filename, errors in sorted(skipped_files.items())
+        ],
+    }
+    os.makedirs(os.path.dirname(summary_path) or '.', exist_ok=True)
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+
 def _build_pr_title(
     modules: List[str],
     new_keys: int,
@@ -2163,10 +2213,12 @@ async def main():
     logger.info(f"Copied changed files to '{TRANSLATION_QUEUE_FOLDER}' for processing.")
 
     # Step 4: Process the files in the translation queue.
+    validation_files: Dict[str, Dict[str, object]] = {}
     processed_files_count, processed_filenames, skipped_files, total_keys_translated = await process_translation_queue(
         translation_queue_folder=TRANSLATION_QUEUE_FOLDER,
         translated_queue_folder=TRANSLATED_QUEUE_FOLDER,
-        glossary_file_path=GLOSSARY_FILE_PATH
+        glossary_file_path=GLOSSARY_FILE_PATH,
+        validation_summary=validation_files
     )
     if processed_files_count > 0:
         logger.info(
@@ -2203,6 +2255,14 @@ async def main():
         updated_keys_count=0,
     )
     logger.info(f"Wrote translation summary to {summary_path}")
+
+    validation_summary_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'translation_validation_summary.json')
+    write_translation_validation_summary(
+        validation_summary_path,
+        validation_files=validation_files,
+        skipped_files=skipped_files,
+    )
+    logger.info(f"Wrote translation validation summary to {validation_summary_path}")
 
     # Step 7: Copy translated files back to the input folder, overwriting the originals.
     copy_translated_files_back(TRANSLATED_QUEUE_FOLDER, INPUT_FOLDER)

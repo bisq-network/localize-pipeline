@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
 import yaml
@@ -11,6 +11,15 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from src.logging_config import setup_logger
+
+
+@dataclass
+class QualityGateConfig:
+    """Configuration for generated translation PR quality gates."""
+    source_identical_min_block_count: int = 5
+    source_identical_max_count: int = 20
+    source_identical_max_ratio: float = 0.30
+    block_on_pipeline_warnings: bool = True
 
 
 @dataclass
@@ -49,6 +58,9 @@ class AppConfig:
 
     # OpenAI client
     openai_client: Optional[AsyncOpenAI]
+
+    # Generated PR quality gate
+    quality_gate: QualityGateConfig = field(default_factory=QualityGateConfig)
 
 
 def _compute_project_root() -> str:
@@ -238,6 +250,13 @@ def load_app_config() -> AppConfig:
     model_name = config.get('model_name', 'gpt-4')
     review_model_name = os.environ.get('REVIEW_MODEL_NAME', config.get('review_model_name', model_name))
     retranslate_identical_source_strings = bool(config.get('retranslate_identical_source_strings', False))
+    quality_gate_config = config.get('quality_gate', {}) or {}
+    quality_gate = QualityGateConfig(
+        source_identical_min_block_count=int(quality_gate_config.get('source_identical_min_block_count', 5)),
+        source_identical_max_count=int(quality_gate_config.get('source_identical_max_count', 20)),
+        source_identical_max_ratio=float(quality_gate_config.get('source_identical_max_ratio', 0.30)),
+        block_on_pipeline_warnings=bool(quality_gate_config.get('block_on_pipeline_warnings', True)),
+    )
 
     # Holistic review chunk size with environment override
     # Reduced default from 75 to 30 to handle content-heavy files better
@@ -282,5 +301,6 @@ def load_app_config() -> AppConfig:
         translated_queue_folder=translated_queue_folder,
         translation_key_ledger_file_path=translation_key_ledger_file_path,
         preserve_queues_for_debug=config.get('preserve_queues_for_debug', False),
-        openai_client=openai_client
+        openai_client=openai_client,
+        quality_gate=quality_gate
     )

@@ -5,7 +5,14 @@ Tests the ability to validate individual translation keys and selectively
 revert only failed keys to source instead of discarding entire translation files.
 """
 
-from src.translate_localization_files import run_per_key_validation
+import os
+
+os.environ.setdefault("OPENAI_API_KEY", "DUMMY_KEY_FOR_TESTING")
+
+from src.translate_localization_files import (
+    run_per_key_validation,
+    run_per_key_validation_with_summary,
+)
 
 
 class TestPerKeyValidation:
@@ -253,3 +260,30 @@ class TestPerKeyValidation:
 
         assert failed_keys == []
         assert valid_translations["learn.more"] == "Cómo funciona esto →"
+
+    def test_validation_summary_categorizes_reverted_keys(self):
+        source_translations = {
+            "bad.placeholder": "Amount {0}",
+            "bad.control": "How this works →",
+            "valid": "Simple text",
+        }
+        final_translations = {
+            "bad.placeholder": "Amount",
+            "bad.control": "How this works \\u007f2192",
+            "valid": "Texto simple",
+        }
+
+        valid_translations, summary = run_per_key_validation_with_summary(
+            final_translations,
+            source_translations,
+            "mobile_es.properties",
+        )
+
+        assert valid_translations["bad.placeholder"] == "Amount {0}"
+        assert valid_translations["bad.control"] == "How this works →"
+        assert summary["failed_keys"] == ["bad.placeholder", "bad.control"]
+        assert summary["placeholder_mismatch_keys"] == ["bad.placeholder"]
+        assert summary["control_character_keys"] == ["bad.control"]
+        assert summary["reverted_keys_count"] == 2
+        assert summary["placeholder_failures_count"] == 1
+        assert summary["control_character_findings_count"] == 1

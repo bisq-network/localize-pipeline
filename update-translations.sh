@@ -89,7 +89,7 @@ check_and_exit_if_blocked() {
 }
 
 # Check for required tools
-for tool in yq git tx curl; do
+for tool in yq git tx curl jq python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         log "Required tool '$tool' is not installed." "ERROR"
         exit 1
@@ -191,6 +191,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
         exit 1
     fi
 fi
+CONFIG_FILE=$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")
+export TRANSLATOR_CONFIG_FILE="$CONFIG_FILE"
 log "Using configuration file: $CONFIG_FILE"
 
 # Helper function to parse values from config.yaml robustly using yq
@@ -380,11 +382,15 @@ fi
 
 # Navigate back to the application's root directory to run the python script.
 # This ensures that the module path `src.translate_localization_files` is resolved correctly.
-if [ -d /app ]; then
-  cd /app
+APP_ROOT="/app"
+if [ ! -d "$APP_ROOT" ]; then
+  APP_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+fi
+if [ -d "$APP_ROOT" ]; then
+  cd "$APP_ROOT"
   log "Returned to the application root directory: $(pwd)"
 else
-  log "Warning: /app not found; staying in $(pwd) to run Python."
+  log "Warning: application root not found; staying in $(pwd) to run Python."
 fi
 
 # Step 3: Run the translation script
@@ -396,6 +402,9 @@ if [ -n "$TRANSLATION_FILTER_GLOB" ] && [ "$TRANSLATION_FILTER_GLOB" != "null" ]
 fi
 # Export filter glob if set (used by Python translation script)
 [ -n "$TRANSLATION_FILTER_GLOB" ] && [ "$TRANSLATION_FILTER_GLOB" != "null" ] && export TRANSLATION_FILTER_GLOB
+mkdir -p "$APP_ROOT/logs"
+VALIDATION_SUMMARY="$APP_ROOT/logs/translation_validation_summary.json"
+printf '%s\n' '{"files":{},"pipeline_warnings":[]}' > "$VALIDATION_SUMMARY"
 set +e
 python3 -u -m src.translate_localization_files
 PY_EXIT=$?
@@ -454,6 +463,7 @@ stage_and_submit_batch() {
     local branch="$1"
     local commit_msg="$2"
     local pr_title="$3"
+    local app_root="${APP_ROOT:-/app}"
 
     git checkout -B "$branch" "${REMOTE}/${DEFAULT_BRANCH}"
 
@@ -465,10 +475,44 @@ stage_and_submit_batch() {
         fi
     done
 
+    local report_dir="$app_root/logs"
+    local QUALITY_REPORT_JSON="$report_dir/translation_quality_report-${branch}.json"
+    local QUALITY_REPORT_MD="$report_dir/translation_quality_report-${branch}.md"
+    local VALIDATION_SUMMARY="$report_dir/translation_validation_summary.json"
+    local QUALITY_GATE_EXIT=0
+    set +e
+    (
+        cd "$app_root" && \
+        python3 -m src.translation_quality_gate \
+            --repo-root "$TARGET_PROJECT_ROOT" \
+            --input-folder "$ABSOLUTE_INPUT_FOLDER" \
+            --config "$CONFIG_FILE" \
+            --validation-summary "$VALIDATION_SUMMARY" \
+            --output-json "$QUALITY_REPORT_JSON" \
+            --output-markdown "$QUALITY_REPORT_MD" \
+            --changed-files "${BATCH_FILES[@]}"
+    )
+    QUALITY_GATE_EXIT=$?
+    set -e
+    if [ ! -s "$QUALITY_REPORT_JSON" ]; then
+        log "Translation quality gate did not produce a JSON report for branch '$branch'." "ERROR"
+        return 1
+    fi
+    if [ "$QUALITY_GATE_EXIT" -ne 0 ]; then
+        if jq -e '.blocking == true' "$QUALITY_REPORT_JSON" >/dev/null; then
+            log "Translation quality gate found blocking issues. Creating PR with failing status." "WARNING"
+        else
+            log "Translation quality gate failed unexpectedly." "ERROR"
+            return 1
+        fi
+    fi
+
     if ! commit_staged_changes "$commit_msg"; then
         log "Failed to commit changes for branch '$branch'." "ERROR"
         return 1
     fi
+    local commit_sha
+    commit_sha=$(git rev-parse HEAD)
 
     if ! git push origin "$branch"; then
         log "Failed to push branch '$branch' to origin." "ERROR"
@@ -484,8 +528,11 @@ stage_and_submit_batch() {
 
 This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT}\` fork and targets the \`$TARGET_BRANCH_FOR_PR\` branch on \`$UPSTREAM_REPO_NAME\`."
 
-    local SKIPPED_FILES_REPORT="/app/logs/skipped_files_report.log"
-    if [ -s "$SKIPPED_FILES_REPORT" ]; then
+    local SKIPPED_FILES_REPORT="$report_dir/skipped_files_report.log"
+    if [ -s "$QUALITY_REPORT_MD" ]; then
+        log "Found quality gate report. Prepending to PR description."
+        PR_BODY=$(printf "%s\n\n%s" "$(cat "$QUALITY_REPORT_MD")" "$PR_BODY")
+    elif [ -s "$SKIPPED_FILES_REPORT" ]; then
         log "Found skipped files report. Prepending to PR description."
         PR_BODY=$(printf "%s\n\n%s" "$(cat "$SKIPPED_FILES_REPORT")" "$PR_BODY")
     fi
@@ -503,6 +550,20 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
         log "Error: Failed to create pull request. Check gh cli auth and GITHUB_TOKEN." "ERROR"
         return 1
     fi
+
+    local quality_state
+    local quality_description
+    quality_state=$(jq -r '.status_state // "success"' "$QUALITY_REPORT_JSON")
+    quality_description=$(jq -r '.status_description // "Translation quality gate passed."' "$QUALITY_REPORT_JSON" | cut -c1-140)
+    if ! gh api "repos/$UPSTREAM_REPO_NAME/statuses/$commit_sha" \
+        -f state="$quality_state" \
+        -f context="translation-quality-gate" \
+        -f description="$quality_description" \
+        -f target_url="$PR_URL" >/dev/null; then
+        log "Failed to publish translation-quality-gate commit status." "ERROR"
+        return 1
+    fi
+    log "Published translation-quality-gate status: $quality_state"
 }
 
 # Check specifically for changes in translation files

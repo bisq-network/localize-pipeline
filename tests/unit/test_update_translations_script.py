@@ -36,3 +36,31 @@ def test_env_example_documents_max_files_per_pr_override():
     env_example = (REPO_ROOT / "docker" / ".env.example").read_text()
 
     assert "MAX_FILES_PER_PR=150" in env_example
+
+
+def test_generated_prs_publish_translation_quality_gate_status():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "src.translation_quality_gate" in script
+    assert "translation-quality-gate" in script
+    assert 'gh api "repos/$UPSTREAM_REPO_NAME/statuses/$commit_sha"' in script
+    assert "QUALITY_REPORT_MD" in script
+
+
+def test_config_file_is_normalized_before_late_quality_gate_call():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    normalize_index = script.index("CONFIG_FILE=$(cd")
+    quality_gate_index = script.index("src.translation_quality_gate")
+
+    assert normalize_index < quality_gate_index
+
+
+def test_validation_summary_is_reset_before_translation_script_runs():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    reset_index = script.index("translation_validation_summary.json")
+    python_index = script.index("python3 -u -m src.translate_localization_files")
+
+    assert reset_index < python_index
+    assert '{"files":{},"pipeline_warnings":[]}' in script

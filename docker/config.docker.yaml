@@ -8,6 +8,11 @@ translated_queue_folder: 'translated_queue' # Relative to /app
 dry_run: false
 retranslate_identical_source_strings: false
 translation_key_ledger_file_path: "/app/logs/translation_key_ledger.json"
+quality_gate:
+  source_identical_min_block_count: 5
+  source_identical_max_count: 20
+  source_identical_max_ratio: 0.30
+  block_on_pipeline_warnings: true
 supported_locales:
   - code: "cs"
     name: "Czech"

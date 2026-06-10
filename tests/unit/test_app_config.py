@@ -56,6 +56,12 @@ class TestLoadAppConfig:
             "dry_run": True,
             "retranslate_identical_source_strings": True,
             "translation_key_ledger_file_path": "/tmp/test-ledger.json",
+            "quality_gate": {
+                "source_identical_min_block_count": 6,
+                "source_identical_max_count": 25,
+                "source_identical_max_ratio": 0.4,
+                "block_on_pipeline_warnings": False,
+            },
             "supported_locales": [
                 {"code": "de", "name": "German"},
                 {"code": "es", "name": "Spanish"}
@@ -80,6 +86,10 @@ class TestLoadAppConfig:
         assert config.dry_run is True
         assert config.retranslate_identical_source_strings is True
         assert config.translation_key_ledger_file_path == "/tmp/test-ledger.json"
+        assert config.quality_gate.source_identical_min_block_count == 6
+        assert config.quality_gate.source_identical_max_count == 25
+        assert config.quality_gate.source_identical_max_ratio == 0.4
+        assert config.quality_gate.block_on_pipeline_warnings is False
         assert config.language_codes == {"de": "German", "es": "Spanish"}
         assert config.name_to_code == {"german": "de", "spanish": "es"}
 
@@ -102,6 +112,10 @@ class TestLoadAppConfig:
         assert config.max_concurrent_api_calls == 1
         assert config.process_all_files is False
         assert config.retranslate_identical_source_strings is False
+        assert config.quality_gate.source_identical_min_block_count == 5
+        assert config.quality_gate.source_identical_max_count == 20
+        assert config.quality_gate.source_identical_max_ratio == 0.30
+        assert config.quality_gate.block_on_pipeline_warnings is True
         assert config.translation_key_ledger_file_path == os.path.join(
             config.project_root, "logs", "translation_key_ledger.json"
         )
