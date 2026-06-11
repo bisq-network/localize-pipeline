@@ -61,6 +61,9 @@ class TestLoadAppConfig:
                 "source_identical_max_count": 25,
                 "source_identical_max_ratio": 0.4,
                 "block_on_pipeline_warnings": False,
+                "block_on_semantic_qa_findings": "false",
+                "block_on_semantic_qa_warnings": "yes",
+                "semantic_qa_audit_scope": "all",
             },
             "supported_locales": [
                 {"code": "de", "name": "German"},
@@ -90,6 +93,9 @@ class TestLoadAppConfig:
         assert config.quality_gate.source_identical_max_count == 25
         assert config.quality_gate.source_identical_max_ratio == 0.4
         assert config.quality_gate.block_on_pipeline_warnings is False
+        assert config.quality_gate.block_on_semantic_qa_findings is False
+        assert config.quality_gate.block_on_semantic_qa_warnings is True
+        assert config.quality_gate.semantic_qa_audit_scope == "all"
         assert config.language_codes == {"de": "German", "es": "Spanish"}
         assert config.name_to_code == {"german": "de", "spanish": "es"}
 
@@ -116,6 +122,9 @@ class TestLoadAppConfig:
         assert config.quality_gate.source_identical_max_count == 20
         assert config.quality_gate.source_identical_max_ratio == 0.30
         assert config.quality_gate.block_on_pipeline_warnings is True
+        assert config.quality_gate.block_on_semantic_qa_findings is True
+        assert config.quality_gate.block_on_semantic_qa_warnings is False
+        assert config.quality_gate.semantic_qa_audit_scope == "changed"
         assert config.translation_key_ledger_file_path == os.path.join(
             config.project_root, "logs", "translation_key_ledger.json"
         )

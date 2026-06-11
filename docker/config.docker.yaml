@@ -13,6 +13,35 @@ quality_gate:
   source_identical_max_count: 20
   source_identical_max_ratio: 0.30
   block_on_pipeline_warnings: true
+  block_on_semantic_qa_findings: true
+  block_on_semantic_qa_warnings: false
+  semantic_qa_audit_scope: "changed"
+semantic_review:
+  enabled: true
+  model: "gpt-5.4-mini"
+semantic_quality_rules:
+  - id: "trade-history-traders-label"
+    message: "Fully localize the Trade Details traders/role label; do not retain the English term 'Traders'."
+    locales: ["*"]
+    excluded_locales: ["en", "pcm"]
+    keys: ["mobile.tradeHistory.details.tradersAndRole"]
+    forbidden_target_regex: '\bTraders\b'
+    severity: "error"
+    source: "bisq-mobile#1478 CodeRabbit"
+  - id: "af-trade-history-counts-trades"
+    message: "Afrikaans trade-count labels must count trades, not traders."
+    locales: ["af_ZA"]
+    keys: ["mobile.tradeHistory.count.many", "mobile.tradeHistory.count.filtered"]
+    forbidden_target_regex: '\bhandelaars\b'
+    severity: "error"
+    source: "bisq-mobile#1478 CodeRabbit"
+  - id: "vi-clearnet-clear-network-address"
+    message: "Vietnamese networkAddress.clear must describe a clearnet/open network address, not a delete action."
+    locales: ["vi"]
+    keys: ["mobile.tradeHistory.details.networkAddress.clear"]
+    forbidden_target_regex: '^xóa\b'
+    severity: "error"
+    source: "bisq-mobile#1478 CodeRabbit"
 supported_locales:
   - code: "cs"
     name: "Czech"
@@ -145,6 +174,7 @@ style_rules:
   es:
     - "When referring to 'billetera' (wallet), use feminine pronouns (e.g., 'Configúrala', 'restáurala')."
     - "Ensure questions that open with '¿' are properly closed with '?'."
+    - "Fully localize mobile.tradeHistory.details.tradersAndRole; use 'Comerciantes / Rol', not 'Traders / Rol'."
   et:
     - "Use standard Estonian throughout."
     - "Maintain formal and polite tone appropriate for financial applications."
@@ -154,6 +184,7 @@ style_rules:
   fr:
     - "Use formal 'vous' form for user address."
     - "When referring to 'portefeuille' (wallet), use masculine pronouns."
+    - "Fully localize mobile.tradeHistory.details.tradersAndRole; use 'Commerçants / Rôle', not 'Traders / Rôle'."
   ga:
     - "Use standard Irish (Gaeilge) throughout."
     - "Maintain formal and polite tone appropriate for financial applications."
@@ -299,6 +330,7 @@ style_rules:
   af_ZA:
     - "Use standard Afrikaans grammar and spelling throughout."
     - "Preserve the Afrikaans indefinite article apostrophe: write 'n, including in parenthesized phrases such as ('n per-installasie identifiseerder), never (n ...)."
+    - "For mobile.tradeHistory.count.many and mobile.tradeHistory.count.filtered, count trades ('handel'), not traders ('handelaars')."
   am:
     - "Use Ge'ez/Ethiopic script (Amharic alphabet) throughout."
     - "Maintain formal and polite tone appropriate for financial applications."
@@ -397,6 +429,7 @@ style_rules:
     - "Use formal address forms and respectful language for user interactions."
     - "Technical crypto terms may be transliterated or kept in English when no established Vietnamese term exists."
     - "Ensure consistent transliteration and terminology across the application."
+    - "For mobile.tradeHistory.details.networkAddress.clear, 'clear' means clearnet/open network, not delete/clear action; use 'Địa chỉ mạng công khai: {0}'."
   pt_BR: []
   zh-Hans:
     - "Use Simplified Chinese characters (mainland China standard)."

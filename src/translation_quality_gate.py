@@ -14,6 +14,18 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import yaml
 
 from src.properties_parser import parse_properties_file
+from src.semantic_quality import (
+    SemanticFinding,
+    SemanticQAStats,
+    SemanticRule,
+    analyze_all_translation_entries,
+    analyze_translation_changes,
+    iter_added_properties_entries as _iter_added_properties_entries,
+    iter_translation_changes_from_diff,
+    load_semantic_rules,
+    normalize_value,
+    source_filename_for_locale_file,
+)
 from src.translation_validator import find_disallowed_control_characters
 
 
@@ -25,6 +37,9 @@ class QualityGateConfig:
     source_identical_max_count: int = 20
     source_identical_max_ratio: float = 0.30
     block_on_pipeline_warnings: bool = True
+    block_on_semantic_qa_findings: bool = True
+    block_on_semantic_qa_warnings: bool = False
+    semantic_qa_audit_scope: str = "changed"
 
 
 @dataclass
@@ -58,10 +73,6 @@ _TOKEN_PATTERNS = [
 _ENUM_LIKE_KEY = re.compile(r"^[A-Z0-9_.$-]+$")
 
 
-def normalize_value(value: str) -> str:
-    return (value or "").strip()
-
-
 def is_expected_source_identical(key: str, value: str, brand_glossary: Iterable[str]) -> bool:
     """Return true for values that are commonly and legitimately untranslated."""
     normalized = normalize_value(value)
@@ -75,54 +86,6 @@ def is_expected_source_identical(key: str, value: str, brand_glossary: Iterable[
     if not any(character.isalpha() for character in normalized):
         return True
     return any(pattern.match(normalized) for pattern in _TOKEN_PATTERNS)
-
-
-def source_filename_for_locale_file(filename: str, locale_codes: Sequence[str]) -> Optional[str]:
-    if not filename.endswith(".properties"):
-        return None
-    base = filename[: -len(".properties")]
-    for code in sorted(locale_codes, key=len, reverse=True):
-        suffix = f"_{code}"
-        if base.endswith(suffix):
-            return f"{base[:-len(suffix)]}.properties"
-    return None
-
-
-def _extract_properties_entry(diff_line: str) -> Optional[Tuple[str, str]]:
-    stripped = diff_line.strip()
-    if not stripped or stripped.startswith(("#", "!")):
-        return None
-
-    escaped = False
-    for index, character in enumerate(diff_line):
-        if character == "\\":
-            escaped = not escaped
-            continue
-        if character in ("=", ":") and not escaped:
-            key = diff_line[:index].strip()
-            value = diff_line[index + 1 :].strip()
-            return (key, value) if key else None
-        escaped = False
-    return None
-
-
-def _iter_added_properties_entries(diff_text: str) -> Iterable[Tuple[str, str, str]]:
-    current_file: Optional[str] = None
-    for line in diff_text.splitlines():
-        if line.startswith("+++ b/"):
-            current_file = line[len("+++ b/") :]
-            continue
-        if line.startswith("+++ /dev/null"):
-            current_file = None
-            continue
-        if not line.startswith("+") or line.startswith("+++"):
-            continue
-        if not current_file or not current_file.endswith(".properties"):
-            continue
-        entry = _extract_properties_entry(line[1:])
-        if entry:
-            key, value = entry
-            yield current_file, key, value
 
 
 def _relpath(path: str, start: str) -> str:
@@ -207,7 +170,35 @@ def analyze_source_identical_changes(
     return stats
 
 
-def load_quality_gate_config(config_path: str) -> Tuple[QualityGateConfig, List[str], List[str]]:
+def analyze_semantic_qa_changes(
+    diff_text: str,
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    brand_glossary: Iterable[str] = (),
+    semantic_rules: Sequence[SemanticRule] = (),
+    examples_limit: int = 10,
+) -> SemanticQAStats:
+    """Scan changed translations for configured semantic regressions."""
+    changes = list(
+        iter_translation_changes_from_diff(
+            diff_text=diff_text,
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+        )
+    )
+    return analyze_translation_changes(
+        changes=changes,
+        semantic_rules=semantic_rules,
+        brand_glossary=brand_glossary,
+        examples_limit=examples_limit,
+    )
+
+
+def load_quality_gate_config(
+    config_path: str,
+) -> Tuple[QualityGateConfig, List[str], List[str], List[SemanticRule]]:
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
 
@@ -226,9 +217,19 @@ def load_quality_gate_config(config_path: str) -> Tuple[QualityGateConfig, List[
             source_identical_max_count=int(quality_gate.get("source_identical_max_count", 20)),
             source_identical_max_ratio=float(quality_gate.get("source_identical_max_ratio", 0.30)),
             block_on_pipeline_warnings=bool(quality_gate.get("block_on_pipeline_warnings", True)),
+            block_on_semantic_qa_findings=bool(
+                quality_gate.get("block_on_semantic_qa_findings", True)
+            ),
+            block_on_semantic_qa_warnings=bool(
+                quality_gate.get("block_on_semantic_qa_warnings", False)
+            ),
+            semantic_qa_audit_scope=str(
+                quality_gate.get("semantic_qa_audit_scope", "changed")
+            ),
         ),
         locales,
         brand_glossary,
+        load_semantic_rules(raw_config.get("semantic_quality_rules", [])),
     )
 
 
@@ -308,8 +309,59 @@ def _filter_pipeline_warnings(
     ]
 
 
+def _semantic_review_stats_from_validation(
+    validation_summary: Dict[str, Any],
+    changed_files: Sequence[str],
+    input_folder: str,
+) -> SemanticQAStats:
+    changed_relative_files = _changed_files_relative_to_input(changed_files, input_folder)
+    findings: List[SemanticFinding] = []
+    for raw_finding in validation_summary.get("semantic_review_findings", []):
+        if not isinstance(raw_finding, dict):
+            continue
+        filename = str(raw_finding.get("file", ""))
+        if changed_relative_files and not _file_matches_changed_files(filename, changed_relative_files):
+            continue
+        severity = str(raw_finding.get("severity", "warning")).lower()
+        if severity not in {"error", "warning"}:
+            severity = "warning"
+        findings.append(
+            SemanticFinding(
+                file=filename,
+                key=str(raw_finding.get("key", "")),
+                value=str(raw_finding.get("value", raw_finding.get("new_value", ""))),
+                reason=str(raw_finding.get("reason", "")),
+                severity=severity,
+                rule_id=str(raw_finding.get("rule_id", "ai-review")),
+                source=str(raw_finding.get("source", "ai-review")),
+                suggested_value=(
+                    str(raw_finding["suggested_value"])
+                    if raw_finding.get("suggested_value")
+                    else None
+                ),
+            )
+        )
+    return SemanticQAStats.from_findings(findings)
+
+
+def _merge_semantic_stats(
+    first: Optional[SemanticQAStats],
+    second: Optional[SemanticQAStats],
+    examples_limit: int = 10,
+) -> SemanticQAStats:
+    first = first or SemanticQAStats()
+    second = second or SemanticQAStats()
+    return SemanticQAStats(
+        findings_count=first.findings_count + second.findings_count,
+        errors_count=first.errors_count + second.errors_count,
+        warnings_count=first.warnings_count + second.warnings_count,
+        examples=[*first.examples, *second.examples][:examples_limit],
+    )
+
+
 def build_quality_gate_report(
     source_stats: SourceIdenticalStats,
+    semantic_stats: Optional[SemanticQAStats],
     validation_summary: Dict[str, Any],
     changed_files: Sequence[str],
     input_folder: str,
@@ -318,6 +370,10 @@ def build_quality_gate_report(
     validation_totals = _aggregate_validation(validation_summary, changed_files, input_folder)
     pipeline_warnings = _filter_pipeline_warnings(validation_summary, changed_files, input_folder)
     blocking_reasons: List[str] = []
+    semantic_stats = _merge_semantic_stats(
+        semantic_stats,
+        _semantic_review_stats_from_validation(validation_summary, changed_files, input_folder),
+    )
 
     source_identical_blocking = (
         source_stats.unexpected_source_identical_count >= config.source_identical_min_block_count
@@ -334,6 +390,11 @@ def build_quality_gate_report(
     if config.block_on_pipeline_warnings and pipeline_warnings:
         blocking_reasons.append("Translation pipeline warnings require manual resolution.")
 
+    if config.block_on_semantic_qa_findings and semantic_stats.errors_count:
+        blocking_reasons.append("Semantic translation QA findings require manual resolution.")
+    elif config.block_on_semantic_qa_warnings and semantic_stats.warnings_count:
+        blocking_reasons.append("Semantic translation QA warnings require manual resolution.")
+
     blocking = bool(blocking_reasons)
     description = (
         blocking_reasons[0]
@@ -348,6 +409,7 @@ def build_quality_gate_report(
         "status_state": "failure" if blocking else "success",
         "status_description": description,
         "source_identical": source_stats.to_dict(),
+        "semantic_qa": semantic_stats.to_dict(),
         "validation": validation_totals,
         "pipeline_warnings_count": len(pipeline_warnings),
         "pipeline_warnings": pipeline_warnings,
@@ -366,6 +428,7 @@ def _truncate(value: str, limit: int = 100) -> str:
 
 def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
     source = report["source_identical"]
+    semantic_qa = report.get("semantic_qa", {"findings_count": 0, "examples": []})
     validation = report["validation"]
     lines = ["## Translation Validation Summary", ""]
 
@@ -393,6 +456,12 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
                 "| Expected source-identical values ignored | "
                 f"{source['expected_source_identical_count']} |"
             ),
+            (
+                "| Semantic QA findings | "
+                f"{semantic_qa['findings_count']} "
+                f"({semantic_qa.get('errors_count', 0)} errors, "
+                f"{semantic_qa.get('warnings_count', 0)} warnings) |"
+            ),
             f"| Reverted keys | {validation['reverted_keys_count']} |",
             f"| Control-character findings | {validation['control_character_findings_count']} |",
             f"| Placeholder failures | {validation['placeholder_failures_count']} |",
@@ -407,6 +476,16 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
         for example in source["examples"]:
             lines.append(
                 f"- `{example['file']}` `{example['key']}` = `{_truncate(example['value'])}`"
+            )
+        lines.append("")
+
+    if semantic_qa.get("examples"):
+        lines.append("### Semantic QA Examples")
+        lines.append("")
+        for example in semantic_qa["examples"]:
+            lines.append(
+                f"- `{example['file']}` `{example['key']}`: "
+                f"{example['reason']} Value: `{_truncate(example['value'])}`"
             )
         lines.append("")
 
@@ -462,12 +541,13 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--output-markdown", required=True)
     parser.add_argument("--changed-files", nargs="+", required=True)
+    parser.add_argument("--audit-scope", choices=["changed", "all"], default=None)
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    config, locale_codes, brand_glossary = load_quality_gate_config(args.config)
+    config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(args.config)
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
     source_stats = analyze_source_identical_changes(
         diff_text=diff_text,
@@ -476,8 +556,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         locale_codes=locale_codes,
         brand_glossary=brand_glossary,
     )
+    audit_scope = args.audit_scope or config.semantic_qa_audit_scope
+    if audit_scope == "all":
+        semantic_stats = analyze_all_translation_entries(
+            repo_root=args.repo_root,
+            input_folder=args.input_folder,
+            locale_codes=locale_codes,
+            brand_glossary=brand_glossary,
+            semantic_rules=semantic_rules,
+        )
+    else:
+        semantic_stats = analyze_semantic_qa_changes(
+            diff_text=diff_text,
+            repo_root=args.repo_root,
+            input_folder=args.input_folder,
+            locale_codes=locale_codes,
+            brand_glossary=brand_glossary,
+            semantic_rules=semantic_rules,
+        )
     report = build_quality_gate_report(
         source_stats=source_stats,
+        semantic_stats=semantic_stats,
         validation_summary=load_validation_summary(args.validation_summary),
         changed_files=args.changed_files,
         input_folder=args.input_folder,

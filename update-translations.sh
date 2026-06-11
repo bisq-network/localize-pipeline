@@ -479,6 +479,24 @@ stage_and_submit_batch() {
     local QUALITY_REPORT_JSON="$report_dir/translation_quality_report-${branch}.json"
     local QUALITY_REPORT_MD="$report_dir/translation_quality_report-${branch}.md"
     local VALIDATION_SUMMARY="$report_dir/translation_validation_summary.json"
+    local QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-changed}"
+    local SEMANTIC_REVIEW_EXIT=0
+    set +e
+    (
+        cd "$app_root" && \
+        python3 -m src.translation_semantic_reviewer \
+            --repo-root "$TARGET_PROJECT_ROOT" \
+            --input-folder "$ABSOLUTE_INPUT_FOLDER" \
+            --config "$CONFIG_FILE" \
+            --validation-summary "$VALIDATION_SUMMARY" \
+            --changed-files "${BATCH_FILES[@]}"
+    )
+    SEMANTIC_REVIEW_EXIT=$?
+    set -e
+    if [ "$SEMANTIC_REVIEW_EXIT" -ne 0 ]; then
+        log "Semantic AI review failed; continuing with deterministic quality gate only." "WARNING"
+    fi
+
     local QUALITY_GATE_EXIT=0
     set +e
     (
@@ -490,6 +508,7 @@ stage_and_submit_batch() {
             --validation-summary "$VALIDATION_SUMMARY" \
             --output-json "$QUALITY_REPORT_JSON" \
             --output-markdown "$QUALITY_REPORT_MD" \
+            --audit-scope "$QUALITY_AUDIT_SCOPE" \
             --changed-files "${BATCH_FILES[@]}"
     )
     QUALITY_GATE_EXIT=$?
@@ -553,9 +572,11 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
 
     local quality_state
     local quality_description
+    local status_repo
     quality_state=$(jq -r '.status_state // "success"' "$QUALITY_REPORT_JSON")
     quality_description=$(jq -r '.status_description // "Translation quality gate passed."' "$QUALITY_REPORT_JSON" | cut -c1-140)
-    if ! gh api "repos/$UPSTREAM_REPO_NAME/statuses/$commit_sha" \
+    status_repo="${FORK_OWNER}/${FORK_REPO_NAME_SHORT}"
+    if ! gh api "repos/$status_repo/statuses/$commit_sha" \
         -f state="$quality_state" \
         -f context="translation-quality-gate" \
         -f description="$quality_description" \
@@ -563,7 +584,30 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
         log "Failed to publish translation-quality-gate commit status." "ERROR"
         return 1
     fi
-    log "Published translation-quality-gate status: $quality_state"
+    local published_quality_state=""
+    local verify_attempt
+    local verify_delay=2
+    for verify_attempt in 1 2 3 4 5; do
+        published_quality_state=$(gh api "repos/$status_repo/commits/$commit_sha/status" \
+            --jq '[(.statuses[] | select(.context == "translation-quality-gate"))][0].state // ""' \
+            2>/dev/null || true)
+        if [ "$published_quality_state" = "$quality_state" ]; then
+            break
+        fi
+        if [ "$verify_attempt" -lt 5 ]; then
+            sleep "$verify_delay"
+            verify_delay=$((verify_delay * 2))
+        fi
+    done
+    if [ -z "$published_quality_state" ]; then
+        log "Failed to verify translation-quality-gate commit status." "ERROR"
+        return 1
+    fi
+    if [ "$published_quality_state" != "$quality_state" ]; then
+        log "translation-quality-gate status verification mismatch: expected '$quality_state', got '${published_quality_state:-missing}'." "ERROR"
+        return 1
+    fi
+    log "Published translation-quality-gate status on $status_repo: $quality_state"
 }
 
 # Check specifically for changes in translation files
@@ -584,8 +628,9 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
             log "'origin' remote not found; cannot push PR branch." "ERROR"
             exit 1
         fi
-        FORK_OWNER=$(git remote get-url origin | sed -E 's#.*[:/](.+)/[^/]+(\.git)?$#\1#')
-        FORK_REPO_NAME_SHORT=$(git remote get-url origin | sed -E 's#.*/([^/]+)(\.git)?$#\1#')
+        origin_url=$(git remote get-url origin)
+        FORK_OWNER=$(echo "$origin_url" | sed -E 's#^.*[:/]([^/:]+)/[^/]+$#\1#')
+        FORK_REPO_NAME_SHORT=$(echo "$origin_url" | sed -E 's#^.*[:/]([^/]+)$#\1#; s#\.git$##')
         if [ -z "$FORK_OWNER" ]; then
             log "Error: Could not determine the fork owner from the 'origin' remote URL." "ERROR"
             exit 1

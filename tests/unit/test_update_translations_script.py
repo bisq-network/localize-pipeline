@@ -42,9 +42,30 @@ def test_generated_prs_publish_translation_quality_gate_status():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     assert "src.translation_quality_gate" in script
+    assert "src.translation_semantic_reviewer" in script
+    assert 'QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-changed}"' in script
+    assert '--audit-scope "$QUALITY_AUDIT_SCOPE"' in script
     assert "translation-quality-gate" in script
-    assert 'gh api "repos/$UPSTREAM_REPO_NAME/statuses/$commit_sha"' in script
+    assert 'status_repo="${FORK_OWNER}/${FORK_REPO_NAME_SHORT}"' in script
+    assert 'gh api "repos/$status_repo/statuses/$commit_sha"' in script
+    assert 'gh api "repos/$status_repo/commits/$commit_sha/status"' in script
+    assert "for verify_attempt in 1 2 3 4 5" in script
+    assert 'sleep "$verify_delay"' in script
+    assert 'verify_delay=$((verify_delay * 2))' in script
+    assert "2>/dev/null || true" in script
     assert "QUALITY_REPORT_MD" in script
+
+
+def test_fork_repo_name_short_strips_git_suffix_before_status_api():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    normalize_index = script.index('FORK_REPO_NAME_SHORT=$(echo "$origin_url"')
+    submit_index = script.index('if ! stage_and_submit_batch "$BRANCH_NAME"')
+
+    assert "origin_url=$(git remote get-url origin)" in script
+    assert 's#\\.git$##' in script
+    assert 'status_repo="${FORK_OWNER}/${FORK_REPO_NAME_SHORT}"' in script
+    assert normalize_index < submit_index
 
 
 def test_config_file_is_normalized_before_late_quality_gate_call():
