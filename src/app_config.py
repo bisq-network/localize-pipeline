@@ -4,13 +4,14 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from src.logging_config import setup_logger
+from src.semantic_quality import normalize_retained_source_word_allowlist
 
 
 @dataclass
@@ -23,6 +24,7 @@ class QualityGateConfig:
     block_on_semantic_qa_findings: bool = True
     block_on_semantic_qa_warnings: bool = False
     semantic_qa_audit_scope: str = "changed"
+    retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -281,6 +283,9 @@ def load_app_config() -> AppConfig:
             default=False,
         ),
         semantic_qa_audit_scope=str(quality_gate_config.get('semantic_qa_audit_scope', 'changed')),
+        retained_source_word_allowlist=normalize_retained_source_word_allowlist(
+            quality_gate_config.get('retained_source_word_allowlist', {})
+        ),
     )
 
     # Holistic review chunk size with environment override

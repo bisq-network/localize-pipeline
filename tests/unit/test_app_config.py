@@ -64,6 +64,10 @@ class TestLoadAppConfig:
                 "block_on_semantic_qa_findings": "false",
                 "block_on_semantic_qa_warnings": "yes",
                 "semantic_qa_audit_scope": "all",
+                "retained_source_word_allowlist": {
+                    "fr": ["information", "message"],
+                    "it": "reporting",
+                },
             },
             "supported_locales": [
                 {"code": "de", "name": "German"},
@@ -96,6 +100,10 @@ class TestLoadAppConfig:
         assert config.quality_gate.block_on_semantic_qa_findings is False
         assert config.quality_gate.block_on_semantic_qa_warnings is True
         assert config.quality_gate.semantic_qa_audit_scope == "all"
+        assert config.quality_gate.retained_source_word_allowlist == {
+            "fr": ("information", "message"),
+            "it": ("reporting",),
+        }
         assert config.language_codes == {"de": "German", "es": "Spanish"}
         assert config.name_to_code == {"german": "de", "spanish": "es"}
 
@@ -125,6 +133,7 @@ class TestLoadAppConfig:
         assert config.quality_gate.block_on_semantic_qa_findings is True
         assert config.quality_gate.block_on_semantic_qa_warnings is False
         assert config.quality_gate.semantic_qa_audit_scope == "changed"
+        assert config.quality_gate.retained_source_word_allowlist == {}
         assert config.translation_key_ledger_file_path == os.path.join(
             config.project_root, "logs", "translation_key_ledger.json"
         )

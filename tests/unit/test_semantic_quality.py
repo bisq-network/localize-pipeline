@@ -13,7 +13,11 @@ from src.translation_quality_gate import (
     analyze_semantic_qa_changes,
     analyze_source_identical_changes,
     build_quality_gate_report,
+    load_quality_gate_config,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_properties(path: Path, entries: dict[str, str]) -> None:
@@ -89,6 +93,57 @@ def test_retained_source_word_findings_are_warning_only_by_default():
     assert len(findings) == 1
     assert findings[0].severity == "warning"
     assert findings[0].rule_id == "retained-source-word"
+
+
+def test_retained_source_word_allowlist_is_locale_scoped():
+    changes = [
+        TranslationChange(
+            file="resources/mobile_es.properties",
+            locale_code="es",
+            key="mobile.settings.analytics.info.noPii",
+            source_value="No personal information, accounts, or device IDs",
+            old_value=None,
+            new_value="No se recopila información personal, cuentas o IDs de dispositivo",
+        ),
+        TranslationChange(
+            file="resources/mobile_fr.properties",
+            locale_code="fr",
+            key="mobile.settings.analytics.info.noPii",
+            source_value="No personal information, accounts, or device IDs",
+            old_value=None,
+            new_value="Aucune information personnelle, aucun compte ni identifiant d'appareil",
+        ),
+        TranslationChange(
+            file="resources/mobile_it.properties",
+            locale_code="it",
+            key="mobile.settings.analytics.title",
+            source_value="Crash & usage reporting",
+            old_value=None,
+            new_value="Reporting di crash e utilizzo",
+        ),
+        TranslationChange(
+            file="resources/mobile_de.properties",
+            locale_code="de",
+            key="mobile.settings.analytics.info.noPii",
+            source_value="No personal information, accounts, or device IDs",
+            old_value=None,
+            new_value="Keine personal Daten",
+        ),
+    ]
+
+    findings = evaluate_retained_source_words(
+        changes=changes,
+        brand_glossary=[],
+        retained_source_word_allowlist={
+            "es": ["personal"],
+            "fr": ["information", "message", "messages"],
+            "it": ["reporting"],
+        },
+    )
+
+    assert len(findings) == 1
+    assert findings[0].file == "resources/mobile_de.properties"
+    assert "personal" in findings[0].reason
 
 
 def test_semantic_warnings_do_not_block_unless_configured(tmp_path):
@@ -214,3 +269,262 @@ def test_feedback_rules_load_review_source_metadata():
 
     assert findings[0].rule_id == "vi-clearnet-clear"
     assert findings[0].source == "bisq-mobile#1478 CodeRabbit"
+
+
+def test_configured_semantic_rules_catch_recent_mobile_review_nits():
+    rules = load_semantic_rules(
+        [
+            {
+                "id": "analytics-cta-truncated-reporting",
+                "message": "Analytics CTA contains truncated English.",
+                "locales": ["*"],
+                "keys": ["*"],
+                "forbidden_target_regex": r"\breportin\b",
+                "severity": "error",
+            },
+            {
+                "id": "analytics-cta-reporting-loanword",
+                "message": "Fully localize the analytics CTA.",
+                "locales": ["fr", "it"],
+                "keys": ["mobile.welcomeCarousel.analytics.action"],
+                "forbidden_target_regex": r"\breporting\b",
+                "severity": "error",
+            },
+            {
+                "id": "it-analytics-self-hosted",
+                "message": "Italian analytics retention copy must localize self-hosted.",
+                "locales": ["it"],
+                "keys": ["*"],
+                "forbidden_target_regex": r"\bself-hosted\b",
+                "severity": "error",
+            },
+            {
+                "id": "fr-analytics-no-pii-negation",
+                "message": "French no-PII copy must keep parallel negation.",
+                "locales": ["fr"],
+                "keys": ["mobile.settings.analytics.info.noPii"],
+                "forbidden_target_regex": r"^Aucune information personnelle,\s*comptes\b",
+                "severity": "error",
+            },
+        ]
+    )
+
+    findings = evaluate_semantic_rules(
+        changes=[
+            TranslationChange(
+                file="mobile_fr.properties",
+                locale_code="fr",
+                key="mobile.settings.analytics.info.noPii",
+                source_value="No personal information, accounts, or device IDs",
+                old_value=None,
+                new_value="Aucune information personnelle, comptes ou identifiants d'appareil",
+            ),
+            TranslationChange(
+                file="mobile_fr.properties",
+                locale_code="fr",
+                key="mobile.welcomeCarousel.analytics.action",
+                source_value="Enable reporting",
+                old_value=None,
+                new_value="Activer le reporting",
+            ),
+            TranslationChange(
+                file="mobile_it.properties",
+                locale_code="it",
+                key="mobile.welcomeCarousel.analytics.action",
+                source_value="Enable reporting",
+                old_value=None,
+                new_value="Abilita il reporting",
+            ),
+            TranslationChange(
+                file="mobile_it.properties",
+                locale_code="it",
+                key="mobile.settings.analytics.info.retention",
+                source_value="Automatically deleted after 90 days on a self-hosted server",
+                old_value=None,
+                new_value="Eliminato automaticamente dopo 90 giorni su un server self-hosted",
+            ),
+            TranslationChange(
+                file="mobile_pcm.properties",
+                locale_code="pcm",
+                key="mobile.welcomeCarousel.analytics.action",
+                source_value="Enable reporting",
+                old_value=None,
+                new_value="Enable reportin",
+            ),
+        ],
+        rules=rules,
+    )
+
+    assert {finding.rule_id for finding in findings} == {
+        "analytics-cta-truncated-reporting",
+        "analytics-cta-reporting-loanword",
+        "it-analytics-self-hosted",
+        "fr-analytics-no-pii-negation",
+    }
+    assert sum(1 for finding in findings if finding.rule_id == "analytics-cta-reporting-loanword") == 2
+
+
+def test_configured_semantic_rules_catch_bisq2_review_nits():
+    _, _, _, rules = load_quality_gate_config(str(PROJECT_ROOT / "config.example.yaml"))
+
+    findings = evaluate_semantic_rules(
+        changes=[
+            TranslationChange(
+                file="application_el.properties",
+                locale_code="el",
+                key="tac.risk.noGuarantees.body",
+                source_value="Dispute resolution may help in some situations, but recovery, refund, or compensation cannot be guaranteed.",
+                old_value=None,
+                new_value="Η αποκατάσταση, η αποζημίωση ή η αποζημίωση δεν μπορούν να εγγυηθούν.",
+            ),
+            TranslationChange(
+                file="application_fi.properties",
+                locale_code="fi",
+                key="tac.legal.section3.body",
+                source_value="Users are responsible for independently verifying all information before relying on it.",
+                old_value=None,
+                new_value="Käyttäjät ovat vastuussa kaikentietojen itsenäisestä vahvistamisesta.",
+            ),
+            TranslationChange(
+                file="application_fr.properties",
+                locale_code="fr",
+                key="tac.legal.section4.body",
+                source_value="These payment methods may involve account freezes.",
+                old_value=None,
+                new_value="Ces méthodes peuvent impliquer des gel des comptes.",
+            ),
+            TranslationChange(
+                file="application_ga.properties",
+                locale_code="ga",
+                key="tac.legal.section6.body",
+                source_value="No central entity holds custody of user funds.",
+                old_value=None,
+                new_value="Ní choinníonn sé custaim de chuid úsáideoirí.",
+            ),
+            TranslationChange(
+                file="application_ha.properties",
+                locale_code="ha",
+                key="tac.risk.noGuarantees.title",
+                source_value="No Guarantee of Recovery or Compensation",
+                old_value=None,
+                new_value="Babu Tabbatarwa na Dawowa ko Kwamfuta",
+            ),
+            TranslationChange(
+                file="application_mk.properties",
+                locale_code="mk",
+                key="tac.legal.section6.body",
+                source_value="No central entity controls the network.",
+                old_value=None,
+                new_value="Нема централна ентиетa која ја контролира мрежата.",
+            ),
+            TranslationChange(
+                file="application_sl.properties",
+                locale_code="sl",
+                key="tac.risk.p2p.body",
+                source_value="Bisq developers, contributors, and the Bisq DAO do not control user funds.",
+                old_value=None,
+                new_value="Razvijalci Bisq, prispevki in Bisq DAO ne nadzorujejo uporabniških sredstev.",
+            ),
+            TranslationChange(
+                file="application_sr.properties",
+                locale_code="sr",
+                key="tac.risk.financial.body",
+                source_value="Software vulnerabilities may lead to unrecoverable losses.",
+                old_value=None,
+                new_value="Ране у софтверу могу довести до неповратних губитака.",
+            ),
+            TranslationChange(
+                file="application_th.properties",
+                locale_code="th",
+                key="tac.legal.section1.body",
+                source_value="without warranties or representations of any kind",
+                old_value=None,
+                new_value="โดยไม่มีการรับประกันหรือการแสดงออกใด ๆ",
+            ),
+            TranslationChange(
+                file="application_yo.properties",
+                locale_code="yo",
+                key="tac.legal.headline",
+                source_value="Legal Terms",
+                old_value=None,
+                new_value="Àwọn Ọ̀rọ̀ Ìṣèlú",
+            ),
+            TranslationChange(
+                file="bisq_easy_af_ZA.properties",
+                locale_code="af_ZA",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="Either party can cancel the trade without justification.",
+                old_value=None,
+                new_value="Enige party kan die handel sonder regverdigheid kanselleer.",
+            ),
+            TranslationChange(
+                file="bisq_easy_ca.properties",
+                locale_code="ca",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="Before account details are exchanged",
+                old_value=None,
+                new_value="Abans que es canviïn els detalls del compte",
+            ),
+            TranslationChange(
+                file="bisq_easy_fi.properties",
+                locale_code="fi",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="For unresolved issues, invite a mediator.",
+                old_value=None,
+                new_value="Ratkaisemattomissa asioissa kutsu välimies.",
+            ),
+            TranslationChange(
+                file="bisq_easy_fr.properties",
+                locale_code="fr",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="Traders must check their trades regularly.",
+                old_value=None,
+                new_value="Les commerçants doivent vérifier régulièrement leurs échanges.",
+            ),
+            TranslationChange(
+                file="bisq_easy_ga.properties",
+                locale_code="ga",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="For unresolved issues, invite a mediator.",
+                old_value=None,
+                new_value="Maidir le fadhbanna nach bhfuil réitithe, cuir i gcuimhne idirghabhálaí.",
+            ),
+            TranslationChange(
+                file="bisq_easy_hr.properties",
+                locale_code="hr",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="The mediator cannot guarantee a refund.",
+                old_value=None,
+                new_value="Posrednik ne može jamčiti povratak.",
+            ),
+            TranslationChange(
+                file="bisq_easy_ta.properties",
+                locale_code="ta",
+                key="bisqEasy.tradeGuide.rules.content",
+                source_value="This does not apply if the trade peer does not respond.",
+                old_value=None,
+                new_value="இது வர்த்தக சகோதரர் பதிலளிக்காத போது பொருந்தாது.",
+            ),
+        ],
+        rules=rules,
+    )
+
+    assert {finding.rule_id for finding in findings} == {
+        "el-tac-duplicate-compensation",
+        "fi-tac-fused-all-information",
+        "fr-tac-account-freeze-plural",
+        "ga-tac-custody-customs",
+        "ha-tac-compensation-computer",
+        "mk-tac-central-entity-typo",
+        "sl-tac-contributors-noun",
+        "sr-tac-software-vulnerabilities",
+        "th-tac-legal-representations",
+        "yo-tac-risk-legal-headlines",
+        "af-trade-guide-without-justification",
+        "ca-trade-guide-exchange-account-details",
+        "fi-trade-guide-mediator-term",
+        "fr-trade-guide-trader-term",
+        "ga-trade-guide-request-mediator",
+        "hr-trade-guide-refund-term",
+        "ta-trade-guide-counterparty-term",
+    }

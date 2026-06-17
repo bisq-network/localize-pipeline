@@ -5,9 +5,11 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+from collections.abc import Iterable as IterableABC
+from collections.abc import Mapping as MappingABC
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from src.properties_parser import parse_properties_file
 
@@ -102,6 +104,37 @@ _SOURCE_WORD_STOPWORDS = {
     "through",
     "without",
 }
+
+
+def normalize_retained_source_word_allowlist(raw_allowlist: Any) -> Dict[str, Tuple[str, ...]]:
+    """Normalize locale-scoped retained-source word allowlists from config-like data."""
+    if not isinstance(raw_allowlist, MappingABC):
+        return {}
+
+    normalized: Dict[str, Tuple[str, ...]] = {}
+    for locale_code, raw_terms in raw_allowlist.items():
+        locale = str(locale_code).strip()
+        terms = _normalize_allowlist_terms(raw_terms)
+        if locale and terms:
+            normalized[locale] = terms
+    return normalized
+
+
+def _normalize_allowlist_terms(raw_terms: Any) -> Tuple[str, ...]:
+    if isinstance(raw_terms, str):
+        terms = (raw_terms,)
+    elif isinstance(raw_terms, MappingABC):
+        return ()
+    elif isinstance(raw_terms, IterableABC):
+        terms = raw_terms
+    else:
+        return ()
+
+    return tuple(
+        text
+        for text in (str(term).strip() for term in terms)
+        if text
+    )
 
 
 def normalize_value(value: Optional[str]) -> str:
@@ -327,8 +360,11 @@ def evaluate_semantic_rules(
 def evaluate_retained_source_words(
     changes: Iterable[TranslationChange],
     brand_glossary: Iterable[str],
+    retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> List[SemanticFinding]:
     findings: List[SemanticFinding] = []
+    allowlist = normalize_retained_source_word_allowlist(retained_source_word_allowlist or {})
+    locale_allowed_words: Dict[str, set[str]] = {}
     for change in changes:
         if change.locale_code in {"en", "pcm"}:
             continue
@@ -336,10 +372,16 @@ def evaluate_retained_source_words(
             continue
         if normalize_value(change.source_value) == normalize_value(change.new_value):
             continue
+        if change.locale_code not in locale_allowed_words:
+            locale_allowed_words[change.locale_code] = _allowed_source_words_for_locale(
+                change.locale_code,
+                allowlist,
+            )
         retained_words = _retained_source_words(
             source_value=change.source_value,
             target_value=change.new_value,
             brand_glossary=brand_glossary,
+            retained_source_word_allowlist=locale_allowed_words[change.locale_code],
         )
         if not retained_words:
             continue
@@ -369,12 +411,38 @@ def _glossary_words(brand_glossary: Iterable[str]) -> set[str]:
     return words
 
 
+def _allowlist_words(terms: Iterable[str]) -> set[str]:
+    words: set[str] = set()
+    for term in terms:
+        text = str(term).strip()
+        if not text:
+            continue
+        words.add(text.casefold())
+        words.update(word.casefold() for word in _SOURCE_WORD_RE.findall(text))
+    return words
+
+
+def _allowed_source_words_for_locale(
+    locale_code: str,
+    retained_source_word_allowlist: Mapping[str, Iterable[str]],
+) -> set[str]:
+    return _allowlist_words(
+        (
+            *retained_source_word_allowlist.get("*", ()),
+            *retained_source_word_allowlist.get(locale_code, ()),
+        )
+    )
+
+
 def _retained_source_words(
     source_value: str,
     target_value: str,
     brand_glossary: Iterable[str],
+    retained_source_word_allowlist: Iterable[str] = (),
 ) -> List[str]:
     glossary_words = _glossary_words(brand_glossary)
+    allowed_words = set(_SOURCE_WORD_ALLOWLIST)
+    allowed_words.update(_allowlist_words(retained_source_word_allowlist))
     retained: List[str] = []
     seen: set[str] = set()
 
@@ -385,7 +453,7 @@ def _retained_source_words(
         seen.add(normalized)
         if normalized in glossary_words:
             continue
-        if normalized in _SOURCE_WORD_ALLOWLIST:
+        if normalized in allowed_words:
             continue
         if normalized in _SOURCE_WORD_STOPWORDS:
             continue
@@ -399,10 +467,17 @@ def analyze_translation_changes(
     changes: Sequence[TranslationChange],
     semantic_rules: Sequence[SemanticRule],
     brand_glossary: Iterable[str],
+    retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     findings = evaluate_semantic_rules(changes, semantic_rules)
-    findings.extend(evaluate_retained_source_words(changes, brand_glossary))
+    findings.extend(
+        evaluate_retained_source_words(
+            changes,
+            brand_glossary,
+            retained_source_word_allowlist=retained_source_word_allowlist,
+        )
+    )
     return SemanticQAStats.from_findings(findings, examples_limit=examples_limit)
 
 
@@ -412,6 +487,7 @@ def analyze_all_translation_entries(
     locale_codes: Sequence[str],
     brand_glossary: Iterable[str],
     semantic_rules: Sequence[SemanticRule],
+    retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     input_folder_path = Path(input_folder)
@@ -444,5 +520,6 @@ def analyze_all_translation_entries(
         changes=changes,
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
+        retained_source_word_allowlist=retained_source_word_allowlist,
         examples_limit=examples_limit,
     )

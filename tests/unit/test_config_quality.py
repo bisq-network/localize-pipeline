@@ -21,7 +21,19 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
     style_rules = config["style_rules"]
     semantic_review = config.get("semantic_review", {})
     semantic_rules = config.get("semantic_quality_rules", [])
+    retained_allowlist = config.get("quality_gate", {}).get("retained_source_word_allowlist", {})
+    supported_locale_codes = {
+        locale["code"]
+        for locale in config["supported_locales"]
+    }
+    semantic_rule_locale_codes = {
+        locale
+        for rule in semantic_rules
+        for locale in rule.get("locales", [])
+        if locale != "*"
+    }
     assert all("id" in rule for rule in semantic_rules)
+    assert semantic_rule_locale_codes <= supported_locale_codes
     semantic_rules_by_id = {
         rule["id"]: rule
         for rule in semantic_rules
@@ -57,6 +69,27 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
         "trade-history-traders-label",
         "af-trade-history-counts-trades",
         "vi-clearnet-clear-network-address",
+        "analytics-cta-truncated-reporting",
+        "analytics-cta-reporting-loanword",
+        "it-analytics-self-hosted",
+        "fr-analytics-no-pii-negation",
+        "el-tac-duplicate-compensation",
+        "fi-tac-fused-all-information",
+        "fr-tac-account-freeze-plural",
+        "ga-tac-custody-customs",
+        "ha-tac-compensation-computer",
+        "mk-tac-central-entity-typo",
+        "sl-tac-contributors-noun",
+        "sr-tac-software-vulnerabilities",
+        "th-tac-legal-representations",
+        "yo-tac-risk-legal-headlines",
+        "af-trade-guide-without-justification",
+        "ca-trade-guide-exchange-account-details",
+        "fi-trade-guide-mediator-term",
+        "fr-trade-guide-trader-term",
+        "ga-trade-guide-request-mediator",
+        "hr-trade-guide-refund-term",
+        "ta-trade-guide-counterparty-term",
     }.issubset(semantic_rules_by_id)
     assert all(
         semantic_rules_by_id[rule_id]["source"] == "bisq-mobile#1478 CodeRabbit"
@@ -66,6 +99,45 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
             "vi-clearnet-clear-network-address",
         }
     )
+    assert all(
+        semantic_rules_by_id[rule_id]["source"] == "bisq-mobile#1484 CodeRabbit"
+        for rule_id in {
+            "it-analytics-self-hosted",
+            "fr-analytics-no-pii-negation",
+        }
+    )
+    assert all(
+        semantic_rules_by_id[rule_id]["source"] == "bisq-mobile#1490 CodeRabbit"
+        for rule_id in {
+            "analytics-cta-truncated-reporting",
+            "analytics-cta-reporting-loanword",
+        }
+    )
+    assert all(
+        semantic_rules_by_id[rule_id]["source"] == "bisq2#4835 CodeRabbit"
+        for rule_id in {
+            "el-tac-duplicate-compensation",
+            "fi-tac-fused-all-information",
+            "fr-tac-account-freeze-plural",
+            "ga-tac-custody-customs",
+            "ha-tac-compensation-computer",
+            "mk-tac-central-entity-typo",
+            "sl-tac-contributors-noun",
+            "sr-tac-software-vulnerabilities",
+            "th-tac-legal-representations",
+            "yo-tac-risk-legal-headlines",
+            "af-trade-guide-without-justification",
+            "ca-trade-guide-exchange-account-details",
+            "fi-trade-guide-mediator-term",
+            "fr-trade-guide-trader-term",
+            "ga-trade-guide-request-mediator",
+            "hr-trade-guide-refund-term",
+            "ta-trade-guide-counterparty-term",
+        }
+    )
+    assert "personal" in retained_allowlist["es"]
+    assert {"information", "message", "messages"}.issubset(retained_allowlist["fr"])
+    assert "reporting" in retained_allowlist["it"]
     assert any(
         "paymentAccounts.details" in rule
         and "paymentAccounts.accountCreationDate" in rule

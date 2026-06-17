@@ -66,6 +66,11 @@ quality_gate:
   block_on_semantic_qa_findings: true
   block_on_semantic_qa_warnings: false
   semantic_qa_audit_scope: "changed"
+  # Locale-specific retained source words that are valid loan/cognate words.
+  retained_source_word_allowlist:
+    es: ["personal"]
+    fr: ["information", "message", "messages"]
+    it: ["reporting"]
 
 # Optional independent AI semantic reviewer. It reviews only changed keys and
 # appends structured findings to logs/translation_validation_summary.json.
@@ -97,6 +102,153 @@ semantic_quality_rules:
     forbidden_target_regex: '^xóa\b'
     severity: "error"
     source: "bisq-mobile#1478 CodeRabbit"
+  - id: "analytics-cta-truncated-reporting"
+    message: "Analytics CTA labels must not contain truncated English words such as 'reportin'."
+    locales: ["*"]
+    keys: ["*"]
+    forbidden_target_regex: '\breportin\b'
+    severity: "error"
+    source: "bisq-mobile#1490 CodeRabbit"
+  - id: "analytics-cta-reporting-loanword"
+    message: "French and Italian analytics CTA labels must fully localize 'reporting'."
+    locales: ["fr", "it"]
+    keys: ["mobile.welcomeCarousel.analytics.action"]
+    forbidden_target_regex: '\breporting\b'
+    severity: "error"
+    source: "bisq-mobile#1490 CodeRabbit"
+  - id: "it-analytics-self-hosted"
+    message: "Italian analytics copy must localize 'self-hosted' instead of retaining the English term."
+    locales: ["it"]
+    keys: ["*"]
+    forbidden_target_regex: '\bself-hosted\b'
+    severity: "error"
+    source: "bisq-mobile#1484 CodeRabbit"
+  - id: "fr-analytics-no-pii-negation"
+    message: "French no-PII analytics copy must keep parallel negation for accounts and device identifiers."
+    locales: ["fr"]
+    keys: ["mobile.settings.analytics.info.noPii"]
+    forbidden_target_regex: '^Aucune information personnelle,\s*comptes\b'
+    severity: "error"
+    source: "bisq-mobile#1484 CodeRabbit"
+  - id: "el-tac-duplicate-compensation"
+    message: "Greek TAC recovery disclaimers must not repeat the compensation term in the recovery/refund/compensation trio."
+    locales: ["el"]
+    keys: ["tac.risk.noGuarantees.body", "tac.risk.accept.noRecovery"]
+    forbidden_target_regex: 'αποζημίωση\s+ή\s+η\s+αποζημίωση'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "fi-tac-fused-all-information"
+    message: "Finnish TAC information copy must use 'kaikkien tietojen' instead of the fused form."
+    locales: ["fi"]
+    keys: ["tac.legal.section3.body"]
+    forbidden_target_regex: '\bkaikentietojen\b'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "fr-tac-account-freeze-plural"
+    message: "French TAC external-payment copy must use grammatical account-freeze wording."
+    locales: ["fr"]
+    keys: ["tac.legal.section4.body"]
+    forbidden_target_regex: 'des gel des comptes'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "ga-tac-custody-customs"
+    message: "Irish TAC custody copy must not use 'custaim', which means customs/tariffs."
+    locales: ["ga"]
+    keys: ["tac.legal.section6.title", "tac.legal.section6.body"]
+    forbidden_target_regex: '\bcustaim\b'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "ha-tac-compensation-computer"
+    message: "Hausa TAC compensation copy must not use 'Kwamfuta', which means computer."
+    locales: ["ha"]
+    keys: ["tac.risk.noGuarantees.title"]
+    forbidden_target_regex: '\bKwamfuta\b'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "mk-tac-central-entity-typo"
+    message: "Macedonian TAC no-custody copy must spell the central entity term correctly."
+    locales: ["mk"]
+    keys: ["tac.legal.section6.body"]
+    forbidden_target_regex: 'ентиет[аa]'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "sl-tac-contributors-noun"
+    message: "Slovene TAC contributor references must use the contributor noun, not the contributions noun."
+    locales: ["sl"]
+    keys: ["tac.risk.p2p.body", "tac.legal.section3.body", "tac.legal.section5.body"]
+    forbidden_target_regex: '\bprispevki\b'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "sr-tac-software-vulnerabilities"
+    message: "Serbian TAC financial-risk copy must translate software vulnerabilities, not wounds."
+    locales: ["sr"]
+    keys: ["tac.risk.financial.body"]
+    forbidden_target_regex: 'Ране у софтверу'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "th-tac-legal-representations"
+    message: "Thai TAC warranty disclaimer must use legal representations wording, not casual expression wording."
+    locales: ["th"]
+    keys: ["tac.legal.section1.body"]
+    forbidden_target_regex: 'การแสดงออก'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "yo-tac-risk-legal-headlines"
+    message: "Yoruba TAC headlines must preserve risk and legal terminology."
+    locales: ["yo"]
+    keys: ["tac.risk.headline", "tac.legal.headline"]
+    forbidden_target_regex: 'Mọ̀ àwọn Ẹ̀tọ́|Àwọn Ọ̀rọ̀ Ìṣèlú'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "af-trade-guide-without-justification"
+    message: "Afrikaans trade-guide cancellation rule must say without justification, not without fairness."
+    locales: ["af_ZA"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: 'sonder regverdigheid'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "ca-trade-guide-exchange-account-details"
+    message: "Catalan trade-guide account-detail wording must mean exchange, not change."
+    locales: ["ca"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: 'es canviïn els detalls del compte'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "fi-trade-guide-mediator-term"
+    message: "Finnish Bisq Easy mediation guidance must use mediator terminology, not arbitrator terminology."
+    locales: ["fi"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: '\bvälimies\b'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "fr-trade-guide-trader-term"
+    message: "French Bisq Easy trade-guide copy must use trader terminology, not retail-merchant terminology."
+    locales: ["fr"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: '\bcommerçants\b'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "ga-trade-guide-request-mediator"
+    message: "Irish Bisq Easy trade-guide copy must request a mediator, not remind one."
+    locales: ["ga"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: 'cuir i gcuimhne idirghabhálaí'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "hr-trade-guide-refund-term"
+    message: "Croatian Bisq Easy mediation warning must use refund wording, not generic return wording."
+    locales: ["hr"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: 'jamčiti povratak'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
+  - id: "ta-trade-guide-counterparty-term"
+    message: "Tamil Bisq Easy trade-guide copy must use counterparty/trade-partner terminology, not trade brother."
+    locales: ["ta"]
+    keys: ["bisqEasy.tradeGuide.rules.content"]
+    forbidden_target_regex: 'வர்த்தக சகோதரர்'
+    severity: "error"
+    source: "bisq2#4835 CodeRabbit"
 
 # Optional persistent per-key hash ledger used to detect source changes
 # without reprocessing already-stable translations.
@@ -111,28 +263,52 @@ max_concurrent_api_calls: 1
 
 # Each locale has a 'code' and a human-readable 'name'
 supported_locales:
+  - code: "ca"
+    name: "Catalan"
   - code: "cs"
     name: "Czech"
   - code: "de"
     name: "German"
+  - code: "el"
+    name: "Greek"
   - code: "es"
     name: "Spanish"
+  - code: "fi"
+    name: "Finnish"
   - code: "fr"
     name: "French"
+  - code: "ga"
+    name: "Irish"
+  - code: "ha"
+    name: "Hausa"
+  - code: "hr"
+    name: "Croatian"
   - code: "id"
     name: "Indonesian"
   - code: "it"
     name: "Italian"
+  - code: "mk"
+    name: "Macedonian"
   - code: "pt_BR"
     name: "Brazilian Portuguese"
   - code: "pcm"
     name: "Nigerian Pidgin"
   - code: "ru"
     name: "Russian"
+  - code: "sl"
+    name: "Slovenian"
+  - code: "sr"
+    name: "Serbian"
+  - code: "ta"
+    name: "Tamil"
+  - code: "th"
+    name: "Thai"
   - code: "af_ZA"
     name: "Afrikaans"
   - code: "vi"
     name: "Vietnamese"
+  - code: "yo"
+    name: "Yoruba"
 
 # (Optional) Language-specific style and formatting rules to be injected into the AI prompt.
 # Use this to guide the AI on tone, casing, terminology, and other stylistic conventions.

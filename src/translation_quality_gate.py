@@ -7,9 +7,9 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
@@ -24,6 +24,7 @@ from src.semantic_quality import (
     iter_translation_changes_from_diff,
     load_semantic_rules,
     normalize_value,
+    normalize_retained_source_word_allowlist,
     source_filename_for_locale_file,
 )
 from src.translation_validator import find_disallowed_control_characters
@@ -40,6 +41,7 @@ class QualityGateConfig:
     block_on_semantic_qa_findings: bool = True
     block_on_semantic_qa_warnings: bool = False
     semantic_qa_audit_scope: str = "changed"
+    retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -177,6 +179,7 @@ def analyze_semantic_qa_changes(
     locale_codes: Sequence[str],
     brand_glossary: Iterable[str] = (),
     semantic_rules: Sequence[SemanticRule] = (),
+    retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     """Scan changed translations for configured semantic regressions."""
@@ -192,6 +195,7 @@ def analyze_semantic_qa_changes(
         changes=changes,
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
+        retained_source_word_allowlist=retained_source_word_allowlist,
         examples_limit=examples_limit,
     )
 
@@ -225,6 +229,9 @@ def load_quality_gate_config(
             ),
             semantic_qa_audit_scope=str(
                 quality_gate.get("semantic_qa_audit_scope", "changed")
+            ),
+            retained_source_word_allowlist=normalize_retained_source_word_allowlist(
+                quality_gate.get("retained_source_word_allowlist", {})
             ),
         ),
         locales,
@@ -564,6 +571,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             locale_codes=locale_codes,
             brand_glossary=brand_glossary,
             semantic_rules=semantic_rules,
+            retained_source_word_allowlist=config.retained_source_word_allowlist,
         )
     else:
         semantic_stats = analyze_semantic_qa_changes(
@@ -573,6 +581,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             locale_codes=locale_codes,
             brand_glossary=brand_glossary,
             semantic_rules=semantic_rules,
+            retained_source_word_allowlist=config.retained_source_word_allowlist,
         )
     report = build_quality_gate_report(
         source_stats=source_stats,
