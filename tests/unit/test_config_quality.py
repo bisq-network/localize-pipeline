@@ -22,7 +22,18 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
     semantic_review = config.get("semantic_review", {})
     semantic_rules = config.get("semantic_quality_rules", [])
     retained_allowlist = config.get("quality_gate", {}).get("retained_source_word_allowlist", {})
+    supported_locale_codes = {
+        locale["code"]
+        for locale in config["supported_locales"]
+    }
+    semantic_rule_locale_codes = {
+        locale
+        for rule in semantic_rules
+        for locale in rule.get("locales", [])
+        if locale != "*"
+    }
     assert all("id" in rule for rule in semantic_rules)
+    assert semantic_rule_locale_codes <= supported_locale_codes
     semantic_rules_by_id = {
         rule["id"]: rule
         for rule in semantic_rules

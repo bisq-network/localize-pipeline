@@ -17,6 +17,9 @@ from src.translation_quality_gate import (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 def _write_properties(path: Path, entries: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -362,7 +365,7 @@ def test_configured_semantic_rules_catch_recent_mobile_review_nits():
 
 
 def test_configured_semantic_rules_catch_bisq2_review_nits():
-    _, _, _, rules = load_quality_gate_config("config.example.yaml")
+    _, _, _, rules = load_quality_gate_config(str(PROJECT_ROOT / "config.example.yaml"))
 
     findings = evaluate_semantic_rules(
         changes=[
