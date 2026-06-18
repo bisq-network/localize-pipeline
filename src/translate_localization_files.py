@@ -40,6 +40,7 @@ from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
 from src.properties_parser import parse_properties_file, reassemble_file
+from src.usage_tracker import usage_tracker
 from src.translation_validator import (
     check_placeholder_parity,
     check_encoding_and_mojibake,
@@ -1160,6 +1161,7 @@ Provide the translation **of the Value only**, following the instructions above.
                     temperature=0.3,
                     timeout=60.0,
                 )
+                usage_tracker.record_response(MODEL_NAME, response)
 
                 msg_content = response.choices[0].message.content
                 if not msg_content:
@@ -1309,6 +1311,7 @@ async def holistic_review_async(
                     max_tokens=8192,  # Increased to handle larger review responses
                     timeout=120.0,
                 )
+                usage_tracker.record_response(REVIEW_MODEL_NAME, response)
                 msg_content = response.choices[0].message.content
                 if not msg_content or not msg_content.strip():
                     logger.error("Holistic review returned empty content.")
@@ -2263,6 +2266,16 @@ async def main():
         skipped_files=skipped_files,
     )
     logger.info(f"Wrote translation validation summary to {validation_summary_path}")
+
+    # Step 6b: Write token usage / cost summary for this run.
+    usage_summary_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'token_usage_summary.json')
+    try:
+        usage_tracker.write_json(usage_summary_path)
+        for line in usage_tracker.format_summary().splitlines():
+            logger.info(line)
+        logger.info(f"Wrote token usage summary to {usage_summary_path}")
+    except Exception:
+        logger.exception("Failed to write token usage summary")
 
     # Step 7: Copy translated files back to the input folder, overwriting the originals.
     copy_translated_files_back(TRANSLATED_QUEUE_FOLDER, INPUT_FOLDER)
