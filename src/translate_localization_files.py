@@ -40,6 +40,7 @@ from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
 from src.properties_parser import parse_properties_file, reassemble_file
+from src.openai_compat import create_chat_completion_with_token_limit
 from src.usage_tracker import usage_tracker
 from src.cost_estimator import estimate_run_cost, format_estimate
 from src.locale_utils import is_locale_file
@@ -1303,14 +1304,15 @@ async def holistic_review_async(
         base_delay = 5  # Longer delay for a potentially larger task
         for attempt in range(1, max_retries + 1):
             try:
-                response = await client.chat.completions.create(
+                response = await create_chat_completion_with_token_limit(
+                    client.chat.completions,
                     model=REVIEW_MODEL_NAME,
                     messages=[
                         ChatCompletionSystemMessageParam(role="system", content=review_system_prompt)
                     ],
+                    max_output_tokens=8192,
                     temperature=0.1,
                     response_format={"type": "json_object"},
-                    max_tokens=8192,  # Increased to handle larger review responses
                     timeout=120.0,
                 )
                 usage_tracker.record_response(REVIEW_MODEL_NAME, response)
