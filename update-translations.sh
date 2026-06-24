@@ -219,11 +219,17 @@ INPUT_FOLDER=$(get_config_value "input_folder" "$CONFIG_FILE")
 TRANSLATION_FILTER_GLOB=$(get_config_value "translation_file_filter_glob" "$CONFIG_FILE")
 # Read the optional flag to pull source files
 PULL_SOURCE_FILES=$(get_config_value "pull_source_files_from_transifex" "$CONFIG_FILE")
+# Where translations come from before the AI step: "transifex" (default, pulls via
+# the tx CLI) or "git" (use the .properties files already in the repo). Foreign OSS
+# projects without a Transifex setup should use "git".
+TRANSLATION_SOURCE=$(get_config_value "translation_source" "$CONFIG_FILE")
+TRANSLATION_SOURCE="${TRANSLATION_SOURCE:-transifex}"
 DRY_RUN=$(get_config_value "dry_run" "$CONFIG_FILE")
 
 log "Target project root from config: \"$TARGET_PROJECT_ROOT\""
 log "Input folder from config: \"$INPUT_FOLDER\""
 log "Pull source files from Transifex: ${PULL_SOURCE_FILES:-false}"
+log "Translation source: ${TRANSLATION_SOURCE}"
 
 if [ -z "$TARGET_PROJECT_ROOT" ] || [ "$TARGET_PROJECT_ROOT" = "null" ]; then
     log "Error: TARGET_PROJECT_ROOT is not set in $CONFIG_FILE or is empty."
@@ -304,7 +310,9 @@ log "Proceeding with Transifex operations. Current HEAD on ${DEFAULT_BRANCH}:"
 git log -1 --pretty=%H
 
 # Step 2: Use Transifex CLI to pull the latest translations
-if [[ "${DRY_RUN:-false}" == "true" ]]; then
+if [[ "$TRANSLATION_SOURCE" == "git" ]]; then
+    log "Translation source is 'git'. Skipping Transifex pull; using .properties files already in the repository." "INFO"
+elif [[ "${DRY_RUN:-false}" == "true" ]]; then
     log "Dry run is enabled. Skipping Transifex pull." "WARNING"
 else
     log "Checking for Transifex CLI"
@@ -554,6 +562,24 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
     elif [ -s "$SKIPPED_FILES_REPORT" ]; then
         log "Found skipped files report. Prepending to PR description."
         PR_BODY=$(printf "%s\n\n%s" "$(cat "$SKIPPED_FILES_REPORT")" "$PR_BODY")
+    fi
+
+    # Append per-run token usage / estimated cost so reviewers see what the run cost.
+    local TOKEN_USAGE_JSON="$report_dir/token_usage_summary.json"
+    if [ -s "$TOKEN_USAGE_JSON" ]; then
+        local COST_MD
+        COST_MD=$(jq -r '
+            ["### Translation cost (estimated)",
+             "- Total: \(.totals.total_tokens) tokens, est. $\(.totals.estimated_cost_usd)"
+               + (if .totals.cost_complete == false then " (partial — some models had no price set)" else "" end)]
+            + (.models | to_entries | map("- \(.key): \(.value.total_tokens) tokens, est. "
+               + (if .value.estimated_cost_usd == null then "n/a" else "$\(.value.estimated_cost_usd)" end)))
+            | join("\n")
+        ' "$TOKEN_USAGE_JSON" 2>/dev/null || true)
+        if [ -n "$COST_MD" ]; then
+            log "Appending token usage / cost summary to PR description."
+            PR_BODY=$(printf "%s\n\n%s" "$PR_BODY" "$COST_MD")
+        fi
     fi
 
     log "Attempting to create PR: $FORK_REPO_NAME:$branch -> $UPSTREAM_REPO_NAME:$TARGET_BRANCH_FOR_PR"

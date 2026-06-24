@@ -85,3 +85,42 @@ def test_validation_summary_is_reset_before_translation_script_runs():
 
     assert reset_index < python_index
     assert '{"files":{},"pipeline_warnings":[]}' in script
+
+
+def test_translation_source_is_read_and_defaults_to_transifex():
+    """translation_source is read from config and defaults to transifex (back-compat)."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert 'TRANSLATION_SOURCE=$(get_config_value "translation_source" "$CONFIG_FILE")' in script
+    assert 'TRANSLATION_SOURCE="${TRANSLATION_SOURCE:-transifex}"' in script
+
+
+def test_transifex_pull_is_skipped_when_source_is_git():
+    """A git-source project must skip the Transifex pull entirely."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert '"$TRANSLATION_SOURCE" == "git"' in script
+    # The guard must be evaluated before the tx pull command is constructed.
+    guard_index = script.index('"$TRANSLATION_SOURCE" == "git"')
+    tx_pull_index = script.index('TX_PULL_CMD="tx pull')
+    assert guard_index < tx_pull_index
+
+
+def test_translation_source_read_before_transifex_step():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    read_index = script.index('TRANSLATION_SOURCE=$(get_config_value "translation_source"')
+    tx_pull_index = script.index('TX_PULL_CMD="tx pull')
+    assert read_index < tx_pull_index
+
+
+def test_pr_body_includes_token_usage_cost_summary():
+    """The per-run cost summary is surfaced in the PR description."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "token_usage_summary.json" in script
+    assert "Translation cost" in script
+    # The cost section must be assembled before the PR is created.
+    cost_index = script.index("token_usage_summary.json")
+    pr_create_index = script.index("gh pr create")
+    assert cost_index < pr_create_index
