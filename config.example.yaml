@@ -68,9 +68,12 @@ quality_gate:
   semantic_qa_audit_scope: "changed"
   # Locale-specific retained source words that are valid loan/cognate words.
   retained_source_word_allowlist:
+    da: ["version"]
+    de: ["version"]
     es: ["personal"]
-    fr: ["information", "message", "messages"]
+    fr: ["information", "message", "messages", "version"]
     it: ["reporting"]
+    sv: ["version"]
 
 # Optional independent AI semantic reviewer. It reviews only changed keys and
 # appends structured findings to logs/translation_validation_summary.json.

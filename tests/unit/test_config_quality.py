@@ -136,8 +136,11 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
         }
     )
     assert "personal" in retained_allowlist["es"]
-    assert {"information", "message", "messages"}.issubset(retained_allowlist["fr"])
+    assert {"information", "message", "messages", "version"}.issubset(retained_allowlist["fr"])
     assert "reporting" in retained_allowlist["it"]
+    assert "version" in retained_allowlist["da"]
+    assert "version" in retained_allowlist["de"]
+    assert "version" in retained_allowlist["sv"]
     assert any(
         "paymentAccounts.details" in rule
         and "paymentAccounts.accountCreationDate" in rule
