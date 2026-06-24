@@ -99,7 +99,7 @@ cp glossary.example.json profiles/my-project/glossary.json
 # At a minimum, you must set:
 # - target_project_root: /target_repo
 # - input_folder: i18n/src/main/resources
-# The paths must be absolute paths inside the container.
+# input_folder is resolved relative to target_project_root when it is not absolute.
 nano profiles/my-project/config.yaml
 ```
 

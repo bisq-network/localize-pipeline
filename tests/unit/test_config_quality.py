@@ -60,6 +60,14 @@ def test_update_service_watches_profile_assets_for_restart():
     assert "profiles/bisq/glossary.json" in script
 
 
+def test_deployment_guide_documents_relative_input_folder_semantics():
+    guide = (PROJECT_ROOT / "docs" / "new-project-deployment.md").read_text(encoding="utf-8")
+
+    assert "# - input_folder: i18n/src/main/resources" in guide
+    assert "input_folder is resolved relative to target_project_root" in guide
+    assert "The paths must be absolute paths inside the container." not in guide
+
+
 # config.example.yaml is intentionally a minimal generic starter; the Bisq
 # project knowledge (style + semantic rules) lives in the Bisq profile config.
 @pytest.mark.parametrize(
