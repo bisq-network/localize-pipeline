@@ -1,412 +1,56 @@
-# Configuration for Translate Java Property Files
+# Minimal example configuration — copy to config.yaml and edit.
+#
+# This is a small, generic starting point. For a richer, real-world example with
+# per-locale style rules, learned semantic quality rules, and a large glossary,
+# see docker/config.docker.yaml (the Bisq production config).
+#
+# Tip: run `./init.sh --input-folder path/to/i18n` to scaffold this automatically
+# by detecting the locales from your existing *.properties files.
 
-# Absolute path to the Git repository root
+# --- Paths (required) ---
+# Absolute path to the git repository whose .properties files you translate.
 target_project_root: "/path/to/your/git/repo"
-
-# Directory containing all .properties files
+# Folder containing the .properties files (absolute, or relative to target_project_root).
 input_folder: "/path/to/properties/files"
 
-# Path to glossary
-glossary_file_path: "glossary.json"
+# --- Where translations come from before the AI step ---
+# "git"      = use the .properties files already in your repository (no external TMS).
+# "transifex" = pull the latest translations via the `tx` CLI first (needs .tx/config).
+# Foreign OSS projects without Transifex should keep "git".
+translation_source: "git"
 
-# OpenAI model to use
-model_name: "gpt-4o-mini"
+# --- Model / provider ---
+model_name: "gpt-4o-mini"          # fast initial translation
+review_model_name: "gpt-4o"        # holistic review pass (set equal to model_name to save cost)
 
-# (Optional) OpenAI model for the holistic review step.
-# If not provided, defaults to the 'model_name' above.
-# Use a more powerful model like "gpt-4o" for higher quality review.
-review_model_name: "gpt-4o"
-# Tip: You can override this at runtime with the REVIEW_MODEL_NAME environment variable.
-# Example: export REVIEW_MODEL_NAME="gpt-4o"
+# (Optional) OpenAI-compatible endpoint. Point this at a local Ollama server to
+# translate with zero data egress and no API key (set the model names to a model
+# you have pulled, e.g. "llama3.1"). Env var OPENAI_BASE_URL overrides this.
+# api_base_url: "http://localhost:11434/v1"
 
-# (Optional) Number of keys to include in a single holistic review API call.
-# Lower this value if you encounter "request too large" errors from the API.
-holistic_review_chunk_size: 75
+# --- Glossary (optional but recommended) ---
+# JSON file of per-language term mappings. See glossary.example.json for the format.
+glossary_file_path: "glossary.example.json"
 
-# (Optional) If specified, only files matching this glob pattern will be sent for AI translation.
-# All other changed .properties files will still be included in the final PR.
-# This is useful for targeting specific sets of files, like 'mobile_*.properties'.
-# If commented out or empty, all changed .properties files will be translated.
-# Set to null or remove to translate all changed files.
-# translation_file_filter_glob: null
+# Brand/technical terms that must never be translated.
+brand_technical_glossary:
+  - Bitcoin
+  - GitHub
 
-# Optional: Process all translation files under input_folder instead of only git-changed files.
-# Useful for one-time ledger bootstrap or forced full retranslation runs.
-# Keep false for normal incremental operation.
-process_all_files: false
-
-# Optional: Pull source files (*_en.properties) from Transifex as well as translations.
-# Set to `true` if the canonical source of truth for English strings is Transifex.
-# The default behavior (`false`) is to only pull translation files and assume
-# the source files in the Git repository are the source of truth.
-pull_source_files_from_transifex: false
-
-# Translation queue folders
-translation_queue_folder: "translation_queue"
-translated_queue_folder: "translated_queue"
-
-# If true, the script logs actions without altering files
+# If true, the script logs actions without calling the API or writing files.
 dry_run: false
 
-# If true, existing keys whose target text is identical to source text
-# are retranslated on every run (legacy behavior). Keep this false to
-# only translate newly added keys by default and reduce translation churn.
-retranslate_identical_source_strings: false
-
-# Generated PR quality gate.
-# Calibrated from current bisq2 and bisq-mobile translation files:
-# - Existing raw source-identical values are common in payment/brand keys.
-# - The gate ignores exact glossary values, enum-like uppercase keys, URLs,
-#   placeholders, and non-linguistic tokens before applying these thresholds.
-quality_gate:
-  source_identical_min_block_count: 5
-  source_identical_max_count: 20
-  source_identical_max_ratio: 0.30
-  block_on_pipeline_warnings: true
-  block_on_semantic_qa_findings: true
-  block_on_semantic_qa_warnings: false
-  semantic_qa_audit_scope: "changed"
-  # Locale-specific retained source words that are valid loan/cognate words.
-  retained_source_word_allowlist:
-    es: ["personal"]
-    fr: ["information", "message", "messages"]
-    it: ["reporting"]
-
-# Optional independent AI semantic reviewer. It reviews only changed keys and
-# appends structured findings to logs/translation_validation_summary.json.
-semantic_review:
-  enabled: true
-  model: "gpt-5.4-mini"
-
-# Deterministic semantic rules learned from reviewed translation PRs.
-semantic_quality_rules:
-  - id: "trade-history-traders-label"
-    message: "Fully localize the Trade Details traders/role label; do not retain the English term 'Traders'."
-    locales: ["*"]
-    excluded_locales: ["en", "pcm"]
-    keys: ["mobile.tradeHistory.details.tradersAndRole"]
-    forbidden_target_regex: '\bTraders\b'
-    severity: "error"
-    source: "bisq-mobile#1478 CodeRabbit"
-  - id: "af-trade-history-counts-trades"
-    message: "Afrikaans trade-count labels must count trades, not traders."
-    locales: ["af_ZA"]
-    keys: ["mobile.tradeHistory.count.many", "mobile.tradeHistory.count.filtered"]
-    forbidden_target_regex: '\bhandelaars\b'
-    severity: "error"
-    source: "bisq-mobile#1478 CodeRabbit"
-  - id: "vi-clearnet-clear-network-address"
-    message: "Vietnamese networkAddress.clear must describe a clearnet/open network address, not a delete action."
-    locales: ["vi"]
-    keys: ["mobile.tradeHistory.details.networkAddress.clear"]
-    forbidden_target_regex: '^xóa\b'
-    severity: "error"
-    source: "bisq-mobile#1478 CodeRabbit"
-  - id: "analytics-cta-truncated-reporting"
-    message: "Analytics CTA labels must not contain truncated English words such as 'reportin'."
-    locales: ["*"]
-    keys: ["*"]
-    forbidden_target_regex: '\breportin\b'
-    severity: "error"
-    source: "bisq-mobile#1490 CodeRabbit"
-  - id: "analytics-cta-reporting-loanword"
-    message: "French and Italian analytics CTA labels must fully localize 'reporting'."
-    locales: ["fr", "it"]
-    keys: ["mobile.welcomeCarousel.analytics.action"]
-    forbidden_target_regex: '\breporting\b'
-    severity: "error"
-    source: "bisq-mobile#1490 CodeRabbit"
-  - id: "it-analytics-self-hosted"
-    message: "Italian analytics copy must localize 'self-hosted' instead of retaining the English term."
-    locales: ["it"]
-    keys: ["*"]
-    forbidden_target_regex: '\bself-hosted\b'
-    severity: "error"
-    source: "bisq-mobile#1484 CodeRabbit"
-  - id: "fr-analytics-no-pii-negation"
-    message: "French no-PII analytics copy must keep parallel negation for accounts and device identifiers."
-    locales: ["fr"]
-    keys: ["mobile.settings.analytics.info.noPii"]
-    forbidden_target_regex: '^Aucune information personnelle,\s*comptes\b'
-    severity: "error"
-    source: "bisq-mobile#1484 CodeRabbit"
-  - id: "el-tac-duplicate-compensation"
-    message: "Greek TAC recovery disclaimers must not repeat the compensation term in the recovery/refund/compensation trio."
-    locales: ["el"]
-    keys: ["tac.risk.noGuarantees.body", "tac.risk.accept.noRecovery"]
-    forbidden_target_regex: 'αποζημίωση\s+ή\s+η\s+αποζημίωση'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "fi-tac-fused-all-information"
-    message: "Finnish TAC information copy must use 'kaikkien tietojen' instead of the fused form."
-    locales: ["fi"]
-    keys: ["tac.legal.section3.body"]
-    forbidden_target_regex: '\bkaikentietojen\b'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "fr-tac-account-freeze-plural"
-    message: "French TAC external-payment copy must use grammatical account-freeze wording."
-    locales: ["fr"]
-    keys: ["tac.legal.section4.body"]
-    forbidden_target_regex: 'des gel des comptes'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "ga-tac-custody-customs"
-    message: "Irish TAC custody copy must not use 'custaim', which means customs/tariffs."
-    locales: ["ga"]
-    keys: ["tac.legal.section6.title", "tac.legal.section6.body"]
-    forbidden_target_regex: '\bcustaim\b'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "ha-tac-compensation-computer"
-    message: "Hausa TAC compensation copy must not use 'Kwamfuta', which means computer."
-    locales: ["ha"]
-    keys: ["tac.risk.noGuarantees.title"]
-    forbidden_target_regex: '\bKwamfuta\b'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "mk-tac-central-entity-typo"
-    message: "Macedonian TAC no-custody copy must spell the central entity term correctly."
-    locales: ["mk"]
-    keys: ["tac.legal.section6.body"]
-    forbidden_target_regex: 'ентиет[аa]'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "sl-tac-contributors-noun"
-    message: "Slovene TAC contributor references must use the contributor noun, not the contributions noun."
-    locales: ["sl"]
-    keys: ["tac.risk.p2p.body", "tac.legal.section3.body", "tac.legal.section5.body"]
-    forbidden_target_regex: '\bprispevki\b'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "sr-tac-software-vulnerabilities"
-    message: "Serbian TAC financial-risk copy must translate software vulnerabilities, not wounds."
-    locales: ["sr"]
-    keys: ["tac.risk.financial.body"]
-    forbidden_target_regex: 'Ране у софтверу'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "th-tac-legal-representations"
-    message: "Thai TAC warranty disclaimer must use legal representations wording, not casual expression wording."
-    locales: ["th"]
-    keys: ["tac.legal.section1.body"]
-    forbidden_target_regex: 'การแสดงออก'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "yo-tac-risk-legal-headlines"
-    message: "Yoruba TAC headlines must preserve risk and legal terminology."
-    locales: ["yo"]
-    keys: ["tac.risk.headline", "tac.legal.headline"]
-    forbidden_target_regex: 'Mọ̀ àwọn Ẹ̀tọ́|Àwọn Ọ̀rọ̀ Ìṣèlú'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "af-trade-guide-without-justification"
-    message: "Afrikaans trade-guide cancellation rule must say without justification, not without fairness."
-    locales: ["af_ZA"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: 'sonder regverdigheid'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "ca-trade-guide-exchange-account-details"
-    message: "Catalan trade-guide account-detail wording must mean exchange, not change."
-    locales: ["ca"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: 'es canviïn els detalls del compte'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "fi-trade-guide-mediator-term"
-    message: "Finnish Bisq Easy mediation guidance must use mediator terminology, not arbitrator terminology."
-    locales: ["fi"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: '\bvälimies\b'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "fr-trade-guide-trader-term"
-    message: "French Bisq Easy trade-guide copy must use trader terminology, not retail-merchant terminology."
-    locales: ["fr"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: '\bcommerçants\b'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "ga-trade-guide-request-mediator"
-    message: "Irish Bisq Easy trade-guide copy must request a mediator, not remind one."
-    locales: ["ga"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: 'cuir i gcuimhne idirghabhálaí'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "hr-trade-guide-refund-term"
-    message: "Croatian Bisq Easy mediation warning must use refund wording, not generic return wording."
-    locales: ["hr"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: 'jamčiti povratak'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-  - id: "ta-trade-guide-counterparty-term"
-    message: "Tamil Bisq Easy trade-guide copy must use counterparty/trade-partner terminology, not trade brother."
-    locales: ["ta"]
-    keys: ["bisqEasy.tradeGuide.rules.content"]
-    forbidden_target_regex: 'வர்த்தக சகோதரர்'
-    severity: "error"
-    source: "bisq2#4835 CodeRabbit"
-
-# Optional persistent per-key hash ledger used to detect source changes
-# without reprocessing already-stable translations.
-translation_key_ledger_file_path: "logs/translation_key_ledger.json"
-
-# Concurrency setting for OpenAI API calls.
-# This controls how many API requests can be active at the same time.
-# A lower value (e.g., 1 or 2) is safer to avoid API rate limits.
-# A higher value can speed up translation but may lead to "429 Too Many Requests" errors.
-# Default value if not specified is 1.
-max_concurrent_api_calls: 1
-
-# Each locale has a 'code' and a human-readable 'name'
+# --- Target locales ---
+# One entry per language you translate into (the source language is excluded).
 supported_locales:
-  - code: "ca"
-    name: "Catalan"
-  - code: "cs"
-    name: "Czech"
   - code: "de"
     name: "German"
-  - code: "el"
-    name: "Greek"
   - code: "es"
     name: "Spanish"
-  - code: "fi"
-    name: "Finnish"
   - code: "fr"
     name: "French"
-  - code: "ga"
-    name: "Irish"
-  - code: "ha"
-    name: "Hausa"
-  - code: "hr"
-    name: "Croatian"
-  - code: "id"
-    name: "Indonesian"
-  - code: "it"
-    name: "Italian"
-  - code: "mk"
-    name: "Macedonian"
-  - code: "pt_BR"
-    name: "Brazilian Portuguese"
-  - code: "pcm"
-    name: "Nigerian Pidgin"
-  - code: "ru"
-    name: "Russian"
-  - code: "sl"
-    name: "Slovenian"
-  - code: "sr"
-    name: "Serbian"
-  - code: "ta"
-    name: "Tamil"
-  - code: "th"
-    name: "Thai"
-  - code: "af_ZA"
-    name: "Afrikaans"
-  - code: "vi"
-    name: "Vietnamese"
-  - code: "yo"
-    name: "Yoruba"
 
-# (Optional) Language-specific style and formatting rules to be injected into the AI prompt.
-# Use this to guide the AI on tone, casing, terminology, and other stylistic conventions.
-# NOTE: Keys here must be language codes present in supported_locales (e.g., de, pt_BR).
-style_rules:
-  de:
-    - "Use the formal 'Sie' form of address."
-    - "For quantities, prefer 'ermitteln' or 'bestimmen' over 'bewerten'."
-    - "Ensure compound nouns are correctly formed (e.g., 'Sicherheitsschritt')."
-  cs:
-    - "Use impersonal and neutral phrasing for system messages; avoid the first-person plural."
-    - "For camera-related nouns, use the correct preposition 'ke kameře'."
-  es:
-    - "When referring to 'billetera' (wallet), use feminine pronouns (e.g., 'Configúrala', 'restáurala')."
-    - "Ensure questions that open with '¿' are properly closed with '?'."
-    - "Fully localize mobile.tradeHistory.details.tradersAndRole; use 'Comerciantes / Rol', not 'Traders / Rol'."
-  fr:
-    - "Use formal 'vous' form for user address."
-    - "Fully localize mobile.tradeHistory.details.tradersAndRole; use 'Commerçants / Rôle', not 'Traders / Rôle'."
-  id:
-    - "Prefer natural Indonesian phrasing over literal calques; for 'How it works', use 'Cara kerjanya' rather than 'Cara kerja ini'."
-  pcm:
-    - "Maintain consistency with terms like 'connection' and 'camera' (do not use 'kamera')."
-    - "For negative outcomes, prefer the 'no gree work' pattern where appropriate."
-    - "Keep new UI labels in Nigerian Pidgin tone rather than plain English; translate paymentAccounts.details as 'Akaunt details' and paymentAccounts.accountCreationDate as 'Date wey dem create Akaunt' unless nearby established wording requires a better phrase."
-  ru:
-    - "In a wallet context, prefer hyphenated terms like 'seed-фраза' and 'биткойн-кошелька'."
-  af_ZA:
-    - "Use standard Afrikaans grammar and spelling throughout."
-    - "Preserve the Afrikaans indefinite article apostrophe: write 'n, including in parenthesized phrases such as ('n per-installasie identifiseerder), never (n ...)."
-    - "For mobile.tradeHistory.count.many and mobile.tradeHistory.count.filtered, count trades ('handel'), not traders ('handelaars')."
-  vi:
-    - "For mobile.tradeHistory.details.networkAddress.clear, 'clear' means clearnet/open network, not delete/clear action; use 'Địa chỉ mạng công khai: {0}'."
-  it: []
-  pt_BR: []
-
-# (Optional) A list of brand names and technical terms that should never be translated.
-brand_technical_glossary:
-  - ACH
-  - ACH Transfer
-  - Advanced Cash
-  - AliPay
-  - Amazon eGift Card
-  - Bisq
-  - Bisq Easy
-  - Bitcoin
-  - Bizum
-  - BSQ Swaps
-  - BTC
-  - Capitual
-  - Cash App
-  - CelPay
-  - Chase QuickPay
-  - CIPS
-  - FPS (UK)
-  - Faster Payments
-  - HalCash
-  - I2P
-  - IMPS
-  - Interac e-Transfer
-  - Japan Furikomi
-  - Lightning
-  - Lightning Escrow
-  - Liquid
-  - Liquid Assets
-  - Monese
-  - MoneyBeam (N26)
-  - Monero Swaps
-  - MuSig
-  - NEFT
-  - Nequi
-  - Paxum
-  - PayTM
-  - Paysera
-  - Perfect Money
-  - Pix
-  - Popmoney
-  - PromptPay
-  - RSK
-  - RTGS
-  - Revolut
-  - SEPA
-  - SEPA Instant
-  - Satispay
-  - Strike
-  - Submarine Swaps
-  - SWIFT
-  - SWIFT International Wire Transfer
-  - Swish
-  - Tikkie
-  - Tor
-  - UPI
-  - US Money Order
-  - Uphold
-  - Verse
-  - WeChat Pay
-  - Wire Transfer
-  - Wise
-  - Wise-USD
-  - Zelle
-  
+# (Optional) Per-locale style guidance injected into the AI prompt.
+# style_rules:
+#   de:
+#     - "Use the formal 'Sie' form of address."

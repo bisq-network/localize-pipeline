@@ -8,10 +8,30 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_example_config_is_a_minimal_generic_starter():
+    """config.example.yaml must stay small, generic, and git-source by default."""
+    config = yaml.safe_load((PROJECT_ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    assert config["translation_source"] == "git"
+    assert "target_project_root" in config and "input_folder" in config
+    assert isinstance(config.get("supported_locales"), list) and config["supported_locales"]
+    # It must NOT carry Bisq-specific project knowledge (that lives in the docker config).
+    assert "semantic_quality_rules" not in config
+    assert {loc["code"] for loc in config["supported_locales"]} <= {"de", "es", "fr"}
+
+
+def test_example_glossary_is_valid_and_small():
+    glossary = yaml.safe_load((PROJECT_ROOT / "glossary.example.json").read_text(encoding="utf-8"))
+    assert isinstance(glossary, dict) and glossary
+    # keyed by language code -> {term: translation}
+    for lang, terms in glossary.items():
+        assert isinstance(terms, dict)
+
+
+# config.example.yaml is intentionally a minimal generic starter; the Bisq
+# project knowledge (style + semantic rules) lives in the docker config.
 @pytest.mark.parametrize(
     "config_path",
     [
-        "config.example.yaml",
         "docker/config.docker.yaml",
     ],
 )

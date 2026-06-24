@@ -1,156 +1,196 @@
 # Translate Java Property Files
 
-This project automates the translation of Java `.properties` files into multiple languages using OpenAI's GPT-based APIs. It integrates with Git to detect changes, pulls the latest translations from Transifex, performs AI-based translation and review for new strings, and creates a pull request with the results.
+AI translation for your Java `.properties` files that runs entirely in **your**
+CI, with **your** model — OpenAI, or a local Ollama for **zero data egress** — and
+opens a **reviewable pull request**. No account, no quota, no per-word bill.
 
-The entire process is designed to be run as an automated, scheduled job on a server, but can also be easily run in a local development environment.
+> Data flow: with a local/self-hosted `api_base_url` (e.g. Ollama) your strings
+> never leave your infrastructure. With the default OpenAI provider, strings are
+> sent to OpenAI's API like any other OpenAI call — choose the provider that fits
+> your privacy needs.
 
-## Features
-
-*   **Automated Translation**: Uses OpenAI (e.g., GPT-4o) to translate new or changed strings.
-*   **Two-Step Quality Process**: A fast initial translation is followed by a robust, chunked AI review step to ensure consistency and quality while avoiding API rate limits.
-*   **Git Integration**: Detects changed files, commits new translations with GPG signatures, and creates pull requests automatically.
-*   **Transifex Integration**: Pulls the latest manual translations from Transifex before running the AI pipeline.
-*   **Automated Error Reporting**: Validation and linter errors for skipped files are automatically added to the pull request description for high visibility.
-*   **Glossary & Style Rules**: Enforces consistent terminology and tone using a `config.yaml` file.
-*   **Dockerized Environment**: Runs as a Docker container for consistent and portable deployment.
-*   **Secure Git Authentication**: Uses a baked-in, read-only SSH deploy key to securely interact with Git repositories, avoiding exposure of host-level keys.
+It detects changed strings, translates new/changed keys with a two-pass
+translate→review process, enforces a glossary and quality gates, and proposes the
+result as a PR you review and merge.
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Add AI translation to your project in 5 minutes
 
-The `translator` service is designed to run in a Docker container. This is the only recommended way to run the service. The process is identical for local testing and server deployment, using Docker to create a secure and consistent environment.
-Before building locally, enable BuildKit:
+**1. Scaffold a config** (auto-detects your locales from existing `*.properties`):
+
 ```bash
-export DOCK-ER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
+./init.sh --input-folder path/to/your/i18n
 ```
 
-### 1.1. Deploy Key Setup
+Commit the generated `config.yaml`.
 
-The service uses an SSH deploy key to interact with Git repositories.
+**2. Add a GitHub workflow** — `.github/workflows/translate.yml`:
 
--   **Generate a new key:** Create a new SSH key specifically for this service (it's recommended to use the `ed25519` algorithm). Do not use a password/passphrase for this key.
--   **Add to GitHub:** Add the public key as a deploy key to the GitHub repository you want to push translations to. **Crucially, you must check "Allow write access."**
--   **Place the key:** Put the private key file in the `secrets/deploy_key/` directory. By default, the system looks for a file named `id_ed25519`.
-    ```text
-    secrets/deploy_key/id_ed25519
-    ```
--   **Custom key name (optional):** If your key file has a different name, you must create a file named `.env` inside the `docker/` directory and specify the filename:
-    ```env
-    # In docker/.env
-    DEPLOY_KEY_NAME=your_key_name_here
-    ```
+```yaml
+name: Translate
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
 
-### 1.2. Configuration
+permissions:
+  contents: write
+  pull-requests: write
 
--   Copy the `config.example.yaml` to `config.yaml`.
--   Edit `config.yaml` and set the `target_project_root` to the path where the Git repository will be cloned inside the container. This is typically `/target_repo`.
--   Set the `input_folder` to the path (relative to `target_project_root`) where the `.properties` files are located.
-
-### 1.3. Building and Running the Service
-
-Once the deploy key is in place and the configuration is set, you can build and run the service with a single command from the project root:
-
-   ```bash
-# To run the full translation and PR creation pipeline
-docker compose run --rm translator
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bisq-network/translate-java-property-files@main
+        with:
+          config-file: config.yaml
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-**NOTE:** The baked-in deploy key must be read-only and scoped to the target repo, rotated regularly, and used only in non-public images. With this in place, `git push` works across platforms; SSH agent forwarding is no longer needed.
+On the next push, the action translates keys changed since the base ref using the
+workflow's own `GITHUB_TOKEN` and opens a PR. Full reference:
+**[GitHub Action guide](./docs/github-action.md)**.
 
-### 2. Server Deployment Details
+### Translate with a local model (zero data egress)
 
-For comprehensive instructions on setting up the automated translation service on a production server (e.g., a cloud VM), including the cron job configuration, please follow the full guide:
+Point the pipeline at a local [Ollama](https://ollama.com) server (or any
+OpenAI-compatible endpoint). No API key leaves your machine — your strings never
+leave your infrastructure:
 
-➡️ **[New Project Deployment Guide](./docs/new-project-deployment.md)**
-
-### 3. Local Development (Legacy Python Script)
-
-For situations where Docker is not available, you can run the Python script directly using a local script. This method has more dependencies (e.g., `tx` CLI, Python environment) and is not the recommended approach.
-
-**Prerequisites:**
-*   Python 3.11+
-*   Transifex CLI (`tx`) installed and on your `PATH`.
-*   A `config.yaml` file configured for your local paths.
-
-**Run the Script:**
 ```bash
-./run-local-translation.sh /path/to/your/config.yaml
+# In config.yaml (or via the OPENAI_BASE_URL env var):
+#   api_base_url: "http://localhost:11434/v1"
+#   model_name: "llama3.1"
+#   review_model_name: "llama3.1"
+./init.sh --input-folder path/to/your/i18n --api-base-url http://localhost:11434/v1
 ```
+
+### Run it locally (no Docker, no CI)
+
+```bash
+python3 -m venv venv                         # first time only
+./venv/bin/pip install pip-tools && ./venv/bin/pip-sync requirements-dev.txt
+export OPENAI_API_KEY=sk-...                  # or use a local api_base_url
+./run-local-translation.sh config.yaml
+```
+
+The pipeline prints a **per-run cost estimate** before spending and a token/cost
+summary afterward, so you always know what a run costs on your key.
+
+---
+
+## Features
+
+* **Your provider, your cost** — OpenAI, or any OpenAI-compatible endpoint
+  (Ollama, Groq, Together, …) via `api_base_url` / `OPENAI_BASE_URL`. No markup, no quota.
+* **Two-step quality process** — a fast initial translation followed by a chunked
+  holistic AI review for consistency and quality.
+* **Glossary & style rules** — enforce brand terms, required translations, and
+  per-locale tone; all version-controlled in your repo.
+* **Quality gates** — placeholder/encoding validation plus deterministic, learned
+  semantic rules; problems are reported in the PR, not silently shipped.
+* **Git-PR-native** — changes arrive as a reviewable pull request.
+* **Cost transparency** — estimated cost before a run, actual token/cost summary
+  after (and in the PR description for the server pipeline).
+* **Two translation sources** — `git` (use the `.properties` already in your repo)
+  or `transifex` (pull via the `tx` CLI first).
 
 ---
 
 ## 🛠️ Configuration
 
-The service is configured through a combination of YAML files and a single environment file for secrets.
+* **`config.example.yaml`** — a minimal, generic starting point. Copy to
+  `config.yaml` and edit (or generate it with `./init.sh`).
+* **`docker/config.docker.yaml`** — a comprehensive real-world example (the Bisq
+  production config) with per-locale style rules, learned semantic rules, and a
+  large glossary.
+* **`glossary.example.json`** — the glossary format (per-language term mappings).
+* **`docker/.env`** — secrets (API keys, tokens, repo URLs); not committed.
 
-*   **`docker/.env`**: **Secrets.** Contains all sensitive information: API keys, tokens, and Git repository URLs. This file is not checked into version control. Use `docker/.env.example` as a template.
-*   **`config.yaml`**: **Local configuration.** Used by `run-local-translation.sh` for local, non-Docker runs.
-*   **`docker/config.docker.yaml`**: **Server configuration.** This is the configuration file used by the service when running inside Docker. It points to paths within the container (e.g., `/target_repo`).
-*   **`glossary.json`**: Provides language-specific translations for key terms to ensure consistency.
-*   **`translation_file_filter_glob`** (optional, in `config.yaml`): A glob pattern that limits which changed `.properties` files are processed by the AI translator. This is useful for workflows where you want to pull all updated files from Transifex but only run the AI step on a specific subset (e.g., `mobile_*.properties`).
-*   **`process_all_files`** (optional, in `config.yaml`): Defaults to `false`. When `true`, the pipeline scans and processes all translation files under `input_folder` instead of only git-changed files. Useful for one-time ledger bootstrap runs.
-*   **`retranslate_identical_source_strings`** (optional, in `config.yaml`): Defaults to `false`. When `false`, the pipeline avoids re-translating existing keys that already match source text unless they were newly synchronized in the current run (including keys inserted/updated by `tx pull -t -f` in the current working tree). Set to `true` to restore legacy behavior.
-*   **`translation_key_ledger_file_path`** (optional, in `config.yaml`): File path for a persistent per-key hash ledger. The ledger stores source/target hashes per key and lets the pipeline retranslate only when source text changes, without repeatedly touching already-stable keys.
+Key settings:
 
-### Adding New Languages
+| Setting | Purpose |
+|---|---|
+| `target_project_root`, `input_folder` | Where your repo and `.properties` live. |
+| `translation_source` | `git` (default for new projects) or `transifex`. |
+| `model_name`, `review_model_name` | Translate and review models. |
+| `api_base_url` | OpenAI-compatible endpoint, e.g. a local Ollama server. |
+| `supported_locales` | Target languages. |
+| `style_rules`, `brand_technical_glossary` | Per-locale tone and do-not-translate terms. |
 
-To add support for a new language to the translation system:
+### Adding new languages
 
 ➡️ **[Adding New Locales Guide](./docs/adding-new-locales.md)**
 
-This comprehensive guide covers:
-- Determining the correct locale code
-- Updating configuration files
-- Adding glossary translations
-- Testing and validation steps
-- Complete real-world examples
+---
+
+## Advanced: Docker & server deployment
+
+The original deployment model runs the pipeline as a scheduled Docker job that
+pulls from Transifex and pushes signed commits via a baked-in SSH deploy key.
+This is how the Bisq translation service runs in production; most adopters should
+prefer the GitHub Action above.
+
+<details>
+<summary>Docker / production deployment details</summary>
+
+Before building locally, enable BuildKit:
+
+```bash
+export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
+```
+
+**Deploy key setup:** generate a dedicated `ed25519` key (no passphrase), add the
+public key as a deploy key on the target repo **with write access** (it must push
+the translation branch), and place the private key at
+`secrets/deploy_key/id_ed25519` (override the name with `DEPLOY_KEY_NAME` in
+`docker/.env`).
+
+**Run the full pipeline (Transifex pull → AI translate → PR):**
+
+```bash
+docker compose run --rm translator
+```
+
+> The baked-in deploy key must be scoped to the single target repo (with write
+> access, since it pushes the translation branch), rotated regularly, and used
+> only in non-public images.
+
+For production server setup (cron, etc.):
+➡️ **[New Project Deployment Guide](./docs/new-project-deployment.md)**
+
+</details>
+
+---
 
 ## 🔧 Maintenance
 
-### Disk Space Management
+Docker deployments accumulate disk usage over time. See:
+➡️ **[Disk Space Management Guide](./docs/maintenance/disk-space-management.md)**
+and the ready-to-deploy **[Docker Cleanup Script](./scripts/docker-cleanup.sh)**.
 
-Docker-based deployments can accumulate significant disk space over time due to:
-- Dangling/unused Docker images from continuous builds
-- Build cache accumulation
-- Large log files and systemd journals
-
-**Automated cleanup recommended** for production deployments:
-
-- **Weekly Docker cleanup**: Removes old containers, images, volumes, and build cache
-- **Daily log rotation**: Keeps 7 days of logs with compression
-- **Systemd journal limits**: Cap at 1GB, 7-day retention
-
-**Implementation guides**:
-➡️ **[Disk Space Management Guide](./docs/maintenance/disk-space-management.md)** - Complete setup instructions
-➡️ **[Docker Cleanup Script](./scripts/docker-cleanup.sh)** - Ready-to-deploy cleanup script
-
-The maintenance documentation includes:
-- Automated maintenance scripts and cron job setup
-- Log rotation and journal management configuration
-- Monitoring commands and troubleshooting procedures
-- Real-world impact analysis and best practices
-
-**Monitor disk usage:**
 ```bash
-# Check disk usage
 df -h /
 docker system df -v
-
-# Verify journal size
 journalctl --disk-usage
-
-# View cleanup logs (after setup)
-tail -50 logs/docker-cleanup.log
 ```
 
 ## Troubleshooting
 
-*   **`Permission denied (publickey)` Errors**: This error during `git push` means the deploy key specified in `secrets/deploy_key/` has not been added to your target GitHub repository's "Deploy Keys" section with write access.
-*   **Validation Errors in Pull Request**: The PR description now includes a report of any files that were skipped due to linter or validation errors. These errors must be fixed manually in the source repository. See `docs/llm/debug-docker-service.md` for more details on common errors.
-*   **Server Deployment Issues**: Refer to the detailed deployment guide and the debugging documentation in the `docs/` directory.
-*   **Disk Space Issues**: See the [Disk Space Management](#disk-space-management) section above for automated cleanup strategies.
+* **`Permission denied (publickey)` on `git push`** — the deploy key in
+  `secrets/deploy_key/` is not added to the target repo's Deploy Keys with write access.
+* **Validation errors in the PR** — the PR description lists files skipped due to
+  validation/linter errors; fix them in the source repo. See
+  `docs/llm/debug-docker-service.md`.
+* **No locales detected by `./init.sh`** — your files may not use the
+  `name_<locale>.properties` convention; add `supported_locales` manually.
+* **Disk space** — see [Maintenance](#-maintenance) above.
 
 ## Contributing
 
-Contributions are welcome! Please fork the repository, create a new branch, commit your changes, and open a pull request.
+Contributions are welcome! Please fork the repository, create a branch, commit
+your changes, and open a pull request.

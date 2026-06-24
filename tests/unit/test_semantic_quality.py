@@ -365,7 +365,8 @@ def test_configured_semantic_rules_catch_recent_mobile_review_nits():
 
 
 def test_configured_semantic_rules_catch_bisq2_review_nits():
-    _, _, _, rules = load_quality_gate_config(str(PROJECT_ROOT / "config.example.yaml"))
+    # Bisq project knowledge lives in the docker config (the example is minimal/generic).
+    _, _, _, rules = load_quality_gate_config(str(PROJECT_ROOT / "docker" / "config.docker.yaml"))
 
     findings = evaluate_semantic_rules(
         changes=[

@@ -23,7 +23,7 @@ This document outlines the structure and purpose of the files and directories wi
 - **`docs/`**: Contains project documentation.
   - **`new-project-deployment.md`**: The primary guide for setting up the service on a new server.
   - **`repository-structure.md`**: This file.
-- **`glossary.json`**: **DEPRECATED**. Glossary terms are now managed in `config.example.yaml`.
+- **`glossary.json`**: Per-language term mappings (the Bisq production glossary), referenced via `glossary_file_path`. See `glossary.example.json` for a minimal generic example. Brand/do-not-translate terms live under `brand_technical_glossary` in the config.
 - **`LICENSE`**: The project's license file.
 - **`logs/`**: (Auto-generated, gitignored) Stores runtime logs from the application.
 - **`README.md`**: Provides the primary overview and getting started guide for the project.

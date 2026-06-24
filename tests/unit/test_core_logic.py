@@ -659,6 +659,56 @@ class TestFileDetectionLogic(unittest.TestCase):
             self.assertNotIn("desktop_de.properties", changed_basenames)
 
     @patch('subprocess.run')
+    def test_get_changed_files_handles_copy_entries(self, mock_subprocess_run):
+        """Copy entries (C) use the same 'old -> new' format as renames; use the new path."""
+        from src.translate_localization_files import get_changed_translation_files
+
+        git_output = "C  i18n/resources/mobile_en.properties -> i18n/resources/mobile_fr.properties\n"
+        mock_subprocess_run.return_value = MagicMock(stdout=git_output, stderr="", check_returncode=MagicMock())
+
+        changed_files = get_changed_translation_files("/fake/repo/i18n/resources", "/fake/repo")
+
+        changed_basenames = [os.path.basename(f) for f in changed_files]
+        self.assertIn("mobile_fr.properties", changed_basenames)
+        # The combined "old -> new" string must not survive as a path.
+        assert not any("->" in f for f in changed_files)
+
+    @patch('subprocess.run')
+    def test_get_changed_files_uses_diff_base_when_env_set(self, mock_subprocess_run):
+        """With TRANSLATION_DIFF_BASE set, detection uses `git diff --name-status` against the base."""
+        from src.translate_localization_files import get_changed_translation_files
+
+        # git diff --name-status output (tab-separated status<TAB>path)
+        diff_output = "M\ti18n/resources/mobile_de.properties\nA\ti18n/resources/mobile_es.properties\n"
+        mock_subprocess_run.return_value = MagicMock(stdout=diff_output, stderr="", check_returncode=MagicMock())
+
+        with patch.dict('os.environ', {'TRANSLATION_DIFF_BASE': 'origin/main'}):
+            changed_files = get_changed_translation_files("/fake/repo/i18n/resources", "/fake/repo")
+
+        # The subprocess must have been a `git diff` against the base, not `git status`.
+        args = mock_subprocess_run.call_args[0][0]
+        assert args[:3] == ['git', 'diff', '--name-status']
+        assert any('origin/main' in a for a in args)
+        changed_basenames = [os.path.basename(f) for f in changed_files]
+        self.assertIn("mobile_de.properties", changed_basenames)
+        self.assertIn("mobile_es.properties", changed_basenames)
+
+    @patch('subprocess.run')
+    def test_get_changed_files_diff_base_ignores_deletions(self, mock_subprocess_run):
+        """Deleted files (status D) in the base diff are not enqueued for translation."""
+        from src.translate_localization_files import get_changed_translation_files
+
+        diff_output = "D\ti18n/resources/mobile_de.properties\nM\ti18n/resources/mobile_es.properties\n"
+        mock_subprocess_run.return_value = MagicMock(stdout=diff_output, stderr="", check_returncode=MagicMock())
+
+        with patch.dict('os.environ', {'TRANSLATION_DIFF_BASE': 'origin/main'}):
+            changed_files = get_changed_translation_files("/fake/repo/i18n/resources", "/fake/repo")
+
+        changed_basenames = [os.path.basename(f) for f in changed_files]
+        self.assertNotIn("mobile_de.properties", changed_basenames)
+        self.assertIn("mobile_es.properties", changed_basenames)
+
+    @patch('subprocess.run')
     def test_get_changed_files_detects_hyphenated_locales(self, mock_subprocess_run):
         """
         Tests that get_changed_translation_files correctly detects files with

@@ -67,6 +67,116 @@ class AppConfig:
     # Generated PR quality gate
     quality_gate: QualityGateConfig = field(default_factory=QualityGateConfig)
 
+    # Optional OpenAI-compatible endpoint (e.g. a local Ollama server or another
+    # provider). None means the default OpenAI API. See _resolve_api_base_url.
+    api_base_url: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ConfigIssue:
+    """A single validation finding for the configuration file."""
+    level: str  # "error" | "warning"
+    message: str
+
+
+# Placeholder paths shipped in the example configs; treated as "not yet edited".
+_PLACEHOLDER_PATHS = frozenset({
+    "/path/to/default/repo/root",
+    "/path/to/default/input_folder",
+    "/path/to/your/git/repo",
+    "/path/to/properties/files",
+})
+
+
+def validate_config(
+    config: Dict[str, Any],
+    *,
+    path_exists=os.path.exists,
+    effective_api_base_url: Optional[str] = None,
+) -> List[ConfigIssue]:
+    """Validate a raw config dict and return actionable issues.
+
+    Pure and side-effect free (``path_exists`` is injectable for testing). Callers
+    decide how to surface the result; ``load_app_config`` logs it. The loader stays
+    forgiving — validation reports problems, it does not raise.
+
+    ``effective_api_base_url`` lets the caller validate the *resolved* endpoint
+    (e.g. after the ``OPENAI_BASE_URL`` env override) instead of the raw config value.
+    """
+    issues: List[ConfigIssue] = []
+
+    # Required paths must be set, not a left-over placeholder, and must exist.
+    target_root = config.get("target_project_root")
+    for key in ("target_project_root", "input_folder"):
+        value = config.get(key)
+        if not value:
+            issues.append(ConfigIssue(
+                "error",
+                f"'{key}' is not set. Add it to your config.yaml (run the init helper to scaffold one)."
+            ))
+            continue
+        if value in _PLACEHOLDER_PATHS:
+            issues.append(ConfigIssue(
+                "error",
+                f"'{key}' is still the example placeholder '{value}'. Point it at your repository."
+            ))
+            continue
+        # A relative input_folder is resolved against target_project_root, matching
+        # how update-translations.sh builds ABSOLUTE_INPUT_FOLDER.
+        resolved = value
+        if key == "input_folder" and target_root and not os.path.isabs(value):
+            resolved = os.path.join(target_root, value)
+        if not path_exists(resolved):
+            issues.append(ConfigIssue(
+                "error",
+                f"'{key}' points to '{resolved}', which does not exist. Check the path."
+            ))
+
+    # Locales.
+    locales = config.get("supported_locales", []) or []
+    locale_codes = set()
+    if isinstance(locales, list):
+        locale_codes = {
+            loc.get("code") for loc in locales
+            if isinstance(loc, dict) and loc.get("code")
+        }
+    if not locale_codes:
+        issues.append(ConfigIssue(
+            "warning",
+            "No 'supported_locales' configured; nothing will be translated."
+        ))
+
+    # style_rules referencing locales that are not declared is almost always a typo.
+    style_rules = config.get("style_rules") or {}
+    if isinstance(style_rules, dict) and locale_codes:
+        for code in style_rules:
+            if code not in locale_codes:
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"style_rules references locale '{code}', which is not in supported_locales."
+                ))
+
+    # OpenAI-compatible endpoint should be a URL. Validate the effective value
+    # (resolved override) when provided, else the raw config value.
+    base_url = effective_api_base_url if effective_api_base_url is not None else config.get("api_base_url")
+    if base_url and not str(base_url).strip().startswith(("http://", "https://")):
+        issues.append(ConfigIssue(
+            "warning",
+            f"api_base_url '{base_url}' should start with http:// or https:// "
+            "(e.g. http://localhost:11434/v1 for a local Ollama server)."
+        ))
+
+    return issues
+
+
+def _log_config_issues(issues: List[ConfigIssue], logger: logging.Logger) -> None:
+    """Log validation issues with actionable wording."""
+    for issue in issues:
+        if issue.level == "error":
+            logger.error("Configuration problem: %s", issue.message)
+        else:
+            logger.warning("Configuration note: %s", issue.message)
+
 
 def _compute_project_root() -> str:
     """Compute the project root directory."""
@@ -205,25 +315,67 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _create_openai_client(dry_run: bool, logger: logging.Logger) -> Optional[AsyncOpenAI]:
-    """Create OpenAI client if not in dry run mode with enhanced error handling."""
+# Placeholder key for local/self-hosted OpenAI-compatible servers (e.g. Ollama)
+# that do not require authentication. The SDK requires a non-empty api_key.
+_LOCAL_PROVIDER_PLACEHOLDER_KEY = "not-needed"
+
+
+def _resolve_api_base_url(config: Dict[str, Any]) -> Optional[str]:
+    """Resolve the OpenAI-compatible endpoint, env (OPENAI_BASE_URL) over config.
+
+    Returns None for the default OpenAI API.
+    """
+    for candidate in (os.environ.get('OPENAI_BASE_URL'), config.get('api_base_url')):
+        if candidate is not None:
+            stripped = str(candidate).strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _create_openai_client(
+    dry_run: bool,
+    logger: logging.Logger,
+    api_base_url: Optional[str] = None,
+) -> Optional[AsyncOpenAI]:
+    """Create an OpenAI(-compatible) client unless running in dry-run mode.
+
+    When ``api_base_url`` is set the client targets a custom endpoint (another
+    provider or a local Ollama server). Such endpoints often need no key, so a
+    missing key is tolerated there (a placeholder is used); for the default
+    OpenAI API a missing key remains a hard error.
+    """
     if dry_run:
         logger.info("Running in dry-run mode, OpenAI client will not be initialized")
         return None
 
+    is_custom_endpoint = bool(api_base_url)
     api_key_from_env = os.environ.get('OPENAI_API_KEY')
-    if not api_key_from_env:
-        logger.critical("CRITICAL: OPENAI_API_KEY environment variable not found.")
-        logger.critical("Please set OPENAI_API_KEY or enable dry_run mode in configuration.")
-        logger.critical("For dry-run mode, set 'dry_run: true' in your config file.")
-        sys.exit(1)
 
-    # Validate API key format
-    if not api_key_from_env.startswith('sk-'):
+    if not api_key_from_env:
+        if is_custom_endpoint:
+            logger.info(
+                "No OPENAI_API_KEY set; using a placeholder key for custom endpoint '%s' "
+                "(typical for local servers such as Ollama).",
+                api_base_url,
+            )
+            api_key_from_env = _LOCAL_PROVIDER_PLACEHOLDER_KEY
+        else:
+            logger.critical("CRITICAL: OPENAI_API_KEY environment variable not found.")
+            logger.critical("Please set OPENAI_API_KEY or enable dry_run mode in configuration.")
+            logger.critical("For dry-run mode, set 'dry_run: true' in your config file.")
+            sys.exit(1)
+    elif not is_custom_endpoint and not api_key_from_env.startswith('sk-'):
+        # The sk- convention only applies to the official OpenAI API; BYO keys for
+        # other providers (Groq, Together, etc.) use different prefixes.
         logger.warning("Warning: OPENAI_API_KEY does not start with 'sk-'. This may be invalid.")
 
     try:
-        client = AsyncOpenAI(api_key=api_key_from_env)
+        client_kwargs: Dict[str, Any] = {"api_key": api_key_from_env}
+        if api_base_url:
+            client_kwargs["base_url"] = api_base_url
+            logger.info("Using OpenAI-compatible endpoint: %s", api_base_url)
+        client = AsyncOpenAI(**client_kwargs)
         logger.info("OpenAI client initialized successfully")
         return client
     except Exception as e:
@@ -254,6 +406,13 @@ def load_app_config() -> AppConfig:
     # Log .env status now that logger is available
     _log_dotenv_status(logger, project_root)
 
+    # Resolve the effective OpenAI-compatible endpoint (env override wins) so the
+    # client and validation both see the same value.
+    api_base_url = _resolve_api_base_url(config)
+
+    # Validate the configuration and surface actionable problems (non-fatal).
+    _log_config_issues(validate_config(config, effective_api_base_url=api_base_url), logger)
+
     # Build language mappings
     locales_list = config.get('supported_locales', [])
     language_codes, name_to_code = _build_language_mappings(locales_list)
@@ -264,7 +423,12 @@ def load_app_config() -> AppConfig:
 
     # Get configuration values with defaults
     dry_run = config.get('dry_run', False)
-    process_all_files = bool(config.get('process_all_files', False))
+    # PROCESS_ALL_FILES env var overrides config (the GitHub Action sets it so a
+    # clean CI checkout, which has no working-tree changes, still finds work).
+    process_all_files = _as_bool(
+        os.environ.get('PROCESS_ALL_FILES', config.get('process_all_files', False)),
+        default=False,
+    )
     model_name = config.get('model_name', 'gpt-4')
     review_model_name = os.environ.get('REVIEW_MODEL_NAME', config.get('review_model_name', model_name))
     retranslate_identical_source_strings = bool(config.get('retranslate_identical_source_strings', False))
@@ -306,8 +470,8 @@ def load_app_config() -> AppConfig:
     if not os.path.isabs(translation_key_ledger_file_path):
         translation_key_ledger_file_path = os.path.join(project_root, translation_key_ledger_file_path)
 
-    # Create OpenAI client
-    openai_client = _create_openai_client(dry_run, logger)
+    # Create the client against the endpoint resolved earlier.
+    openai_client = _create_openai_client(dry_run, logger, api_base_url)
 
     return AppConfig(
         project_root=project_root,
@@ -332,5 +496,6 @@ def load_app_config() -> AppConfig:
         translation_key_ledger_file_path=translation_key_ledger_file_path,
         preserve_queues_for_debug=config.get('preserve_queues_for_debug', False),
         openai_client=openai_client,
-        quality_gate=quality_gate
+        quality_gate=quality_gate,
+        api_base_url=api_base_url,
     )

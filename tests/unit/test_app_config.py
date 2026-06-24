@@ -5,7 +5,7 @@ from unittest.mock import patch, mock_open, MagicMock
 import pytest
 import yaml
 
-from src.app_config import AppConfig, load_app_config
+from src.app_config import AppConfig, load_app_config, validate_config
 
 
 class TestAppConfig:
@@ -150,6 +150,19 @@ class TestLoadAppConfig:
                 with patch("src.logging_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
+                        config = load_app_config()
+
+        assert config.process_all_files is True
+
+    def test_process_all_files_env_override(self):
+        """PROCESS_ALL_FILES env var overrides the config value (used by the Action)."""
+        mock_config = {"dry_run": True, "process_all_files": False}
+
+        with patch("src.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("src.logging_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {"PROCESS_ALL_FILES": "true"}, clear=True):
                         config = load_app_config()
 
         assert config.process_all_files is True
@@ -316,3 +329,195 @@ class TestLoadAppConfig:
                             config = load_app_config()
 
         assert config.model_name == "custom-model"
+
+
+class TestValidateConfig:
+    """Friendly, actionable validation of the raw config dict (pure function)."""
+
+    GOOD = {
+        "target_project_root": "/repo",
+        "input_folder": "/repo/i18n",
+        "supported_locales": [{"code": "de", "name": "German"}],
+    }
+
+    @staticmethod
+    def _errors(issues):
+        return [i.message for i in issues if i.level == "error"]
+
+    @staticmethod
+    def _warnings(issues):
+        return [i.message for i in issues if i.level == "warning"]
+
+    def test_valid_config_has_no_errors(self):
+        issues = validate_config(self.GOOD, path_exists=lambda p: True)
+        assert self._errors(issues) == []
+
+    def test_missing_required_paths_are_errors(self):
+        issues = validate_config({"supported_locales": self.GOOD["supported_locales"]},
+                                 path_exists=lambda p: True)
+        errs = self._errors(issues)
+        assert any("target_project_root" in e for e in errs)
+        assert any("input_folder" in e for e in errs)
+
+    def test_placeholder_paths_are_errors(self):
+        cfg = {**self.GOOD,
+               "target_project_root": "/path/to/your/git/repo",
+               "input_folder": "/path/to/properties/files"}
+        errs = self._errors(validate_config(cfg, path_exists=lambda p: True))
+        assert any("placeholder" in e.lower() for e in errs)
+
+    def test_nonexistent_path_is_error(self):
+        errs = self._errors(validate_config(self.GOOD, path_exists=lambda p: False))
+        assert any("does not exist" in e for e in errs)
+
+    def test_relative_input_folder_resolved_against_target_root(self):
+        """A relative input_folder is resolved against target_project_root, like the shell does."""
+        cfg = {"target_project_root": "/repo", "input_folder": "i18n",
+               "supported_locales": [{"code": "de", "name": "German"}]}
+        checked = []
+
+        def fake_exists(p):
+            checked.append(p)
+            return p in ("/repo", os.path.join("/repo", "i18n"))
+
+        issues = validate_config(cfg, path_exists=fake_exists)
+        assert self._errors(issues) == []
+        assert os.path.join("/repo", "i18n") in checked  # not the cwd-relative "i18n"
+
+    def test_absolute_input_folder_checked_as_is(self):
+        cfg = {"target_project_root": "/repo", "input_folder": "/elsewhere/i18n",
+               "supported_locales": [{"code": "de", "name": "German"}]}
+        checked = []
+
+        def fake_exists(p):
+            checked.append(p)
+            return True
+
+        validate_config(cfg, path_exists=fake_exists)
+        assert "/elsewhere/i18n" in checked
+
+    def test_no_locales_is_warning(self):
+        cfg = {"target_project_root": "/repo", "input_folder": "/repo/i18n"}
+        warns = self._warnings(validate_config(cfg, path_exists=lambda p: True))
+        assert any("supported_locales" in w for w in warns)
+
+    def test_style_rule_for_unknown_locale_is_warning(self):
+        cfg = {**self.GOOD, "style_rules": {"de": ["ok"], "xx": ["typo"]}}
+        warns = self._warnings(validate_config(cfg, path_exists=lambda p: True))
+        assert any("xx" in w for w in warns)
+        # Known locale must not be flagged.
+        assert not any("'de'" in w for w in warns)
+
+    def test_bad_api_base_url_scheme_is_warning(self):
+        cfg = {**self.GOOD, "api_base_url": "localhost:11434/v1"}
+        warns = self._warnings(validate_config(cfg, path_exists=lambda p: True))
+        assert any("api_base_url" in w for w in warns)
+
+    def test_good_api_base_url_no_warning(self):
+        cfg = {**self.GOOD, "api_base_url": "http://localhost:11434/v1"}
+        warns = self._warnings(validate_config(cfg, path_exists=lambda p: True))
+        assert not any("api_base_url" in w for w in warns)
+
+    def test_effective_base_url_overrides_config_for_validation(self):
+        """A bad OPENAI_BASE_URL override is validated even if the config value is fine."""
+        cfg = {**self.GOOD, "api_base_url": "http://localhost:11434/v1"}
+        warns = self._warnings(validate_config(
+            cfg, path_exists=lambda p: True, effective_api_base_url="localhost:bad"))
+        assert any("api_base_url" in w for w in warns)
+
+    def test_effective_base_url_valid_no_warning(self):
+        cfg = {**self.GOOD, "api_base_url": "not-a-url"}  # config value bad...
+        warns = self._warnings(validate_config(
+            cfg, path_exists=lambda p: True,
+            effective_api_base_url="https://api.example.com/v1"))  # ...but effective is good
+        assert not any("api_base_url" in w for w in warns)
+
+    def test_malformed_sections_do_not_crash(self):
+        cfg = {"target_project_root": "/repo", "input_folder": "/repo/i18n",
+               "supported_locales": "not-a-list", "style_rules": "not-a-dict"}
+        # Should not raise.
+        issues = validate_config(cfg, path_exists=lambda p: True)
+        assert isinstance(issues, list)
+
+
+class TestProviderAbstraction:
+    """Provider abstraction: OpenAI-compatible base_url / BYO-key / local (Ollama)."""
+
+    @staticmethod
+    def _load(mock_config, env):
+        with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.logging_config.setup_logger") as mock_logger:
+                        mock_logger.return_value = MagicMock()
+                        with patch("src.app_config.AsyncOpenAI") as mock_openai:
+                            mock_openai.return_value = MagicMock()
+                            with patch.dict(os.environ, env, clear=True):
+                                config = load_app_config()
+        return config, mock_openai
+
+    def test_default_openai_path_unchanged(self):
+        """With no base_url, the client is built with api_key only (backwards compatible)."""
+        config, mock_openai = self._load(
+            {"dry_run": False}, {"OPENAI_API_KEY": "sk-test-key"}
+        )
+        mock_openai.assert_called_once_with(api_key="sk-test-key")
+        assert config.api_base_url is None
+
+    def test_base_url_from_config_passed_to_client(self):
+        """api_base_url in config is passed to the OpenAI-compatible client."""
+        config, mock_openai = self._load(
+            {"dry_run": False, "api_base_url": "http://localhost:11434/v1"},
+            {"OPENAI_API_KEY": "sk-test-key"},
+        )
+        assert config.api_base_url == "http://localhost:11434/v1"
+        _, kwargs = mock_openai.call_args
+        assert kwargs["base_url"] == "http://localhost:11434/v1"
+        assert kwargs["api_key"] == "sk-test-key"
+
+    def test_base_url_env_overrides_config(self):
+        """OPENAI_BASE_URL env var wins over the config value."""
+        config, mock_openai = self._load(
+            {"dry_run": False, "api_base_url": "http://config-host/v1"},
+            {"OPENAI_API_KEY": "sk-test-key", "OPENAI_BASE_URL": "http://env-host/v1"},
+        )
+        assert config.api_base_url == "http://env-host/v1"
+        _, kwargs = mock_openai.call_args
+        assert kwargs["base_url"] == "http://env-host/v1"
+
+    def test_local_provider_without_key_uses_placeholder(self):
+        """A custom endpoint (e.g. Ollama) needs no real key; we must not exit."""
+        config, mock_openai = self._load(
+            {"dry_run": False, "api_base_url": "http://localhost:11434/v1"},
+            {},  # no OPENAI_API_KEY
+        )
+        _, kwargs = mock_openai.call_args
+        assert kwargs["base_url"] == "http://localhost:11434/v1"
+        assert kwargs["api_key"]  # non-empty placeholder so the SDK does not raise
+        assert config.openai_client is not None
+
+    def test_missing_key_without_base_url_still_exits(self):
+        """Without a custom endpoint, a missing key is still a hard error."""
+        with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": False}))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.logging_config.setup_logger") as mock_logger:
+                        mock_logger.return_value = MagicMock()
+                        with patch.dict(os.environ, {}, clear=True):
+                            with pytest.raises(SystemExit):
+                                load_app_config()
+
+    def test_non_sk_key_with_custom_endpoint_not_warned(self):
+        """A BYO key on a custom endpoint may not start with sk-; accept it without warning."""
+        captured = MagicMock()
+        with patch("builtins.open", mock_open(read_data=yaml.dump(
+            {"dry_run": False, "api_base_url": "https://api.groq.com/openai/v1"}
+        ))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.logging_config.setup_logger", return_value=captured):
+                        with patch("src.app_config.AsyncOpenAI", return_value=MagicMock()):
+                            with patch.dict(os.environ, {"OPENAI_API_KEY": "gsk_abc123"}, clear=True):
+                                load_app_config()
+        warnings = [str(c) for c in captured.warning.call_args_list]
+        assert not any("sk-" in w for w in warnings)

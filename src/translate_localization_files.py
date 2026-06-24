@@ -40,6 +40,9 @@ from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
 from src.properties_parser import parse_properties_file, reassemble_file
+from src.usage_tracker import usage_tracker
+from src.cost_estimator import estimate_run_cost, format_estimate
+from src.locale_utils import is_locale_file
 from src.translation_validator import (
     check_placeholder_parity,
     check_encoding_and_mojibake,
@@ -1160,6 +1163,7 @@ Provide the translation **of the Value only**, following the instructions above.
                     temperature=0.3,
                     timeout=60.0,
                 )
+                usage_tracker.record_response(MODEL_NAME, response)
 
                 msg_content = response.choices[0].message.content
                 if not msg_content:
@@ -1309,6 +1313,7 @@ async def holistic_review_async(
                     max_tokens=8192,  # Increased to handle larger review responses
                     timeout=120.0,
                 )
+                usage_tracker.record_response(REVIEW_MODEL_NAME, response)
                 msg_content = response.choices[0].message.content
                 if not msg_content or not msg_content.strip():
                     logger.error("Holistic review returned empty content.")
@@ -1613,7 +1618,7 @@ def get_changed_translation_files(
             for filename in files:
                 if not filename.endswith('.properties'):
                     continue
-                if not re.search(r'_[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?\.properties$', filename):
+                if not is_locale_file(filename):
                     continue
                 absolute_path = os.path.join(root, filename)
                 relative_path = os.path.relpath(absolute_path, input_folder_path)
@@ -1630,46 +1635,69 @@ def get_changed_translation_files(
         # Calculate the relative path of input_folder from repo_root
         rel_input_folder = os.path.relpath(input_folder_path, repo_root)
 
-        # Log the command being run for traceability
-        logger.info(f"Running git status in '{repo_root}' for path '{rel_input_folder}'")
+        def _entries_from_status_output(stdout: str):
+            """Yield (status, path) pairs from `git status --porcelain` output."""
+            for line in stdout.splitlines():
+                if len(line) < 4:
+                    continue
+                # Each line starts with two characters indicating status, e.g. ' M file', '?? file'.
+                status, filepath = line[:2], line[3:]
+                # Renames (R) and copies (C) both use the 'old -> new' path format.
+                if status.strip()[:1] in ('R', 'C') and ' -> ' in filepath:
+                    filepath = filepath.split(' -> ', 1)[1]
+                yield status.strip(), filepath
 
-        # Run 'git status --porcelain rel_input_folder' to get changed files in that folder
-        # We include untracked files with '--untracked-files=normal'
-        result = subprocess.run(
-            ['git', 'status', '--porcelain', '--untracked-files=normal', rel_input_folder],
-            cwd=repo_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True
-        )
+        def _entries_from_diff_output(stdout: str):
+            """Yield (status, path) pairs from `git diff --name-status` output."""
+            for line in stdout.splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split('\t')
+                if len(parts) < 2:
+                    continue
+                # parts[0] is the status code (M, A, D, R100, …); for renames/copies the
+                # destination path is the last field.
+                yield parts[0][:1], parts[-1]
+
+        # In CI a fresh checkout has no working-tree changes, so detection can instead
+        # diff against a base ref (TRANSLATION_DIFF_BASE, e.g. the PR/push base). When
+        # unset we keep the working-tree behaviour used by the Transifex/server flow.
+        diff_base = (os.environ.get('TRANSLATION_DIFF_BASE') or '').strip()
+        if diff_base:
+            logger.info("Detecting changed files via 'git diff' against base '%s' for path '%s'",
+                        diff_base, rel_input_folder)
+            result = subprocess.run(
+                ['git', 'diff', '--name-status', f'{diff_base}...HEAD', '--', rel_input_folder],
+                cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+            )
+            entries = _entries_from_diff_output(result.stdout)
+        else:
+            logger.info(f"Running git status in '{repo_root}' for path '{rel_input_folder}'")
+            result = subprocess.run(
+                ['git', 'status', '--porcelain', '--untracked-files=normal', rel_input_folder],
+                cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+            )
+            entries = _entries_from_status_output(result.stdout)
 
         changed_translation_files: Set[str] = set()
         changed_source_files: Set[str] = set()
-        for line in result.stdout.splitlines():
-            if len(line) < 4:
+        # Accepted change statuses for both formats; deletions (D) are intentionally excluded.
+        accepted_status = {'M', 'A', 'AM', 'MM', 'RM', 'R', 'C', '??'}
+        for cleaned_status, filepath in entries:
+            if cleaned_status not in accepted_status:
                 continue
-            # Each line starts with two characters indicating status
-            # e.g., ' M filename', '?? filename'
-            status, filepath = line[:2], line[3:]
-            if status.strip().startswith('R') and ' -> ' in filepath:
-                filepath = filepath.split(' -> ', 1)[1]
-
-            cleaned_status = status.strip()
-            # We now also check for '??' (untracked files)
-            if cleaned_status in {'M', 'A', 'AM', 'MM', 'RM', 'R', '??'}:
-                if filepath.endswith('.properties'):
-                    # Extract the filename relative to input_folder
-                    rel_path = os.path.relpath(filepath, rel_input_folder)
-                    if is_archive_path(rel_path):
-                        continue
-
-                    # Check if it's a translation file (has language suffix).
-                    # Updated regex to support hyphenated locale codes like zh-Hans, zh-Hant.
-                    if re.search(r'_[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?\.properties$', os.path.basename(filepath)):
-                        changed_translation_files.add(rel_path)
-                    else:
-                        changed_source_files.add(rel_path.replace('\\', '/'))
+            if not filepath.endswith('.properties'):
+                continue
+            # Extract the filename relative to input_folder
+            rel_path = os.path.relpath(filepath, rel_input_folder)
+            if is_archive_path(rel_path):
+                continue
+            # Check if it's a translation file (has language suffix). Supports
+            # hyphenated locale codes like zh-Hans, zh-Hant.
+            if is_locale_file(os.path.basename(filepath)):
+                changed_translation_files.add(rel_path)
+            else:
+                changed_source_files.add(rel_path.replace('\\', '/'))
 
         # Resilience to delayed Transifex propagation:
         # if source files changed, also enqueue all related locale files even if unchanged in git status.
@@ -1856,6 +1884,17 @@ async def process_translation_queue(
             save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
             logger.info(f"No texts to translate in file '{translation_file}'.")
             continue
+
+        # Pre-run scope/cost preview for this file (ballpark — actuals logged at the end).
+        file_estimate = estimate_run_cost(
+            num_keys=len(keys_to_translate),
+            locale_codes=[language_code],
+            translate_model=MODEL_NAME,
+            review_model=REVIEW_MODEL_NAME,
+        )
+        logger.info("Pre-run estimate for '%s':", translation_file)
+        for line in format_estimate(file_estimate).splitlines():
+            logger.info(line)
 
         # Gather all translation tasks
         tasks = [
@@ -2263,6 +2302,16 @@ async def main():
         skipped_files=skipped_files,
     )
     logger.info(f"Wrote translation validation summary to {validation_summary_path}")
+
+    # Step 6b: Write token usage / cost summary for this run.
+    usage_summary_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'token_usage_summary.json')
+    try:
+        usage_tracker.write_json(usage_summary_path)
+        for line in usage_tracker.format_summary().splitlines():
+            logger.info(line)
+        logger.info(f"Wrote token usage summary to {usage_summary_path}")
+    except Exception:
+        logger.exception("Failed to write token usage summary")
 
     # Step 7: Copy translated files back to the input folder, overwriting the originals.
     copy_translated_files_back(TRANSLATED_QUEUE_FOLDER, INPUT_FOLDER)

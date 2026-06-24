@@ -1,0 +1,17 @@
+{
+  "de": {
+    "account": "Konto",
+    "wallet": "Wallet",
+    "settings": "Einstellungen"
+  },
+  "es": {
+    "account": "Cuenta",
+    "wallet": "Monedero",
+    "settings": "Ajustes"
+  },
+  "fr": {
+    "account": "Compte",
+    "wallet": "Portefeuille",
+    "settings": "Paramètres"
+  }
+}

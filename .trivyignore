@@ -179,3 +179,42 @@ CVE-2026-45022
 CVE-2026-39823
 CVE-2026-39825
 CVE-2026-42504
+
+# Newly disclosed Go x/crypto, x/net, and stdlib vulnerabilities reported in
+# vendor-supplied Go binaries baked into the image.
+# Affects: tx v1.6.17 (Transifex CLI, Go 1.16.15) and gosu 1.19. gh is rebuilt
+#          from source with a current Go toolchain above, and yq is on the latest
+#          release, so neither is the source of these findings.
+# Breakdown:
+#   golang.org/x/crypto/ssh: CVE-2025-47913, CVE-2026-39827, CVE-2026-39828,
+#       CVE-2026-39829, CVE-2026-39830, CVE-2026-39835, CVE-2026-42508,
+#       CVE-2026-46595, CVE-2026-46597
+#   golang.org/x/net (html/idna): CVE-2021-44716, CVE-2024-45338, CVE-2026-25680,
+#       CVE-2026-25681, CVE-2026-27136, CVE-2026-39821, CVE-2026-42502, CVE-2026-42506
+#   stdlib (crypto/x509 VerifyHostname): CVE-2026-27145
+# Rationale: tx and gosu are used only in controlled CI/CD/container contexts and
+#            are not exposed as services. tx talks to Transifex's API over fixed
+#            workflow inputs (no parsing of untrusted SSH/HTML remote content here),
+#            and gosu only drops privileges at container startup. Upstream has no
+#            newer patched release we can adopt; the binaries cannot be rebuilt by us.
+# Checked upstream latest releases: 2026-06-24.
+# Added: 2026-06-24
+# Revisit by: 2026-08-15
+CVE-2025-47913
+CVE-2026-39827
+CVE-2026-39828
+CVE-2026-39829
+CVE-2026-39830
+CVE-2026-39835
+CVE-2026-42508
+CVE-2026-46595
+CVE-2026-46597
+CVE-2021-44716
+CVE-2024-45338
+CVE-2026-25680
+CVE-2026-25681
+CVE-2026-27136
+CVE-2026-39821
+CVE-2026-42502
+CVE-2026-42506
+CVE-2026-27145
