@@ -26,6 +26,27 @@ DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
 }
 
 
+def cost_for_tokens(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    prices: Optional[Dict[str, Dict[str, float]]] = None,
+) -> Optional[float]:
+    """USD cost for token counts, or ``None`` if ``model`` has no known price.
+
+    Single source of truth for the pricing math, shared by the live usage
+    tracker and the pre-run cost estimator.
+    """
+    table = prices if prices is not None else DEFAULT_PRICES
+    price = table.get(model)
+    if price is None:
+        return None
+    return (
+        prompt_tokens / 1_000_000 * price["input"]
+        + completion_tokens / 1_000_000 * price["output"]
+    )
+
+
 @dataclass
 class _ModelUsage:
     calls: int = 0
@@ -66,13 +87,7 @@ class UsageTracker:
         )
 
     def _model_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
-        price = self._prices.get(model)
-        if price is None:
-            return None
-        return (
-            prompt_tokens / 1_000_000 * price["input"]
-            + completion_tokens / 1_000_000 * price["output"]
-        )
+        return cost_for_tokens(model, prompt_tokens, completion_tokens, self._prices)
 
     def summary(self) -> Dict[str, Any]:
         """Return a structured summary of usage and estimated cost."""
