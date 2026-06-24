@@ -101,23 +101,28 @@ runs:
       shell: bash
       working-directory: ${{ github.workspace }}
       env:
+        # Pass user-controlled inputs through the environment, never interpolated
+        # directly into the script, to avoid shell/command injection.
         GH_TOKEN: ${{ inputs.github-token }}
+        PR_BRANCH: ${{ inputs.pr-branch }}
+        COMMIT_MSG: ${{ inputs.commit-message }}
+        PR_TITLE: ${{ inputs.pr-title }}
       run: |
         set -euo pipefail
         if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
           echo "No translation changes; nothing to open a PR for."
           exit 0
         fi
-        branch="${{ inputs.pr-branch }}"
+        branch="$PR_BRANCH"
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git checkout -B "$branch"
         git add -A
-        git commit -m "${{ inputs.commit-message }}"
+        git commit -m "$COMMIT_MSG"
         git push --force-with-lease origin "$branch"
         if gh pr view "$branch" >/dev/null 2>&1; then
           echo "Pull request already exists for $branch; it now points at the latest push."
         else
-          gh pr create --head "$branch" --title "${{ inputs.pr-title }}" \
+          gh pr create --head "$branch" --title "$PR_TITLE" \
             --body "Automated translation update. Review the changed .properties files before merging."
         fi

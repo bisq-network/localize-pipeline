@@ -54,6 +54,14 @@ def test_incremental_by_default_via_diff_base(action):
     assert "TRANSLATION_DIFF_BASE" in rendered
 
 
+def test_no_user_input_interpolated_into_run_scripts(action):
+    """Guard against script injection: inputs must reach run: via env, not ${{ }}."""
+    for step in action["runs"]["steps"]:
+        run = step.get("run")
+        if run:
+            assert "${{ inputs." not in run, f"step '{step.get('name')}' interpolates an input into run:"
+
+
 def test_opens_pr_with_gh_cli(action):
     rendered = ACTION.read_text(encoding="utf-8")
     assert "gh pr create" in rendered
