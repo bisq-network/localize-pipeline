@@ -105,9 +105,8 @@ summary afterward, so you always know what a run costs on your key.
 
 * **`config.example.yaml`** — a minimal, generic starting point. Copy to
   `config.yaml` and edit (or generate it with `./init.sh`).
-* **`docker/config.docker.yaml`** — a comprehensive real-world example (the Bisq
-  production config) with per-locale style rules, learned semantic rules, and a
-  large glossary.
+* **`profiles/bisq/`** — a comprehensive real-world profile (the Bisq production
+  config and glossary) with per-locale style rules and learned semantic rules.
 * **`glossary.example.json`** — the glossary format (per-language term mappings).
 * **`docker/.env`** — secrets (API keys, tokens, repo URLs); not committed.
 
@@ -157,6 +156,9 @@ the translation branch), and place the private key at
 ```bash
 docker compose run --rm translator
 ```
+
+By default Docker mounts `profiles/bisq/`. Set `TRANSLATOR_PROFILE` in
+`docker/.env` to mount a different `profiles/<name>/` directory.
 
 > The baked-in deploy key must be scoped to the single target repo (with write
 > access, since it pushes the translation branch), rotated regularly, and used

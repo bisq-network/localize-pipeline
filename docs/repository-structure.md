@@ -14,7 +14,6 @@ This document outlines the structure and purpose of the files and directories wi
 - **`config.yaml`**: (User-managed) Configuration file for local, non-Docker runs.
 - **`docker/`**: Contains all files for building and running the Dockerized application.
   - **`.env.example`**: Example environment file. Must be copied to `docker/.env` by the user and customized with secrets.
-  - **`config.docker.yaml`**: Configuration file used *inside* the Docker container for server deployments.
   - **`docker-compose.override.yml`**: (User-managed, gitignored) Optional file for local development to enable features like SSH Agent Forwarding.
   - **`docker-compose.yml`**: Configures the main Docker service, environment variables, and volume mounts.
   - **`docker-entrypoint.sh`**: Script that runs on container start to initialize the environment.
@@ -23,7 +22,10 @@ This document outlines the structure and purpose of the files and directories wi
 - **`docs/`**: Contains project documentation.
   - **`new-project-deployment.md`**: The primary guide for setting up the service on a new server.
   - **`repository-structure.md`**: This file.
-- **`glossary.json`**: Per-language term mappings (the Bisq production glossary), referenced via `glossary_file_path`. See `glossary.example.json` for a minimal generic example. Brand/do-not-translate terms live under `brand_technical_glossary` in the config.
+- **`profiles/`**: Project-specific profile assets for Docker/server deployments.
+  - **`profiles/bisq/config.yaml`**: Bisq production profile config, mounted as `/app/config.yaml` by default.
+  - **`profiles/bisq/glossary.json`**: Bisq production glossary, mounted as `/app/glossary.json` by default.
+- **`glossary.example.json`**: Minimal generic glossary example. Brand/do-not-translate terms live under `brand_technical_glossary` in the config.
 - **`LICENSE`**: The project's license file.
 - **`logs/`**: (Auto-generated, gitignored) Stores runtime logs from the application.
 - **`README.md`**: Provides the primary overview and getting started guide for the project.

@@ -55,6 +55,7 @@ This is a security-critical step. You must place the deploy key, GPG key, and AP
     # These names ensure this instance's container and volume don't conflict with others.
     CONTAINER_NAME=translator-my-project
     VOLUME_NAME=target-repo-data-my-project
+    TRANSLATOR_PROFILE=my-project
 
     # === API Keys and Tokens ===
     GITHUB_TOKEN=ghp_YourGitHubPersonalAccessToken
@@ -86,19 +87,25 @@ This is a security-critical step. You must place the deploy key, GPG key, and AP
 
 ## Step 3: Configure the Service
 
-Create and edit the main configuration file for the service.
+Create and edit the project profile mounted by Docker.
 
 ```bash
-# Copy the example config to create your instance-specific config
-cp config.example.yaml config.yaml
+# Create an instance-specific profile mounted as /app/config.yaml and /app/glossary.json.
+mkdir -p profiles/my-project
+cp config.example.yaml profiles/my-project/config.yaml
+cp glossary.example.json profiles/my-project/glossary.json
 
-# Now, edit config.yaml to set the correct paths and repository details.
+# Now, edit the profile config to set the correct paths and repository details.
 # At a minimum, you must set:
 # - target_project_root: /target_repo
 # - input_folder: i18n/src/main/resources
 # The paths must be absolute paths inside the container.
-nano config.yaml
+nano profiles/my-project/config.yaml
 ```
+
+The `TRANSLATOR_PROFILE=my-project` value in `docker/.env` selects
+`profiles/my-project/` for Docker runs. The included Bisq production profile is
+available under `profiles/bisq/` as a complete real-world example.
 
 ## Step 4: Build the Docker Image
 

@@ -292,8 +292,8 @@ REBUILD_TRIGGER_FILES=(
 # Files/dirs that, if changed, require a service restart (if not a full rebuild).
 # These are typically mounted configuration files.
 RESTART_TRIGGER_FILES=(
-    "docker/config.docker.yaml" # Mounted as /app/config.yaml
-    "glossary.json"             # Mounted as /app/glossary.json
+    "profiles/bisq/config.yaml" # Mounted as /app/config.yaml by default
+    "profiles/bisq/glossary.json" # Mounted as /app/glossary.json by default
     "docker/.env"               # If runtime env vars are set in compose from this
     "docker/docker-compose.yml" # For runtime changes (ports, volumes, env vars not from file)
 )
@@ -475,4 +475,4 @@ main() {
 # Stderr (our logs) will go to console and also to any redirection of the script's stderr.
 main "$@" # Pass all arguments to main, though it doesn't use them currently
 
-# End of script 
+# End of script

@@ -22,9 +22,9 @@ services:
       # The logical name 'target-repo-data' is static. The actual volume name on the host
       # is set in the top-level 'volumes' section using the environment variable.
       - target-repo-data:/target_repo
-      # Mount configuration and glossary files.
-      - ./config.docker.yaml:/app/config.yaml:ro
-      - ../glossary.json:/app/glossary.json:ro
+      # Mount the selected project profile's configuration and glossary files.
+      - ../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml:/app/config.yaml:ro
+      - ../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json:/app/glossary.json:ro
       # Mount logs directory (in project root) for persistence
       - ../logs:/app/logs
     # The container will start as root, and the entrypoint script will drop privileges to 'appuser'.

@@ -33,11 +33,11 @@ Choose the appropriate ISO 639-1 language code for your new locale:
 
 ### Step 2: Update Configuration Files
 
-#### 2.1. Update `docker/config.docker.yaml`
+#### 2.1. Update `profiles/bisq/config.yaml`
 
 This is the primary configuration file used by the Docker-based translation service.
 
-1. Open `docker/config.docker.yaml`
+1. Open `profiles/bisq/config.yaml`
 
 2. Add your new locale to the `supported_locales` list. Position it logically (e.g., group Asian languages together, European languages together):
 
@@ -101,7 +101,7 @@ style_rules:
 
 The glossary ensures consistent translation of key terminology across all translations.
 
-1. Open `glossary.json`
+1. Open `profiles/bisq/glossary.json`
 
 2. Add a new section for your locale with translations for common terms. Place it in alphabetical order by language code:
 
@@ -168,10 +168,10 @@ The glossary ensures consistent translation of key terminology across all transl
 
 #### 4.1. Validate JSON Syntax
 
-Ensure `glossary.json` is valid JSON:
+Ensure `profiles/bisq/glossary.json` is valid JSON:
 
 ```bash
-python -m json.tool glossary.json > /dev/null && echo "JSON is valid"
+python -m json.tool profiles/bisq/glossary.json > /dev/null && echo "JSON is valid"
 ```
 
 #### 4.2. Run Unit Tests
@@ -236,7 +236,7 @@ echo "test.key=Test value" > test_th.properties
 Test the translation pipeline in dry-run mode:
 
 ```bash
-# Update docker/config.docker.yaml temporarily
+# Update profiles/bisq/config.yaml temporarily
 # Set: dry_run: true
 
 # Run the translator
@@ -254,7 +254,7 @@ Verify in the logs that:
 Once verified, commit your changes:
 
 ```bash
-git add docker/config.docker.yaml glossary.json
+git add profiles/bisq/config.yaml profiles/bisq/glossary.json
 git commit -m "Add [Language Name] ([code]) as a new supported locale
 
 Added [Language] language support with comprehensive configuration.
@@ -275,7 +275,7 @@ Here's the complete commit that added Thai language support, which you can use a
 
 ### Configuration Changes
 
-**`docker/config.docker.yaml`:**
+**`profiles/bisq/config.yaml`:**
 ```yaml
 supported_locales:
   - code: "th"
@@ -292,7 +292,7 @@ style_rules:
 
 ### Glossary Entries
 
-57 Thai translations were added to `glossary.json`, including:
+57 Thai translations were added to `profiles/bisq/glossary.json`, including:
 - `"wallet": "กระเป๋าเงิน"`
 - `"account": "บัญชี"`
 - `"trade": "การซื้อขาย"`
@@ -311,7 +311,7 @@ style_rules:
 - Check that all required fields are present (code, name)
 
 #### Issue: JSON validation fails
-**Symptoms:** `python -m json.tool glossary.json` reports errors
+**Symptoms:** `python -m json.tool profiles/bisq/glossary.json` reports errors
 **Solution:**
 - Check for missing commas between entries
 - Ensure proper quote escaping in translations
@@ -388,11 +388,11 @@ The system recognizes the following locale code patterns in filenames:
 Use this checklist when adding a new locale:
 
 - [ ] Determined correct ISO 639-1 language code
-- [ ] Updated `docker/config.docker.yaml`:
+- [ ] Updated `profiles/bisq/config.yaml`:
   - [ ] Added locale to `supported_locales`
   - [ ] Added comprehensive style rules
 - [ ] Updated `config.yaml` (if using local development)
-- [ ] Updated `glossary.json`:
+- [ ] Updated `profiles/bisq/glossary.json`:
   - [ ] Added 40-60 common terms
   - [ ] Included domain-specific terminology
   - [ ] Validated JSON syntax
@@ -413,4 +413,4 @@ Use this checklist when adding a new locale:
 - [Main README](../README.md) - Project overview and setup
 - [New Project Deployment](./new-project-deployment.md) - Server deployment guide
 - [Repository Structure](./repository-structure.md) - Project organization
-- [Configuration Reference](../docker/config.docker.yaml) - All configuration options
+- [Configuration Reference](../profiles/bisq/config.yaml) - Full Bisq profile example

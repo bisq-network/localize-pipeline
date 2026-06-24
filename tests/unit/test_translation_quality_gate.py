@@ -196,7 +196,7 @@ def test_semantic_qa_blocks_recent_coderabbit_translation_nits(tmp_path):
     repo_root = tmp_path
     input_folder = repo_root / "resources"
     input_folder.mkdir()
-    _, _, _, semantic_rules = load_quality_gate_config(str(PROJECT_ROOT / "docker" / "config.docker.yaml"))
+    _, _, _, semantic_rules = load_quality_gate_config(str(PROJECT_ROOT / "profiles" / "bisq" / "config.yaml"))
     diff_text = """diff --git a/resources/mobile_af_ZA.properties b/resources/mobile_af_ZA.properties
 +++ b/resources/mobile_af_ZA.properties
 +mobile.tradeHistory.count.many={0} handelaars

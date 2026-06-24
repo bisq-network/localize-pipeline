@@ -2,7 +2,7 @@
 #
 # This is a small, generic starting point. For a richer, real-world example with
 # per-locale style rules, learned semantic quality rules, and a large glossary,
-# see docker/config.docker.yaml (the Bisq production config).
+# see profiles/bisq/config.yaml (the Bisq production profile).
 #
 # Tip: run `./init.sh --input-folder path/to/i18n` to scaffold this automatically
 # by detecting the locales from your existing *.properties files.

@@ -6,6 +6,8 @@ import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BISQ_PROFILE_CONFIG = PROJECT_ROOT / "profiles" / "bisq" / "config.yaml"
+BISQ_PROFILE_GLOSSARY = PROJECT_ROOT / "profiles" / "bisq" / "glossary.json"
 
 
 def test_example_config_is_a_minimal_generic_starter():
@@ -14,7 +16,7 @@ def test_example_config_is_a_minimal_generic_starter():
     assert config["translation_source"] == "git"
     assert "target_project_root" in config and "input_folder" in config
     assert isinstance(config.get("supported_locales"), list) and config["supported_locales"]
-    # It must NOT carry Bisq-specific project knowledge (that lives in the docker config).
+    # It must NOT carry Bisq-specific project knowledge (that lives in the Bisq profile).
     assert "semantic_quality_rules" not in config
     assert {loc["code"] for loc in config["supported_locales"]} <= {"de", "es", "fr"}
 
@@ -27,12 +29,43 @@ def test_example_glossary_is_valid_and_small():
         assert isinstance(terms, dict)
 
 
+def test_bisq_profile_packages_config_and_glossary_assets():
+    """Bisq-specific deployment knowledge lives in one profile directory."""
+    assert BISQ_PROFILE_CONFIG.exists()
+    assert BISQ_PROFILE_GLOSSARY.exists()
+
+    config = yaml.safe_load(BISQ_PROFILE_CONFIG.read_text(encoding="utf-8"))
+    glossary = yaml.safe_load(BISQ_PROFILE_GLOSSARY.read_text(encoding="utf-8"))
+
+    assert config["localization_format"] == "java_properties"
+    assert "Bisq" in config["project_context"]
+    assert "semantic_quality_rules" in config
+    assert config["glossary_file_path"] == "glossary.json"
+    assert isinstance(glossary, dict) and glossary
+    assert "de" in glossary
+
+
+def test_docker_compose_mounts_the_selected_profile():
+    compose = (PROJECT_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml:/app/config.yaml:ro" in compose
+    assert "../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json:/app/glossary.json:ro" in compose
+
+
+def test_update_service_watches_profile_assets_for_restart():
+    script = (PROJECT_ROOT / "update-service.sh").read_text(encoding="utf-8")
+
+    assert "profiles/" in script
+    assert "profiles/bisq/config.yaml" in script
+    assert "profiles/bisq/glossary.json" in script
+
+
 # config.example.yaml is intentionally a minimal generic starter; the Bisq
-# project knowledge (style + semantic rules) lives in the docker config.
+# project knowledge (style + semantic rules) lives in the Bisq profile config.
 @pytest.mark.parametrize(
     "config_path",
     [
-        "docker/config.docker.yaml",
+        "profiles/bisq/config.yaml",
     ],
 )
 def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_path):
