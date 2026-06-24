@@ -1,0 +1,123 @@
+name: "AI .properties translation"
+description: >-
+  Translate changed Java .properties files with OpenAI (or a local Ollama / any
+  OpenAI-compatible endpoint) and open a pull request. Runs entirely in your CI
+  using the workflow's GITHUB_TOKEN — no account, no quota, no baked SSH key.
+
+branding:
+  icon: globe
+  color: blue
+
+inputs:
+  config-file:
+    description: "Path to the translation config in your repo (see config.example.yaml or run ./init.sh)."
+    required: false
+    default: "config.yaml"
+  openai-api-key:
+    description: "OpenAI API key. Leave empty when using a local endpoint (Ollama) via api-base-url."
+    required: false
+    default: ""
+  api-base-url:
+    description: "OpenAI-compatible endpoint, e.g. http://localhost:11434/v1 for Ollama. Overrides config."
+    required: false
+    default: ""
+  review-model:
+    description: "Override the holistic-review model (maps to REVIEW_MODEL_NAME)."
+    required: false
+    default: ""
+  diff-base:
+    description: >-
+      Git ref to detect changed source strings against (e.g. the push/PR base). The
+      pipeline translates only keys changed since this ref. Defaults to the push base.
+    required: false
+    default: ${{ github.event.before }}
+  process-all-files:
+    description: >-
+      Translate ALL locale files instead of only those changed since diff-base. Use
+      true for a one-time initial run; leave false for incremental CI.
+    required: false
+    default: "false"
+  open-pr:
+    description: "Open a pull request with the translations (true) or just leave the changes (false)."
+    required: false
+    default: "true"
+  pr-branch:
+    description: "Branch to push the translations to."
+    required: false
+    default: "ai-translations"
+  pr-title:
+    description: "Title of the pull request."
+    required: false
+    default: "Update AI translations"
+  commit-message:
+    description: "Commit message for the translation changes."
+    required: false
+    default: "Update AI translations"
+  github-token:
+    description: "Token used to push the branch and open the PR."
+    required: false
+    default: ${{ github.token }}
+  python-version:
+    description: "Python version to run the pipeline with."
+    required: false
+    default: "3.11"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install pipeline dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Translate changed strings
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        PYTHONPATH: ${{ github.action_path }}
+        TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        OPENAI_BASE_URL: ${{ inputs.api-base-url }}
+        REVIEW_MODEL_NAME: ${{ inputs.review-model }}
+        PROCESS_ALL_FILES: ${{ inputs.process-all-files }}
+        DIFF_BASE_INPUT: ${{ inputs.diff-base }}
+      run: |
+        set -euo pipefail
+        # An all-zero SHA (first push to a branch) is not a valid diff base; fall back
+        # to working-tree detection rather than failing the run.
+        if [[ "${DIFF_BASE_INPUT:-}" =~ ^0*$ ]]; then
+          export TRANSLATION_DIFF_BASE=""
+        else
+          export TRANSLATION_DIFF_BASE="$DIFF_BASE_INPUT"
+        fi
+        python -m src.translate_localization_files
+
+    - name: Open pull request
+      if: ${{ inputs.open-pr == 'true' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
+          echo "No translation changes; nothing to open a PR for."
+          exit 0
+        fi
+        branch="${{ inputs.pr-branch }}"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git checkout -B "$branch"
+        git add -A
+        git commit -m "${{ inputs.commit-message }}"
+        git push --force-with-lease origin "$branch"
+        if gh pr view "$branch" >/dev/null 2>&1; then
+          echo "Pull request already exists for $branch; it now points at the latest push."
+        else
+          gh pr create --head "$branch" --title "${{ inputs.pr-title }}" \
+            --body "Automated translation update. Review the changed .properties files before merging."
+        fi
