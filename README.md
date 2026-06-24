@@ -1,9 +1,13 @@
 # Translate Java Property Files
 
 AI translation for your Java `.properties` files that runs entirely in **your**
-CI, with **your** model (OpenAI **or** a local Ollama), opens a **reviewable pull
-request**, and never sends your strings to anyone's cloud. No account, no quota,
-no per-word bill.
+CI, with **your** model — OpenAI, or a local Ollama for **zero data egress** — and
+opens a **reviewable pull request**. No account, no quota, no per-word bill.
+
+> Data flow: with a local/self-hosted `api_base_url` (e.g. Ollama) your strings
+> never leave your infrastructure. With the default OpenAI provider, strings are
+> sent to OpenAI's API like any other OpenAI call — choose the provider that fits
+> your privacy needs.
 
 It detects changed strings, translates new/changed keys with a two-pass
 translate→review process, enforces a glossary and quality gates, and proposes the
@@ -141,9 +145,10 @@ export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
 ```
 
 **Deploy key setup:** generate a dedicated `ed25519` key (no passphrase), add the
-public key as a deploy key with **write access** to the target repo, and place
-the private key at `secrets/deploy_key/id_ed25519` (override the name with
-`DEPLOY_KEY_NAME` in `docker/.env`).
+public key as a deploy key on the target repo **with write access** (it must push
+the translation branch), and place the private key at
+`secrets/deploy_key/id_ed25519` (override the name with `DEPLOY_KEY_NAME` in
+`docker/.env`).
 
 **Run the full pipeline (Transifex pull → AI translate → PR):**
 
@@ -151,8 +156,9 @@ the private key at `secrets/deploy_key/id_ed25519` (override the name with
 docker compose run --rm translator
 ```
 
-> The baked-in deploy key must be read-only-scoped to the target repo, rotated
-> regularly, and used only in non-public images.
+> The baked-in deploy key must be scoped to the single target repo (with write
+> access, since it pushes the translation branch), rotated regularly, and used
+> only in non-public images.
 
 For production server setup (cron, etc.):
 ➡️ **[New Project Deployment Guide](./docs/new-project-deployment.md)**

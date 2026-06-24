@@ -76,7 +76,25 @@ Together, …) set `api-base-url`. When the endpoint needs no key (Ollama) omit
 | `process-all-files` | `false` | Translate all locale files (use `true` for a one-time backfill). |
 | `open-pr` | `true` | Open a PR, or just leave the changes in the workspace. |
 | `pr-branch` | `ai-translations` | Branch to push translations to. |
+| `pr-title` | `Update AI translations` | Title of the opened pull request. |
+| `commit-message` | `Update AI translations` | Commit message for the translation changes. |
 | `github-token` | `${{ github.token }}` | Token used to push and open the PR. |
+| `python-version` | `3.11` | Python version to run the pipeline with. |
+
+### Triggering on pull requests instead of pushes
+
+The default `diff-base` (`${{ github.event.before }}`) is set for **push** events.
+To run on pull requests, set `diff-base` to the PR base SHA so the diff is computed
+correctly:
+
+```yaml
+on: { pull_request: { branches: [main] } }
+# ...
+      - uses: bisq-network/translate-java-property-files@main
+        with:
+          diff-base: ${{ github.event.pull_request.base.sha }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
 
 ## How this differs from a hosted service
 
