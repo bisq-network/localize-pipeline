@@ -69,6 +69,10 @@ leave your infrastructure:
 ./init.sh --input-folder path/to/your/i18n --api-base-url http://localhost:11434/v1
 ```
 
+Completion-token caps are normalized internally, so newer OpenAI models that
+require `max_completion_tokens` and compatible endpoints that only accept
+`max_tokens` can share the same config shape.
+
 ### Run it locally (no Docker, no CI)
 
 ```bash

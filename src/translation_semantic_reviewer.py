@@ -14,6 +14,7 @@ import yaml
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
+from src.openai_compat import create_chat_completion
 from src.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
@@ -157,7 +158,8 @@ async def review_translation_changes(
         style_rules=style_rules,
         brand_glossary=brand_glossary,
     )
-    response = await client.chat.completions.create(
+    response = await create_chat_completion(
+        client,
         model=model,
         messages=[
             ChatCompletionSystemMessageParam(role="system", content=messages[0]["content"]),
@@ -165,7 +167,7 @@ async def review_translation_changes(
         ],
         temperature=0,
         response_format={"type": "json_object"},
-        max_tokens=4096,
+        completion_token_limit=4096,
         timeout=120.0,
     )
     response_text = response.choices[0].message.content or ""

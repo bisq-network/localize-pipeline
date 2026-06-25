@@ -5,7 +5,15 @@ Tests the ability to protect placeholders during holistic review phase
 to prevent the AI from modifying, removing, or adding placeholders.
 """
 
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from src.translate_localization_files import (
+    holistic_review_async,
     protect_placeholders_in_properties,
     restore_placeholders_in_properties
 )
@@ -160,3 +168,51 @@ key2=World {1}"""
         assert "# Comment" in protected
         assert "\n\n" in protected  # Blank line preserved
         assert "__PH_" in protected
+
+
+class _NullAsyncContext:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_holistic_review_uses_compatible_completion_token_limit():
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"key1": "Hallo {0}"})
+                )
+            )
+        ]
+    )
+    create_completion = AsyncMock(return_value=response)
+
+    with (
+        patch("src.translate_localization_files.DRY_RUN", False),
+        patch("src.translate_localization_files.client", object()),
+        patch("src.translate_localization_files.REVIEW_MODEL_NAME", "gpt-5.4-mini"),
+        patch("src.translate_localization_files.create_chat_completion", create_completion),
+        patch("src.translate_localization_files.usage_tracker.record_response") as record_response,
+    ):
+        result = await holistic_review_async(
+            source_content="key1=Hello {0}",
+            translated_content="key1=Hallo {0}",
+            target_language="German",
+            keys_to_review=["key1"],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {"key1": "Hallo {0}"}
+    kwargs = create_completion.await_args.kwargs
+    assert kwargs["model"] == "gpt-5.4-mini"
+    assert kwargs["completion_token_limit"] == 8192
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert "max_tokens" not in kwargs
+    assert "max_completion_tokens" not in kwargs
+    record_response.assert_called_once_with("gpt-5.4-mini", response)

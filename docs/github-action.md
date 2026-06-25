@@ -64,6 +64,10 @@ Together, …) set `api-base-url`. When the endpoint needs no key (Ollama) omit
           api-base-url: http://localhost:11434/v1
 ```
 
+Completion-token caps are normalized internally. Newer OpenAI models that
+require `max_completion_tokens` and compatible endpoints that only accept
+`max_tokens` can use the same action inputs.
+
 ## Inputs
 
 | Input | Default | Purpose |

@@ -40,6 +40,7 @@ from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
 from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
+from src.openai_compat import create_chat_completion
 from src.properties_parser import parse_properties_file, reassemble_file
 from src.usage_tracker import usage_tracker
 from src.cost_estimator import estimate_run_cost, format_estimate
@@ -1138,7 +1139,8 @@ Provide the translation **of the Value only**, following the instructions above.
         for attempt in range(1, max_retries + 1):  # type: ignore[arg-type]
             try:
                 # Use chat completion API
-                response = await client.chat.completions.create(
+                response = await create_chat_completion(
+                    client,
                     model=MODEL_NAME,
                     messages=[
                         ChatCompletionSystemMessageParam(role="system", content=system_prompt),
@@ -1295,14 +1297,15 @@ async def holistic_review_async(
         base_delay = 5  # Longer delay for a potentially larger task
         for attempt in range(1, max_retries + 1):
             try:
-                response = await client.chat.completions.create(
+                response = await create_chat_completion(
+                    client,
                     model=REVIEW_MODEL_NAME,
                     messages=[
                         ChatCompletionSystemMessageParam(role="system", content=review_system_prompt)
                     ],
                     temperature=0.1,
                     response_format={"type": "json_object"},
-                    max_tokens=8192,  # Increased to handle larger review responses
+                    completion_token_limit=8192,
                     timeout=120.0,
                 )
                 usage_tracker.record_response(REVIEW_MODEL_NAME, response)

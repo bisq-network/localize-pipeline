@@ -1,5 +1,7 @@
 import json
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -11,6 +13,7 @@ from src.translation_semantic_reviewer import (
     append_semantic_review_findings,
     build_semantic_review_messages,
     normalize_review_response,
+    review_translation_changes,
 )
 
 
@@ -174,3 +177,46 @@ async def test_semantic_reviewer_is_opt_in(tmp_path):
 
     assert exit_code == 0
     assert not validation_summary_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_uses_compatible_completion_token_limit():
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=json.dumps({"findings": []}))
+            )
+        ]
+    )
+    create_completion = AsyncMock(return_value=response)
+    changes = [
+        TranslationChange(
+            file="resources/mobile_es.properties",
+            locale_code="es",
+            key="mobile.clear",
+            source_value="Clear network address: {0}",
+            old_value=None,
+            new_value="Borrar dirección de red: {0}",
+        )
+    ]
+
+    with patch(
+        "src.translation_semantic_reviewer.create_chat_completion",
+        create_completion,
+    ):
+        findings = await review_translation_changes(
+            client=object(),
+            model="gpt-5.4-mini",
+            target_language="Spanish",
+            changes=changes,
+            style_rules=[],
+            brand_glossary=[],
+        )
+
+    assert findings == []
+    kwargs = create_completion.await_args.kwargs
+    assert kwargs["model"] == "gpt-5.4-mini"
+    assert kwargs["completion_token_limit"] == 4096
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert "max_tokens" not in kwargs
+    assert "max_completion_tokens" not in kwargs
