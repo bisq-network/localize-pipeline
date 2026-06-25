@@ -151,6 +151,16 @@ def test_publish_adapter_wraps_commit_and_pr_flow():
     assert publish_def_index < publish_call_index < return_branch_index
 
 
+def test_publish_adapter_preserves_both_paths_for_translation_renames():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "translation_file_status_regex() {\n    translation_file_change_regex\n}" in script
+    assert 'old_path = substr(path, 1, index(path, " -> ") - 1)' in script
+    assert 'new_path = substr(path, index(path, " -> ") + 4)' in script
+    assert "if (old_path ~ /\\.(properties|po|mo)$/) print old_path" in script
+    assert "if (new_path ~ /\\.(properties|po|mo)$/) print new_path" in script
+
+
 def test_pr_body_includes_token_usage_cost_summary():
     """The per-run cost summary is surfaced in the PR description."""
     script = (REPO_ROOT / "update-translations.sh").read_text()

@@ -80,7 +80,7 @@ translation_file_change_regex() {
 }
 
 translation_file_status_regex() {
-    printf '\\.properties$|\\.po$|\\.mo$'
+    translation_file_change_regex
 }
 
 collect_changed_translation_files() {
@@ -88,7 +88,13 @@ collect_changed_translation_files() {
     git status --porcelain -- "$rel_input_folder" \
       | awk '{
             path = substr($0, 4)
-            if (index(path, " -> ")) path = substr(path, index(path, " -> ") + 4)
+            if (index(path, " -> ")) {
+                old_path = substr(path, 1, index(path, " -> ") - 1)
+                new_path = substr(path, index(path, " -> ") + 4)
+                if (old_path ~ /\.(properties|po|mo)$/) print old_path
+                if (new_path ~ /\.(properties|po|mo)$/) print new_path
+                next
+            }
             if (path ~ /\.(properties|po|mo)$/) print path
         }' \
       | sort -u
