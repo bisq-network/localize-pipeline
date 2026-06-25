@@ -23,9 +23,12 @@ quality_gate:
   block_on_semantic_qa_warnings: false
   semantic_qa_audit_scope: "changed"
   retained_source_word_allowlist:
+    da: ["version"]
+    de: ["version"]
     es: ["personal"]
-    fr: ["information", "message", "messages"]
+    fr: ["information", "message", "messages", "version"]
     it: ["reporting"]
+    sv: ["version"]
 semantic_review:
   enabled: true
   model: "gpt-5.4-mini"
