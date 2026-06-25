@@ -65,6 +65,41 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+normalize_translation_source() {
+    local source="${1:-transifex}"
+    printf '%s' "$source" | tr '[:upper:]' '[:lower:]'
+}
+
+is_supported_translation_source() {
+    local source="$1"
+    [[ "$source" == "git" || "$source" == "transifex" ]]
+}
+
+translation_file_change_regex() {
+    printf '\\.(properties|po|mo)([[:space:]]|$|->)'
+}
+
+translation_file_status_regex() {
+    translation_file_change_regex
+}
+
+collect_changed_translation_files() {
+    local rel_input_folder="$1"
+    git status --porcelain -- "$rel_input_folder" \
+      | awk '{
+            path = substr($0, 4)
+            if (index(path, " -> ")) {
+                old_path = substr(path, 1, index(path, " -> ") - 1)
+                new_path = substr(path, index(path, " -> ") + 4)
+                if (old_path ~ /\.(properties|po|mo)$/) print old_path
+                if (new_path ~ /\.(properties|po|mo)$/) print new_path
+                next
+            }
+            if (path ~ /\.(properties|po|mo)$/) print path
+        }' \
+      | sort -u
+}
+
 # Send a heartbeat ping to the health check URL if it is configured
 send_heartbeat_if_configured() {
     if [ -n "${HEALTHCHECK_URL:-}" ]; then
@@ -213,6 +248,90 @@ get_config_value() {
     esac
 }
 
+prepare_translation_source() {
+    local translation_source="$1"
+    local dry_run="${2:-false}"
+    local pull_source_files="${3:-false}"
+
+    if [[ "$translation_source" == "git" ]]; then
+        log "Translation source is 'git'. Skipping Transifex pull; using .properties files already in the repository." "INFO"
+    elif [[ "$dry_run" == "true" ]]; then
+        log "Dry run is enabled. Skipping Transifex pull." "WARNING"
+    else
+        log "Checking for Transifex CLI"
+        log "Current PATH: $PATH"
+        log "Which tx: $(which tx || echo 'tx not found in path')"
+        if command_exists tx; then
+            log "Pulling latest translations from Transifex"
+            log "Using Transifex token from environment"
+
+            # Debug Transifex configuration
+            if [ -f "$TARGET_PROJECT_ROOT/.tx/config" ]; then
+                log ".tx/config detected in project directory"
+            else
+                log "Warning: .tx/config not found in project directory"
+            fi
+
+            # Pull translations with -t option.
+            # The --force (-f) flag ensures local files are overwritten with remote changes.
+            TX_PULL_CMD="tx pull -t -f --use-git-timestamps"
+            if [[ "$pull_source_files" == "true" ]]; then
+                log "Configuration directs to pull source files as well. Modifying tx command."
+                TX_PULL_CMD="tx pull -s -t -f --use-git-timestamps"
+            fi
+
+            log "Using tx command: $TX_PULL_CMD"
+            log "Listing permissions for current directory ($(pwd)) before tx pull:"
+            log_cmd ls -la .
+            log "Listing permissions for input folder '${ABSOLUTE_INPUT_FOLDER}' before tx pull:"
+            log_cmd ls -la "${ABSOLUTE_INPUT_FOLDER}"
+
+            # Start a background process to show that the script is still alive.
+            # This is useful because 'tx pull' can be silent for long periods.
+            while true; do
+                sleep 30
+                log "Still waiting for Transifex pull to complete..." "INFO"
+            done &
+            # Get the process ID of the background loop
+            KEEPALIVE_PID=$!
+
+            # Execute and filter output, but preserve original tx exit code.
+            set +e
+            { $TX_PULL_CMD 2>&1 | grep -v -E 'Pulling file|Creating download job|File was not found locally'; }
+            TX_STATUS=${PIPESTATUS[0]}
+            set -e
+
+            # Stop the keepalive process now that tx pull is done.
+            # Make the kill non-fatal in case the process has already exited.
+            # Note: cleanup_on_exit will also kill KEEPALIVE_PID if still running at script exit
+            if [ -n "${KEEPALIVE_PID:-}" ]; then
+                kill "$KEEPALIVE_PID" 2>/dev/null || true
+                unset KEEPALIVE_PID
+            fi
+
+            if [ $TX_STATUS -ne 0 ]; then
+                log "Transifex pull failed (exit $TX_STATUS). See previous logs for details." "ERROR"
+                exit $TX_STATUS
+            fi
+
+            # Check if files have been updated
+            # Match translation files even when staged for deletion (D prefix) or renames (-> suffix)
+            if ! git status --porcelain | grep -qE "$(translation_file_change_regex)"; then
+                log "Transifex pull completed successfully, but no translation files were modified. This is normal when there are no new translation keys." "INFO"
+                log "No further processing needed. Exiting gracefully."
+                send_heartbeat_if_configured
+                exit 0
+            fi
+
+            log "Transifex pull successfully updated translation files. Starting AI translation processing..." "INFO"
+
+        else
+            log "Error: Transifex CLI not found. Please install it manually."
+            exit 1
+        fi
+    fi
+}
+
 TARGET_PROJECT_ROOT=$(get_config_value "target_project_root" "$CONFIG_FILE")
 INPUT_FOLDER=$(get_config_value "input_folder" "$CONFIG_FILE")
 # Read the optional glob filter for selective translation
@@ -226,8 +345,8 @@ TRANSLATION_SOURCE=$(get_config_value "translation_source" "$CONFIG_FILE")
 TRANSLATION_SOURCE="${TRANSLATION_SOURCE:-transifex}"
 # Normalize case and validate; unknown values fall back to transifex with a warning
 # so a typo cannot silently change behavior.
-TRANSLATION_SOURCE=$(printf '%s' "$TRANSLATION_SOURCE" | tr '[:upper:]' '[:lower:]')
-if [[ "$TRANSLATION_SOURCE" != "git" && "$TRANSLATION_SOURCE" != "transifex" ]]; then
+TRANSLATION_SOURCE=$(normalize_translation_source "$TRANSLATION_SOURCE")
+if ! is_supported_translation_source "$TRANSLATION_SOURCE"; then
     log "Unknown translation_source '$TRANSLATION_SOURCE'; defaulting to 'transifex'." "WARNING"
     TRANSLATION_SOURCE="transifex"
 fi
@@ -316,84 +435,8 @@ git clean -fde "venv/" -e ".idea/" -e "*.iml" -e "secrets/" -e "docker/.env"
 log "Proceeding with Transifex operations. Current HEAD on ${DEFAULT_BRANCH}:"
 git log -1 --pretty=%H
 
-# Step 2: Use Transifex CLI to pull the latest translations
-if [[ "$TRANSLATION_SOURCE" == "git" ]]; then
-    log "Translation source is 'git'. Skipping Transifex pull; using .properties files already in the repository." "INFO"
-elif [[ "${DRY_RUN:-false}" == "true" ]]; then
-    log "Dry run is enabled. Skipping Transifex pull." "WARNING"
-else
-    log "Checking for Transifex CLI"
-    log "Current PATH: $PATH"
-    log "Which tx: $(which tx || echo 'tx not found in path')"
-    if command_exists tx; then
-        log "Pulling latest translations from Transifex"
-        log "Using Transifex token from environment"
-        
-        # Debug Transifex configuration
-        if [ -f "$TARGET_PROJECT_ROOT/.tx/config" ]; then
-            log ".tx/config detected in project directory"
-        else
-            log "Warning: .tx/config not found in project directory"
-        fi
-        
-        # Pull translations with -t option.
-        # The --force (-f) flag ensures local files are overwritten with remote changes.
-        TX_PULL_CMD="tx pull -t -f --use-git-timestamps"
-        if [[ "$PULL_SOURCE_FILES" == "true" ]]; then
-            log "Configuration directs to pull source files as well. Modifying tx command."
-            TX_PULL_CMD="tx pull -s -t -f --use-git-timestamps"
-        fi
-
-        log "Using tx command: $TX_PULL_CMD"
-        log "Listing permissions for current directory ($(pwd)) before tx pull:"
-        log_cmd ls -la .
-        log "Listing permissions for input folder '${ABSOLUTE_INPUT_FOLDER}' before tx pull:"
-        log_cmd ls -la "${ABSOLUTE_INPUT_FOLDER}"
-        
-        # Start a background process to show that the script is still alive.
-        # This is useful because 'tx pull' can be silent for long periods.
-        while true; do
-            sleep 30
-            log "Still waiting for Transifex pull to complete..." "INFO"
-        done &
-        # Get the process ID of the background loop
-        KEEPALIVE_PID=$!
-
-        # Execute and filter output, but preserve original tx exit code.
-        set +e
-        { $TX_PULL_CMD 2>&1 | grep -v -E 'Pulling file|Creating download job|File was not found locally'; }
-        TX_STATUS=${PIPESTATUS[0]}
-        set -e
-
-        # Stop the keepalive process now that tx pull is done.
-        # Make the kill non-fatal in case the process has already exited.
-        # Note: cleanup_on_exit will also kill KEEPALIVE_PID if still running at script exit
-        if [ -n "${KEEPALIVE_PID:-}" ]; then
-            kill "$KEEPALIVE_PID" 2>/dev/null || true
-            unset KEEPALIVE_PID
-        fi
-
-        if [ $TX_STATUS -ne 0 ]; then
-            log "Transifex pull failed (exit $TX_STATUS). See previous logs for details." "ERROR"
-            exit $TX_STATUS
-        fi
-
-        # Check if files have been updated
-        # Match translation files even when staged for deletion (D prefix) or renames (-> suffix)
-        if ! git status --porcelain | grep -qE '\.(properties|po|mo)([[:space:]]|$|->)'; then
-            log "Transifex pull completed successfully, but no translation files were modified. This is normal when there are no new translation keys." "INFO"
-            log "No further processing needed. Exiting gracefully."
-            send_heartbeat_if_configured
-            exit 0
-        fi
-
-        log "Transifex pull successfully updated translation files. Starting AI translation processing..." "INFO"
-
-    else
-        log "Error: Transifex CLI not found. Please install it manually."
-        exit 1
-    fi
-fi
+# Step 2: Use the configured source adapter to prepare translation files.
+prepare_translation_source "$TRANSLATION_SOURCE" "${DRY_RUN:-false}" "${PULL_SOURCE_FILES:-false}"
 
 # Navigate back to the application's root directory to run the python script.
 # This ensures that the module path `src.translate_localization_files` is resolved correctly.
@@ -643,8 +686,8 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
     log "Published translation-quality-gate status on $status_repo: $quality_state"
 }
 
-# Check specifically for changes in translation files
-TRANSLATION_CHANGES=$(git status --porcelain | grep -E "\.properties$|\.po$|\.mo$" || true)
+publish_translation_changes() {
+TRANSLATION_CHANGES=$(git status --porcelain | grep -E "$(translation_file_status_regex)" || true)
 
 if [ -n "$TRANSLATION_CHANGES" ]; then
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
@@ -680,15 +723,7 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
         REL_INPUT_FOLDER="${ABSOLUTE_INPUT_FOLDER#"$TARGET_PROJECT_ROOT/"}"
 
         # Collect only git-changed translation files (not the entire tree).
-        mapfile -t ALL_FILES < <(
-            git status --porcelain -- "$REL_INPUT_FOLDER" \
-              | awk '{
-                    path = substr($0, 4)
-                    if (index(path, " -> ")) path = substr(path, index(path, " -> ") + 4)
-                    if (path ~ /\.(properties|po|mo)$/) print path
-                }' \
-              | sort -u
-        )
+        mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")
         TOTAL_FILES=${#ALL_FILES[@]}
         log "Total translation files to commit: $TOTAL_FILES (split threshold: $MAX_FILES_PER_PR)"
 
@@ -743,6 +778,9 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
 else
     log "No translation changes to commit"
 fi
+}
+
+publish_translation_changes
 
 # Go back to original branch
 if [ -n "$ORIGINAL_BRANCH" ] && [ "$ORIGINAL_BRANCH" != "$DEFAULT_BRANCH" ]; then

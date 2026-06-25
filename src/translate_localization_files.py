@@ -41,6 +41,12 @@ from tqdm.asyncio import tqdm
 from src.app_config import load_app_config
 from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
 from src.openai_compat import create_chat_completion
+from src.pipeline_core import (
+    TranslationPipelineOptions,
+    TranslationPipelinePaths,
+    TranslationPipelineSteps,
+    run_translation_pipeline,
+)
 from src.properties_parser import parse_properties_file, reassemble_file
 from src.usage_tracker import usage_tracker
 from src.cost_estimator import estimate_run_cost, format_estimate
@@ -2173,6 +2179,53 @@ def write_translation_validation_summary(
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
 
+def write_skipped_files_report(report_path: str, skipped_files: Dict[str, List[str]]) -> None:
+    """Write a markdown report for files skipped by validation or linting."""
+    report_dir = os.path.dirname(report_path)
+    os.makedirs(report_dir or '.', exist_ok=True)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("## ⚠️ Translation Pipeline Warnings\n\n")
+        f.write(
+            "The following files were skipped during the AI translation process due to "
+            "validation or linter errors. These issues must be addressed manually.\n\n"
+        )
+        for filename, errors in skipped_files.items():
+            f.write(f"### 📄 `{filename}`\n")
+            for error in errors:
+                f.write(f"- {error}\n")
+            f.write("\n")
+
+
+def remove_file_if_exists(path: str) -> None:
+    """Remove a file when present."""
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def write_token_usage_summary(summary_path: str) -> None:
+    """Persist and log token usage for the current run."""
+    try:
+        usage_tracker.write_json(summary_path)
+        for line in usage_tracker.format_summary().splitlines():
+            logger.info(line)
+        logger.info(f"Wrote token usage summary to {summary_path}")
+    except Exception:
+        logger.exception("Failed to write token usage summary")
+
+
+def cleanup_translation_queue_folders(
+        translation_queue_folder: str,
+        translated_queue_folder: str
+) -> None:
+    """Remove queue folders after a successful non-debug run."""
+    try:
+        shutil.rmtree(translation_queue_folder)
+        shutil.rmtree(translated_queue_folder)
+        logger.info("Cleaned up translation queue folders.")
+    except Exception:
+        logger.exception("Error cleaning up translation queue folders")
+
+
 def _build_pr_title(
     modules: List[str],
     new_keys: int,
@@ -2217,109 +2270,39 @@ async def main():
     """
     Main function to orchestrate the translation process.
     """
-    # Configuration is loaded and globals are set at the module level.
-    # The logger is also configured there.
-
-    # --- Validation and Setup ---
-    validate_paths(INPUT_FOLDER, TRANSLATION_QUEUE_FOLDER, TRANSLATED_QUEUE_FOLDER, REPO_ROOT)
-
-    # Step 1: Identify translation files to process.
-    changed_files = get_changed_translation_files(
-        INPUT_FOLDER,
-        REPO_ROOT,
-        process_all_files=PROCESS_ALL_FILES
-    )
-    if not changed_files:
-        logger.info("No translation files to process. Exiting.")
-        return
-    logger.info(f"Detected {len(changed_files)} translation file(s) to process.")
-
-    # Step 2: Archive the original files before any processing.
-    archive_folder_path = os.path.join(INPUT_FOLDER, 'archive')
-    archive_original_files(changed_files, INPUT_FOLDER, archive_folder_path)
-    logger.info(f"Successfully archived original files to '{archive_folder_path}'.")
-
-    # Step 3: Copy changed files to the translation queue for processing.
-    copy_files_to_translation_queue(changed_files, INPUT_FOLDER, TRANSLATION_QUEUE_FOLDER)
-    logger.info(f"Copied changed files to '{TRANSLATION_QUEUE_FOLDER}' for processing.")
-
-    # Step 4: Process the files in the translation queue.
-    validation_files: Dict[str, Dict[str, object]] = {}
-    processed_files_count, processed_filenames, skipped_files, total_keys_translated = await process_translation_queue(
+    paths = TranslationPipelinePaths(
+        project_root_dir=PROJECT_ROOT_DIR,
+        repo_root=REPO_ROOT,
+        input_folder=INPUT_FOLDER,
         translation_queue_folder=TRANSLATION_QUEUE_FOLDER,
         translated_queue_folder=TRANSLATED_QUEUE_FOLDER,
         glossary_file_path=GLOSSARY_FILE_PATH,
-        validation_summary=validation_files
     )
-    if processed_files_count > 0:
-        logger.info(
-            f"Completed translations for {processed_files_count} file(s). Translated files are in '{TRANSLATED_QUEUE_FOLDER}'.")
-    else:
-        logger.info("No files were successfully translated.")
-
-    # Step 5: Write skipped files report
-    report_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'skipped_files_report.log')
-    if skipped_files:
-        logger.info(f"Some files were skipped. Writing report to {report_path}")
-        # Ensure the directory exists before trying to write the file.
-        report_dir = os.path.dirname(report_path)
-        os.makedirs(report_dir, exist_ok=True)
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("## ⚠️ Translation Pipeline Warnings\n\n")
-            f.write(
-                "The following files were skipped during the AI translation process due to validation or linter errors. These issues must be addressed manually.\n\n")
-            for filename, errors in skipped_files.items():
-                f.write(f"### 📄 `{filename}`\n")
-                for error in errors:
-                    f.write(f"- {error}\n")
-                f.write("\n")
-    else:
-        # Ensure no old report file is left
-        if os.path.exists(report_path):
-            os.remove(report_path)
-
-    summary_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'translation_summary.json')
-    generate_translation_summary(
-        summary_path,
-        processed_files=processed_filenames,
-        new_keys_count=total_keys_translated,
-        updated_keys_count=0,
+    options = TranslationPipelineOptions(
+        process_all_files=PROCESS_ALL_FILES,
+        dry_run=DRY_RUN,
+        preserve_queues_for_debug=PRESERVE_QUEUES_FOR_DEBUG,
     )
-    logger.info(f"Wrote translation summary to {summary_path}")
-
-    validation_summary_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'translation_validation_summary.json')
-    write_translation_validation_summary(
-        validation_summary_path,
-        validation_files=validation_files,
-        skipped_files=skipped_files,
+    steps = TranslationPipelineSteps(
+        validate_paths=validate_paths,
+        get_changed_translation_files=get_changed_translation_files,
+        archive_original_files=archive_original_files,
+        copy_files_to_translation_queue=copy_files_to_translation_queue,
+        process_translation_queue=process_translation_queue,
+        write_skipped_files_report=write_skipped_files_report,
+        remove_file_if_exists=remove_file_if_exists,
+        generate_translation_summary=generate_translation_summary,
+        write_translation_validation_summary=write_translation_validation_summary,
+        write_token_usage_summary=write_token_usage_summary,
+        copy_translated_files_back=copy_translated_files_back,
+        cleanup_queue_folders=cleanup_translation_queue_folders,
     )
-    logger.info(f"Wrote translation validation summary to {validation_summary_path}")
-
-    # Step 6b: Write token usage / cost summary for this run.
-    usage_summary_path = os.path.join(PROJECT_ROOT_DIR, 'logs', 'token_usage_summary.json')
-    try:
-        usage_tracker.write_json(usage_summary_path)
-        for line in usage_tracker.format_summary().splitlines():
-            logger.info(line)
-        logger.info(f"Wrote token usage summary to {usage_summary_path}")
-    except Exception:
-        logger.exception("Failed to write token usage summary")
-
-    # Step 7: Copy translated files back to the input folder, overwriting the originals.
-    copy_translated_files_back(TRANSLATED_QUEUE_FOLDER, INPUT_FOLDER)
-    if processed_files_count > 0:
-        logger.info("Copied translated files back to the input folder.")
-
-    # Optional: Clean up translation queue folders.
-    if DRY_RUN or PRESERVE_QUEUES_FOR_DEBUG:
-        logger.info("Skipping cleanup of translation queue folders (dry-run or preserve-for-debug enabled).")
-    else:
-        try:
-            shutil.rmtree(TRANSLATION_QUEUE_FOLDER)
-            shutil.rmtree(TRANSLATED_QUEUE_FOLDER)
-            logger.info("Cleaned up translation queue folders.")
-        except Exception:
-            logger.exception("Error cleaning up translation queue folders")
+    await run_translation_pipeline(
+        paths=paths,
+        options=options,
+        steps=steps,
+        logger=logger,
+    )
 
 if __name__ == "__main__":
     # Ensure queue folders exist, potentially using paths derived from config or defaults

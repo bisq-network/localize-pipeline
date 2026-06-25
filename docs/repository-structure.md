@@ -36,6 +36,8 @@ This document outlines the structure and purpose of the files and directories wi
 - **`SECURITY_STRATEGY.md`**: Outlines the security strategy for the project.
 - **`secrets/`**: (User-managed, gitignored) Stores sensitive files like GPG keys.
 - **`src/`**: Contains the main Python source code for the translation utilities.
+  - **`src/pipeline_core.py`**: Format-agnostic run orchestration. It wires injected adapters for change detection, queue processing, reporting, copy-back, and cleanup.
+  - **`src/translate_localization_files.py`**: Java `.properties` runtime adapter and translation implementation. It loads config, provides parser/validator/reporting callables, and invokes `pipeline_core`.
 - **`tests/`**: Contains test files for the project.
 - **`update-translations.sh`**: The main orchestration script, run by the container. It pulls from Transifex, runs the Python script, and manages the Git workflow (branching, committing, creating a PR).
 - **`venv/`**: (Optional, gitignored) Contains Python virtual environment files for local development.
@@ -48,9 +50,11 @@ This document outlines the structure and purpose of the files and directories wi
 
 - **`docker/docker-entrypoint.sh`**: Script that runs on container start. It handles cloning/updating the target repository, setting up the `appuser` environment (GPG, Git), and starting the `cron` daemon.
 
-- **`src/translate_localization_files.py`**: The core Python script. It loads configuration, parses `.properties` files, and manages the two-step translation and review process with the OpenAI API.
+- **`src/pipeline_core.py`**: Generic Python orchestration for a translation run. It does not know about Java `.properties`, Transifex, GitHub, or OpenAI directly; those behaviors are injected by the runtime entry point.
 
-- **`update-translations.sh`**: The main orchestration script, run by the container. It pulls from Transifex, runs the Python script, and manages the Git workflow (branching, committing, creating a PR).
+- **`src/translate_localization_files.py`**: The Java `.properties` runtime adapter. It loads configuration, parses `.properties` files, manages the two-step translation and review process with the OpenAI API, and passes those callables into `pipeline_core`.
+
+- **`update-translations.sh`**: The main container orchestration script. It prepares the configured translation source (`git` or `transifex`), runs the Python pipeline, and uses a publisher helper for the Git workflow (branching, committing, creating a PR).
 
 - **`requirements.in` / `requirements.txt`**: Define and lock the production dependencies for the Docker image.
 

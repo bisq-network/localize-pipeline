@@ -99,11 +99,13 @@ def test_translation_source_is_normalized_and_validated():
     """translation_source is lowercased and unknown values fall back with a warning."""
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
+    assert "normalize_translation_source()" in script
+    assert "is_supported_translation_source()" in script
     assert "tr '[:upper:]' '[:lower:]'" in script
-    assert '"$TRANSLATION_SOURCE" != "git" && "$TRANSLATION_SOURCE" != "transifex"' in script
+    assert 'is_supported_translation_source "$TRANSLATION_SOURCE"' in script
     # Normalization must happen before the git-source guard is evaluated.
-    norm_index = script.index("tr '[:upper:]' '[:lower:]'")
-    guard_index = script.index('"$TRANSLATION_SOURCE" == "git"')
+    norm_index = script.index('TRANSLATION_SOURCE=$(normalize_translation_source')
+    guard_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
     assert norm_index < guard_index
 
 
@@ -111,9 +113,10 @@ def test_transifex_pull_is_skipped_when_source_is_git():
     """A git-source project must skip the Transifex pull entirely."""
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    assert '"$TRANSLATION_SOURCE" == "git"' in script
+    assert "prepare_translation_source()" in script
+    assert '"$translation_source" == "git"' in script
     # The guard must be evaluated before the tx pull command is constructed.
-    guard_index = script.index('"$TRANSLATION_SOURCE" == "git"')
+    guard_index = script.index('"$translation_source" == "git"')
     tx_pull_index = script.index('TX_PULL_CMD="tx pull')
     assert guard_index < tx_pull_index
 
@@ -122,8 +125,40 @@ def test_translation_source_read_before_transifex_step():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     read_index = script.index('TRANSLATION_SOURCE=$(get_config_value "translation_source"')
-    tx_pull_index = script.index('TX_PULL_CMD="tx pull')
-    assert read_index < tx_pull_index
+    prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
+    assert read_index < prepare_index
+
+
+def test_source_adapter_is_prepared_before_python_pipeline_runs():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
+    python_index = script.index("python3 -u -m src.translate_localization_files")
+
+    assert prepare_index < python_index
+
+
+def test_publish_adapter_wraps_commit_and_pr_flow():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "publish_translation_changes()" in script
+    assert "translation_file_status_regex()" in script
+    assert "collect_changed_translation_files()" in script
+    publish_def_index = script.index("publish_translation_changes()")
+    publish_call_index = script.index("publish_translation_changes", publish_def_index + 1)
+    return_branch_index = script.index("Returning to original branch")
+
+    assert publish_def_index < publish_call_index < return_branch_index
+
+
+def test_publish_adapter_preserves_both_paths_for_translation_renames():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "translation_file_status_regex() {\n    translation_file_change_regex\n}" in script
+    assert 'old_path = substr(path, 1, index(path, " -> ") - 1)' in script
+    assert 'new_path = substr(path, index(path, " -> ") + 4)' in script
+    assert "if (old_path ~ /\\.(properties|po|mo)$/) print old_path" in script
+    assert "if (new_path ~ /\\.(properties|po|mo)$/) print new_path" in script
 
 
 def test_pr_body_includes_token_usage_cost_summary():
