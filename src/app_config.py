@@ -358,6 +358,7 @@ def _create_model_provider(
     provider_name: str,
     api_base_url: Optional[str] = None,
     aisuite_provider_configs: Optional[Dict[str, Any]] = None,
+    model_names: Tuple[str, ...] = (),
 ) -> Optional[ChatModelProvider]:
     """Create the configured chat model provider unless running in dry-run mode.
 
@@ -379,6 +380,7 @@ def _create_model_provider(
             api_base_url=api_base_url,
             logger=logger,
             aisuite_provider_configs=aisuite_provider_configs,
+            model_names=model_names,
         )
     except ModelProviderConfigurationError as exc:
         logger.critical("CRITICAL: %s", exc)
@@ -496,6 +498,7 @@ def load_app_config() -> AppConfig:
         model_provider_name,
         api_base_url,
         aisuite_provider_configs,
+        (model_name, review_model_name),
     )
     openai_client = getattr(model_provider, "client", None) if model_provider else None
 

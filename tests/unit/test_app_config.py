@@ -540,7 +540,19 @@ class TestProviderAbstraction:
         assert config.model_provider_name == "aisuite"
         _, kwargs = factory.call_args
         assert kwargs["provider_name"] == "aisuite"
+        assert kwargs["model_names"] == ("gpt-4", "gpt-4")
         assert config.model_provider is provider
+
+    def test_default_aisuite_missing_openai_key_exits_for_openai_models(self):
+        with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": False}))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.app_config.load_dotenv"):
+                        with patch("src.logging_config.setup_logger") as mock_logger:
+                            mock_logger.return_value = MagicMock()
+                            with patch.dict(os.environ, {}, clear=True):
+                                with pytest.raises(SystemExit):
+                                    load_app_config()
 
     def test_model_provider_name_is_canonicalized(self):
         provider = MagicMock()
@@ -666,3 +678,4 @@ class TestProviderAbstraction:
         assert kwargs["aisuite_provider_configs"] == {
             "anthropic": {"api_key": "from-env-or-secret"}
         }
+        assert kwargs["model_names"] == ("gpt-4", "gpt-4")

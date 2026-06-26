@@ -8,6 +8,7 @@ from openai import APIStatusError, OpenAIError
 
 from src.model_provider import (
     AiSuiteProvider,
+    ModelProviderConfigurationError,
     OpenAICompatibleProvider,
     create_model_provider,
     create_aisuite_provider,
@@ -231,6 +232,42 @@ async def test_aisuite_provider_defaults_bare_model_names_to_openai():
     assert client.calls[0]["model"] == "openai:gpt-4o"
 
 
+@pytest.mark.asyncio
+async def test_aisuite_provider_keeps_openai_only_kwargs_for_openai_models():
+    client = _FakeSyncClient(_response())
+    provider = AiSuiteProvider(client=client, default_provider="openai")
+
+    await provider.create_chat_completion(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": "return json"}],
+        response_format={"type": "json_object"},
+        completion_token_limit=128,
+    )
+
+    assert client.calls[0]["model"] == "openai:gpt-4o"
+    assert client.calls[0]["response_format"] == {"type": "json_object"}
+    assert client.calls[0]["max_tokens"] == 128
+
+
+@pytest.mark.asyncio
+async def test_aisuite_provider_strips_openai_only_kwargs_for_non_openai_models():
+    client = _FakeSyncClient(_response())
+    provider = AiSuiteProvider(client=client, default_provider="openai")
+
+    await provider.create_chat_completion(
+        model="anthropic:claude-3-5-sonnet-latest",
+        messages=[{"role": "system", "content": "return json"}],
+        response_format={"type": "json_object"},
+        completion_token_limit=128,
+        temperature=0.1,
+    )
+
+    assert client.calls[0]["model"] == "anthropic:claude-3-5-sonnet-latest"
+    assert "response_format" not in client.calls[0]
+    assert client.calls[0]["temperature"] == 0.1
+    assert client.calls[0]["max_tokens"] == 128
+
+
 def test_aisuite_factory_imports_aisuite_lazily():
     logger = logging.getLogger("test")
     fake_client = object()
@@ -301,3 +338,51 @@ def test_aisuite_factory_adds_openai_placeholder_for_custom_endpoint_without_key
     _, kwargs = create_aisuite.call_args
     assert kwargs["provider_configs"]["openai"]["base_url"] == "http://localhost:11434/v1"
     assert kwargs["provider_configs"]["openai"]["api_key"]
+
+
+def test_aisuite_factory_requires_openai_credentials_for_default_models():
+    logger = logging.getLogger("test")
+
+    with pytest.raises(ModelProviderConfigurationError, match="OPENAI_API_KEY"):
+        create_model_provider(
+            provider_name="aisuite",
+            api_key=None,
+            api_base_url=None,
+            logger=logger,
+            aisuite_provider_configs={},
+            model_names=("gpt-4o-mini", "gpt-4o"),
+        )
+
+
+def test_aisuite_factory_allows_non_openai_models_without_openai_key():
+    logger = logging.getLogger("test")
+    provider_configs = {"anthropic": {"api_key": "secret-from-provider-config"}}
+
+    with patch("src.model_provider.create_aisuite_provider") as create_aisuite:
+        create_aisuite.return_value = object()
+        provider = create_model_provider(
+            provider_name="aisuite",
+            api_key=None,
+            api_base_url=None,
+            logger=logger,
+            aisuite_provider_configs=provider_configs,
+            model_names=("anthropic:claude-3-5-sonnet-latest",),
+        )
+
+    assert provider is create_aisuite.return_value
+    _, kwargs = create_aisuite.call_args
+    assert kwargs["provider_configs"] == provider_configs
+
+
+def test_aisuite_factory_requires_openai_credentials_for_mixed_model_routes():
+    logger = logging.getLogger("test")
+
+    with pytest.raises(ModelProviderConfigurationError, match="OPENAI_API_KEY"):
+        create_model_provider(
+            provider_name="aisuite",
+            api_key=None,
+            api_base_url=None,
+            logger=logger,
+            aisuite_provider_configs={"anthropic": {"api_key": "secret"}},
+            model_names=("anthropic:claude-3-5-sonnet-latest", "openai:gpt-4o"),
+        )

@@ -291,6 +291,7 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
 
     assert exit_code == 0
     assert create_provider.call_args.kwargs["provider_name"] == "aisuite"
+    assert create_provider.call_args.kwargs["model_names"] == ("gpt-4o",)
     assert json.loads(validation_summary_path.read_text(encoding="utf-8"))[
         "semantic_review_findings"
     ] == []

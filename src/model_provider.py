@@ -24,6 +24,9 @@ from src.usage_tracker import DEFAULT_PRICES, UsageTracker
 _LOCAL_PROVIDER_PLACEHOLDER_KEY = "not-needed"
 DEFAULT_MODEL_PROVIDER = "aisuite"
 DEFAULT_AISUITE_PROVIDER = "openai"
+_AISUITE_OPENAI_ONLY_REQUEST_KWARGS = frozenset({
+    "response_format",
+})
 _MODEL_PROVIDER_ALIASES = {
     "aisuite": "aisuite",
     "openai": "openai_compatible",
@@ -85,6 +88,41 @@ def normalize_model_provider_name(provider_name: str) -> str:
     """Return the canonical provider name for config aliases."""
     normalized = (provider_name or DEFAULT_MODEL_PROVIDER).strip().lower().replace("-", "_")
     return _MODEL_PROVIDER_ALIASES.get(normalized, normalized)
+
+
+def _aisuite_provider_key_for_model(model: str, default_provider: str) -> str:
+    if ":" in model:
+        return model.split(":", 1)[0].strip().lower()
+    return default_provider.strip().lower()
+
+
+def _aisuite_models_route_to_provider(
+    model_names: Sequence[str],
+    *,
+    provider_key: str,
+    default_provider: str,
+) -> bool:
+    models_to_check = tuple(model_names) or ("",)
+    provider = provider_key.strip().lower()
+    return any(
+        _aisuite_provider_key_for_model(model_name, default_provider) == provider
+        for model_name in models_to_check
+    )
+
+
+def _provider_config_has_credentials(provider_config: Dict[str, Any]) -> bool:
+    return any(provider_config.get(key) for key in ("api_key", "base_url"))
+
+
+def _sanitize_aisuite_request_kwargs(model: str, kwargs: Dict[str, Any], default_provider: str) -> Dict[str, Any]:
+    provider_key = _aisuite_provider_key_for_model(model, default_provider)
+    if provider_key == "openai":
+        return dict(kwargs)
+    return {
+        key: value
+        for key, value in kwargs.items()
+        if key not in _AISUITE_OPENAI_ONLY_REQUEST_KWARGS
+    }
 
 
 class OpenAICompatibleProvider:
@@ -217,6 +255,13 @@ class AiSuiteProvider(OpenAICompatibleProvider):
         if self.client is None:
             raise ModelProviderConfigurationError("AISuite client is not configured.")
 
+        provider_model_name = self._provider_model_name(model)
+        request_kwargs = _sanitize_aisuite_request_kwargs(
+            provider_model_name,
+            kwargs,
+            self.default_provider,
+        )
+
         async def call_aisuite(**request_kwargs: Any) -> Any:
             return await asyncio.to_thread(
                 self.client.chat.completions.create,
@@ -225,11 +270,11 @@ class AiSuiteProvider(OpenAICompatibleProvider):
 
         response = await create_chat_completion_with_fallback(
             call_aisuite,
-            model=self._provider_model_name(model),
+            model=provider_model_name,
             messages=messages,
             completion_token_limit=completion_token_limit,
             retry_exception_types=(Exception,),
-            **kwargs,
+            **request_kwargs,
         )
         self.record_response(model, response)
         return response
@@ -318,6 +363,7 @@ def create_model_provider(
     api_base_url: Optional[str],
     logger: logging.Logger,
     aisuite_provider_configs: Optional[Dict[str, Any]] = None,
+    model_names: Sequence[str] = (),
 ) -> ChatModelProvider:
     """Create the configured model provider backend."""
     normalized = normalize_model_provider_name(provider_name)
@@ -338,6 +384,18 @@ def create_model_provider(
                 **provider_configs.get("openai", {}),
                 **openai_config,
             }
+        if (
+            _aisuite_models_route_to_provider(
+                model_names,
+                provider_key=DEFAULT_AISUITE_PROVIDER,
+                default_provider=DEFAULT_AISUITE_PROVIDER,
+            )
+            and not _provider_config_has_credentials(provider_configs.get("openai", {}))
+        ):
+            raise ModelProviderConfigurationError(
+                "OPENAI_API_KEY is required when AISuite routes bare or openai: models "
+                "to the default OpenAI API without a custom api_base_url."
+            )
         return create_aisuite_provider(
             provider_configs=provider_configs,
             logger=logger,

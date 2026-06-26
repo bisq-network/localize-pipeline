@@ -248,6 +248,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
             api_base_url=api_base_url,
             logger=logger,
             aisuite_provider_configs=aisuite_config.get("provider_configs", {}) or {},
+            model_names=(model,),
         )
     except ModelProviderConfigurationError as exc:
         logger.error("Semantic review model provider configuration failed: %s", exc)
