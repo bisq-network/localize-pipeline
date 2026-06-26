@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Protocol, Sequence
 
 import tiktoken
@@ -110,8 +111,23 @@ def _aisuite_models_route_to_provider(
     )
 
 
-def _provider_config_has_credentials(provider_config: Dict[str, Any]) -> bool:
+def _provider_config_has_credentials(provider_config: Mapping[str, Any]) -> bool:
     return any(provider_config.get(key) for key in ("api_key", "base_url"))
+
+
+def _aisuite_provider_config(
+    provider_configs: Mapping[str, Any],
+    provider_key: str,
+) -> Dict[str, Any]:
+    if provider_key not in provider_configs:
+        return {}
+
+    provider_config = provider_configs[provider_key]
+    if not isinstance(provider_config, Mapping):
+        raise ModelProviderConfigurationError(
+            f"aisuite.provider_configs.{provider_key} must be a mapping when configured."
+        )
+    return dict(provider_config)
 
 
 def _sanitize_aisuite_request_kwargs(model: str, kwargs: Dict[str, Any], default_provider: str) -> Dict[str, Any]:
@@ -375,22 +391,27 @@ def create_model_provider(
         )
     if normalized == "aisuite":
         provider_configs: Dict[str, Any] = dict(aisuite_provider_configs or {})
+        openai_provider_config = _aisuite_provider_config(
+            provider_configs,
+            DEFAULT_AISUITE_PROVIDER,
+        )
         openai_config = _openai_provider_config(
             api_key=api_key,
             api_base_url=api_base_url,
         )
         if openai_config:
             provider_configs["openai"] = {
-                **provider_configs.get("openai", {}),
+                **openai_provider_config,
                 **openai_config,
             }
+            openai_provider_config = provider_configs["openai"]
         if (
             _aisuite_models_route_to_provider(
                 model_names,
                 provider_key=DEFAULT_AISUITE_PROVIDER,
                 default_provider=DEFAULT_AISUITE_PROVIDER,
             )
-            and not _provider_config_has_credentials(provider_configs.get("openai", {}))
+            and not _provider_config_has_credentials(openai_provider_config)
         ):
             raise ModelProviderConfigurationError(
                 "OPENAI_API_KEY is required when AISuite routes bare or openai: models "

@@ -386,3 +386,38 @@ def test_aisuite_factory_requires_openai_credentials_for_mixed_model_routes():
             aisuite_provider_configs={"anthropic": {"api_key": "secret"}},
             model_names=("anthropic:claude-3-5-sonnet-latest", "openai:gpt-4o"),
         )
+
+
+@pytest.mark.parametrize("openai_config", [None, "invalid", ["api_key", "secret"]])
+def test_aisuite_factory_rejects_invalid_openai_provider_config(openai_config):
+    logger = logging.getLogger("test")
+
+    with pytest.raises(
+        ModelProviderConfigurationError,
+        match="aisuite.provider_configs.openai",
+    ):
+        create_model_provider(
+            provider_name="aisuite",
+            api_key=None,
+            api_base_url=None,
+            logger=logger,
+            aisuite_provider_configs={"openai": openai_config},
+            model_names=("gpt-4o-mini",),
+        )
+
+
+def test_aisuite_factory_rejects_invalid_openai_config_before_endpoint_merge():
+    logger = logging.getLogger("test")
+
+    with pytest.raises(
+        ModelProviderConfigurationError,
+        match="aisuite.provider_configs.openai",
+    ):
+        create_model_provider(
+            provider_name="aisuite",
+            api_key=None,
+            api_base_url="http://localhost:11434/v1",
+            logger=logger,
+            aisuite_provider_configs={"openai": None},
+            model_names=("gpt-4o-mini",),
+        )
