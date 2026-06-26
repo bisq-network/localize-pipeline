@@ -23,15 +23,8 @@ if sys.version_info < (3, 11):
 # --- End Version Check ---
 
 import jsonschema
-import tiktoken
 from aiolimiter import AsyncLimiter
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    RateLimitError,
-    APITimeoutError,
-    OpenAIError
-)
+from openai import OpenAIError
 from openai.types.chat import (
     ChatCompletionSystemMessageParam,
     ChatCompletionUserMessageParam
@@ -40,7 +33,7 @@ from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
 from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
-from src.openai_compat import create_chat_completion
+from src.model_provider import OpenAICompatibleProvider
 from src.pipeline_core import (
     TranslationPipelineOptions,
     TranslationPipelinePaths,
@@ -48,8 +41,6 @@ from src.pipeline_core import (
     run_translation_pipeline,
 )
 from src.properties_parser import parse_properties_file, reassemble_file
-from src.usage_tracker import usage_tracker
-from src.cost_estimator import estimate_run_cost, format_estimate
 from src.translation_prompts import build_translation_system_prompt
 from src.translation_validator import (
     check_placeholder_parity,
@@ -99,7 +90,9 @@ TRANSLATION_QUEUE_FOLDER = config.translation_queue_folder
 TRANSLATED_QUEUE_FOLDER = config.translated_queue_folder
 TRANSLATION_KEY_LEDGER_FILE_PATH = config.translation_key_ledger_file_path
 PRESERVE_QUEUES_FOR_DEBUG = config.preserve_queues_for_debug
+MODEL_PROVIDER = config.model_provider
 client = config.openai_client
+_FALLBACK_PROVIDER = OpenAICompatibleProvider(client=None)
 
 # --- End Config and Globals ---
 
@@ -566,18 +559,8 @@ def count_tokens(text: str, model_name: str = 'gpt-3.5-turbo') -> int:
     with ``tiktoken``. As a last resort, a simple whitespace split is used.
     """
 
-    try:
-        encoding = tiktoken.encoding_for_model(model_name)
-    except Exception:
-        try:
-            encoding = tiktoken.get_encoding("gpt2")
-        except Exception:
-            return len(text.split())
-
-    try:
-        return len(encoding.encode(text))
-    except Exception:
-        return len(text.split())
+    provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
+    return provider.count_tokens(text, model_name)
 
 def build_context(
         existing_translations: Dict[str, str],
@@ -1083,8 +1066,8 @@ async def translate_text_async(
         logger.info(f"[Dry Run] Skipping actual translation for key '{key}'. Returning original text.")
         return index, text
 
-    if client is None:
-        logger.error("OpenAI client is None. Cannot proceed with translation.")
+    if MODEL_PROVIDER is None:
+        logger.error("Model provider is not configured. Cannot proceed with translation.")
         return index, text
 
     async with semaphore, rate_limiter:
@@ -1145,8 +1128,7 @@ Provide the translation **of the Value only**, following the instructions above.
         for attempt in range(1, max_retries + 1):  # type: ignore[arg-type]
             try:
                 # Use chat completion API
-                response = await create_chat_completion(
-                    client,
+                response = await MODEL_PROVIDER.create_chat_completion(
                     model=MODEL_NAME,
                     messages=[
                         ChatCompletionSystemMessageParam(role="system", content=system_prompt),
@@ -1161,7 +1143,6 @@ Provide the translation **of the Value only**, following the instructions above.
                     temperature=0.3,
                     timeout=60.0,
                 )
-                usage_tracker.record_response(MODEL_NAME, response)
 
                 msg_content = response.choices[0].message.content
                 if not msg_content:
@@ -1178,14 +1159,13 @@ Provide the translation **of the Value only**, following the instructions above.
                 logger.debug(f"Translated key '{key}' successfully.")
                 return index, translated_text
 
-            except (RateLimitError, APITimeoutError, APIConnectionError, APIStatusError, OpenAIError) as api_exc:
-                logger.error(f"API error occurred: {api_exc.__class__.__name__} - {api_exc}")
-                should_retry = await _handle_retry(attempt, max_retries, base_delay, key, api_exc)
-                if should_retry:
-                    continue
-                else:
-                    return index, text
             except Exception as general_exc:
+                if MODEL_PROVIDER.is_retryable_error(general_exc):
+                    logger.error(f"API error occurred: {general_exc.__class__.__name__} - {general_exc}")
+                    should_retry = await _handle_retry(attempt, max_retries, base_delay, key, general_exc)
+                    if should_retry:
+                        continue
+                    return index, text
                 logger.error(f"An unexpected error occurred: {general_exc}", exc_info=True)
                 return index, text
 
@@ -1279,8 +1259,8 @@ async def holistic_review_async(
         # Return an empty dictionary to simulate a successful review that made no changes.
         return {}
 
-    if client is None:
-        logger.error("OpenAI client is None. Cannot proceed with holistic review.")
+    if MODEL_PROVIDER is None:
+        logger.error("Model provider is not configured. Cannot proceed with holistic review.")
         return {}
 
     # Protect placeholders in both source and translated content before sending to AI
@@ -1303,8 +1283,7 @@ async def holistic_review_async(
         base_delay = 5  # Longer delay for a potentially larger task
         for attempt in range(1, max_retries + 1):
             try:
-                response = await create_chat_completion(
-                    client,
+                response = await MODEL_PROVIDER.create_chat_completion(
                     model=REVIEW_MODEL_NAME,
                     messages=[
                         ChatCompletionSystemMessageParam(role="system", content=review_system_prompt)
@@ -1314,7 +1293,6 @@ async def holistic_review_async(
                     completion_token_limit=8192,
                     timeout=120.0,
                 )
-                usage_tracker.record_response(REVIEW_MODEL_NAME, response)
                 msg_content = response.choices[0].message.content
                 if not msg_content or not msg_content.strip():
                     logger.error("Holistic review returned empty content.")
@@ -1362,12 +1340,13 @@ async def holistic_review_async(
                 logger.debug(f"Invalid AI response (Schema Error):\n---\n{response_text}\n---")
                 # Fall through to retry logic
 
-            except (RateLimitError, APITimeoutError, APIConnectionError, APIStatusError, OpenAIError) as api_exc:
-                logger.warning(f"API error during holistic review: {api_exc}")
-                should_retry = await _handle_retry(attempt, max_retries, base_delay, "holistic_review", api_exc)
-                if not should_retry:
-                    return None
             except Exception as e:
+                if MODEL_PROVIDER.is_retryable_error(e):
+                    logger.warning(f"API error during holistic review: {e}")
+                    should_retry = await _handle_retry(attempt, max_retries, base_delay, "holistic_review", e)
+                    if not should_retry:
+                        return None
+                    continue
                 logger.error(f"Unexpected error during holistic review: {e}", exc_info=True)
                 return None  # Do not retry on unexpected errors
 
@@ -1876,14 +1855,15 @@ async def process_translation_queue(
             continue
 
         # Pre-run scope/cost preview for this file (ballpark — actuals logged at the end).
-        file_estimate = estimate_run_cost(
+        provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
+        file_estimate = provider.estimate_run_cost(
             num_keys=len(keys_to_translate),
             locale_codes=[language_code],
             translate_model=MODEL_NAME,
             review_model=REVIEW_MODEL_NAME,
         )
         logger.info("Pre-run estimate for '%s':", translation_file)
-        for line in format_estimate(file_estimate).splitlines():
+        for line in provider.format_estimate(file_estimate).splitlines():
             logger.info(line)
 
         # Gather all translation tasks
@@ -2205,8 +2185,9 @@ def remove_file_if_exists(path: str) -> None:
 def write_token_usage_summary(summary_path: str) -> None:
     """Persist and log token usage for the current run."""
     try:
-        usage_tracker.write_json(summary_path)
-        for line in usage_tracker.format_summary().splitlines():
+        provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
+        provider.write_usage_summary(summary_path)
+        for line in provider.format_usage_summary().splitlines():
             logger.info(line)
         logger.info(f"Wrote token usage summary to {summary_path}")
     except Exception:

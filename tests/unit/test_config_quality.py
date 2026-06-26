@@ -1,5 +1,6 @@
 """Regression tests for production translation prompt guidance."""
 from pathlib import Path
+import re
 
 import pytest
 import yaml
@@ -8,11 +9,13 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BISQ_PROFILE_CONFIG = PROJECT_ROOT / "profiles" / "bisq" / "config.yaml"
 BISQ_PROFILE_GLOSSARY = PROJECT_ROOT / "profiles" / "bisq" / "glossary.json"
+GENERIC_EXAMPLE_DIR = PROJECT_ROOT / "examples" / "generic-java-properties"
 
 
 def test_example_config_is_a_minimal_generic_starter():
     """config.example.yaml must stay small, generic, and git-source by default."""
     config = yaml.safe_load((PROJECT_ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    assert config["model_provider"] == "aisuite"
     assert config["translation_source"] == "git"
     assert "target_project_root" in config and "input_folder" in config
     assert isinstance(config.get("supported_locales"), list) and config["supported_locales"]
@@ -21,12 +24,67 @@ def test_example_config_is_a_minimal_generic_starter():
     assert {loc["code"] for loc in config["supported_locales"]} <= {"de", "es", "fr"}
 
 
+def test_aisuite_is_packaged_as_primary_provider():
+    requirements_in = (PROJECT_ROOT / "requirements.in").read_text(encoding="utf-8")
+    requirements_txt = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+    in_match = re.search(r"^aisuite==([^\s]+)$", requirements_in, flags=re.MULTILINE)
+    txt_match = re.search(r"^aisuite==([^\s]+)$", requirements_txt, flags=re.MULTILINE)
+    assert in_match is not None
+    assert txt_match is not None
+    assert txt_match.group(1) == in_match.group(1)
+
+
+def test_public_docs_describe_aisuite_as_default_provider():
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    structure_doc = (PROJECT_ROOT / "docs" / "repository-structure.md").read_text(encoding="utf-8")
+    example_config = (PROJECT_ROOT / "config.example.yaml").read_text(encoding="utf-8")
+
+    combined_docs = "\n".join([readme, structure_doc, example_config]).lower()
+    assert "aisuite" in combined_docs
+    assert "default" in combined_docs
+    assert "openai_compatible" in combined_docs
+    assert "fallback" in combined_docs
+    assert "`src.core`" in readme
+    assert "`src.providers`" in readme
+    assert "`src.formats`" in readme
+    assert "optional AISuite" not in readme
+    assert "AISuite is optional" not in readme
+
+
 def test_example_glossary_is_valid_and_small():
     glossary = yaml.safe_load((PROJECT_ROOT / "glossary.example.json").read_text(encoding="utf-8"))
     assert isinstance(glossary, dict) and glossary
     # keyed by language code -> {term: translation}
     for lang, terms in glossary.items():
         assert isinstance(terms, dict)
+
+
+def test_neutral_example_project_is_packaged():
+    config_path = GENERIC_EXAMPLE_DIR / "config.yaml"
+    glossary_path = GENERIC_EXAMPLE_DIR / "glossary.json"
+    readme_path = GENERIC_EXAMPLE_DIR / "README.md"
+    resources = GENERIC_EXAMPLE_DIR / "resources"
+
+    assert config_path.exists()
+    assert glossary_path.exists()
+    assert readme_path.exists()
+    assert (resources / "messages.properties").exists()
+    assert (resources / "messages_de.properties").exists()
+
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "Bisq" not in config_text
+    config = yaml.safe_load(config_text)
+    assert config["model_provider"] == "aisuite"
+    assert config["translation_source"] == "git"
+    assert config["localization_format"] == "java_properties"
+    target_text = (resources / "messages_de.properties").read_text(encoding="utf-8")
+    assert "settings.save" not in target_text
+    assert "account.name" not in target_text
+
+    readme_text = readme_path.read_text(encoding="utf-8")
+    assert "Bisq" not in readme_text
+    assert "generic Java .properties" in readme_text
 
 
 def test_bisq_profile_packages_config_and_glossary_assets():
@@ -65,6 +123,7 @@ def test_deployment_guide_documents_relative_input_folder_semantics():
 
     assert "# - input_folder: i18n/src/main/resources" in guide
     assert "input_folder is resolved relative to target_project_root" in guide
+    assert "model_provider: aisuite" in guide
     assert "The paths must be absolute paths inside the container." not in guide
 
 

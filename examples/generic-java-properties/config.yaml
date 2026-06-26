@@ -1,0 +1,23 @@
+# Generic Java .properties example profile.
+target_project_root: "."
+input_folder: "resources"
+localization_format: "java_properties"
+project_context: "Translate concise UI text for a software product."
+translation_source: "git"
+
+model_provider: "aisuite"
+model_name: "gpt-4o-mini"
+review_model_name: "gpt-4o"
+
+glossary_file_path: "glossary.json"
+brand_technical_glossary:
+  - GitHub
+
+dry_run: false
+supported_locales:
+  - code: "de"
+    name: "German"
+
+style_rules:
+  de:
+    - "Use clear, concise software UI wording."

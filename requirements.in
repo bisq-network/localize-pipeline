@@ -2,6 +2,7 @@
 # Run 'pip-compile' to generate requirements.txt
 
 openai
+aisuite==0.1.14
 python-dotenv
 PyYAML
 GitPython

@@ -51,6 +51,22 @@ def test_unknown_model_tracks_tokens_but_no_cost():
     assert s["totals"]["cost_complete"] is False
 
 
+def test_provider_prefixed_openai_model_uses_bare_model_price():
+    t = UsageTracker(prices=PRICES)
+    t.record("openai:gpt-4o", 1_000_000, 1_000_000)
+    s = t.summary()
+    assert s["models"]["openai:gpt-4o"]["estimated_cost_usd"] == 12.5
+    assert s["totals"]["cost_complete"] is True
+
+
+def test_unknown_provider_prefixed_model_does_not_use_bare_model_price():
+    t = UsageTracker(prices=PRICES)
+    t.record("azure:gpt-4o", 1_000_000, 1_000_000)
+    s = t.summary()
+    assert s["models"]["azure:gpt-4o"]["estimated_cost_usd"] is None
+    assert s["totals"]["cost_complete"] is False
+
+
 def test_record_response_reads_usage():
     t = UsageTracker(prices=PRICES)
     resp = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=120, completion_tokens=30))

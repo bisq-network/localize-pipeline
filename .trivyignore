@@ -218,3 +218,19 @@ CVE-2026-39821
 CVE-2026-42502
 CVE-2026-42506
 CVE-2026-27145
+
+# CVE-2026-48702, CVE-2026-39832:
+# New Trivy findings in Go dependencies embedded in CI/CD helper binaries.
+# Affects: gh v2.93.0 (github.com/sigstore/rekor) and tx v1.6.17
+#          (golang.org/x/crypto/ssh/agent).
+# Rationale: These binaries are used only in controlled build/deployment
+#            automation. gh is used for GitHub API/PR/status operations and not
+#            for untrusted Rekor bundle decompression in this workflow. tx talks
+#            to Transifex's API using fixed workflow inputs and does not expose
+#            SSH agent forwarding to untrusted users here. Mitigation depends on
+#            upstream releases or a future toolchain refresh.
+# Checked CI Trivy report: 2026-06-26.
+# Added: 2026-06-26
+# Revisit by: 2026-08-15
+CVE-2026-48702
+CVE-2026-39832

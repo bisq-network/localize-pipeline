@@ -8,13 +8,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 
 from src.logging_config import setup_logger
 from src.localization_formats import (
     JAVA_PROPERTIES_FORMAT,
     LocalizationFormat,
     load_localization_format,
+)
+from src.model_provider import (
+    ChatModelProvider,
+    DEFAULT_MODEL_PROVIDER,
+    ModelProviderConfigurationError,
+    create_model_provider,
+    normalize_model_provider_name,
 )
 from src.semantic_quality import normalize_retained_source_word_allowlist
 
@@ -66,8 +72,12 @@ class AppConfig:
     translation_key_ledger_file_path: str
     preserve_queues_for_debug: bool
 
-    # OpenAI client
-    openai_client: Optional[AsyncOpenAI]
+    # Model provider
+    model_provider: Optional[ChatModelProvider]
+    # Backward-compatible raw client alias for tests and older callers. New code
+    # should use model_provider.
+    openai_client: Optional[Any]
+    model_provider_name: str = DEFAULT_MODEL_PROVIDER
 
     # Generated PR quality gate
     quality_gate: QualityGateConfig = field(default_factory=QualityGateConfig)
@@ -329,11 +339,6 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
-# Placeholder key for local/self-hosted OpenAI-compatible servers (e.g. Ollama)
-# that do not require authentication. The SDK requires a non-empty api_key.
-_LOCAL_PROVIDER_PLACEHOLDER_KEY = "not-needed"
-
-
 def _resolve_api_base_url(config: Dict[str, Any]) -> Optional[str]:
     """Resolve the OpenAI-compatible endpoint, env (OPENAI_BASE_URL) over config.
 
@@ -347,12 +352,14 @@ def _resolve_api_base_url(config: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _create_openai_client(
+def _create_model_provider(
     dry_run: bool,
     logger: logging.Logger,
+    provider_name: str,
     api_base_url: Optional[str] = None,
-) -> Optional[AsyncOpenAI]:
-    """Create an OpenAI(-compatible) client unless running in dry-run mode.
+    aisuite_provider_configs: Optional[Dict[str, Any]] = None,
+) -> Optional[ChatModelProvider]:
+    """Create the configured chat model provider unless running in dry-run mode.
 
     When ``api_base_url`` is set the client targets a custom endpoint (another
     provider or a local Ollama server). Such endpoints often need no key, so a
@@ -360,40 +367,27 @@ def _create_openai_client(
     OpenAI API a missing key remains a hard error.
     """
     if dry_run:
-        logger.info("Running in dry-run mode, OpenAI client will not be initialized")
+        logger.info("Running in dry-run mode, model provider will not be initialized")
         return None
 
-    is_custom_endpoint = bool(api_base_url)
     api_key_from_env = os.environ.get('OPENAI_API_KEY')
 
-    if not api_key_from_env:
-        if is_custom_endpoint:
-            logger.info(
-                "No OPENAI_API_KEY set; using a placeholder key for custom endpoint '%s' "
-                "(typical for local servers such as Ollama).",
-                api_base_url,
-            )
-            api_key_from_env = _LOCAL_PROVIDER_PLACEHOLDER_KEY
-        else:
-            logger.critical("CRITICAL: OPENAI_API_KEY environment variable not found.")
+    try:
+        return create_model_provider(
+            provider_name=provider_name,
+            api_key=api_key_from_env,
+            api_base_url=api_base_url,
+            logger=logger,
+            aisuite_provider_configs=aisuite_provider_configs,
+        )
+    except ModelProviderConfigurationError as exc:
+        logger.critical("CRITICAL: %s", exc)
+        if "OPENAI_API_KEY" in str(exc):
             logger.critical("Please set OPENAI_API_KEY or enable dry_run mode in configuration.")
             logger.critical("For dry-run mode, set 'dry_run: true' in your config file.")
-            sys.exit(1)
-    elif not is_custom_endpoint and not api_key_from_env.startswith('sk-'):
-        # The sk- convention only applies to the official OpenAI API; BYO keys for
-        # other providers (Groq, Together, etc.) use different prefixes.
-        logger.warning("Warning: OPENAI_API_KEY does not start with 'sk-'. This may be invalid.")
-
-    try:
-        client_kwargs: Dict[str, Any] = {"api_key": api_key_from_env}
-        if api_base_url:
-            client_kwargs["base_url"] = api_base_url
-            logger.info("Using OpenAI-compatible endpoint: %s", api_base_url)
-        client = AsyncOpenAI(**client_kwargs)
-        logger.info("OpenAI client initialized successfully")
-        return client
+        sys.exit(1)
     except Exception as e:
-        logger.critical("Failed to initialize OpenAI client: %s", str(e))
+        logger.critical("Failed to initialize model provider: %s", str(e))
         logger.critical("Please check your OPENAI_API_KEY and network connectivity.")
         sys.exit(1)
 
@@ -445,6 +439,11 @@ def load_app_config() -> AppConfig:
     )
     model_name = config.get('model_name', 'gpt-4')
     review_model_name = os.environ.get('REVIEW_MODEL_NAME', config.get('review_model_name', model_name))
+    model_provider_name = normalize_model_provider_name(
+        str(config.get('model_provider', DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
+    )
+    aisuite_config = config.get('aisuite', {}) or {}
+    aisuite_provider_configs = aisuite_config.get('provider_configs', {}) or {}
     retranslate_identical_source_strings = bool(config.get('retranslate_identical_source_strings', False))
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(
@@ -490,8 +489,15 @@ def load_app_config() -> AppConfig:
     except ValueError:
         localization_format = JAVA_PROPERTIES_FORMAT
 
-    # Create the client against the endpoint resolved earlier.
-    openai_client = _create_openai_client(dry_run, logger, api_base_url)
+    # Create the provider against the endpoint resolved earlier.
+    model_provider = _create_model_provider(
+        dry_run,
+        logger,
+        model_provider_name,
+        api_base_url,
+        aisuite_provider_configs,
+    )
+    openai_client = getattr(model_provider, "client", None) if model_provider else None
 
     return AppConfig(
         project_root=project_root,
@@ -515,7 +521,9 @@ def load_app_config() -> AppConfig:
         translated_queue_folder=translated_queue_folder,
         translation_key_ledger_file_path=translation_key_ledger_file_path,
         preserve_queues_for_debug=config.get('preserve_queues_for_debug', False),
+        model_provider=model_provider,
         openai_client=openai_client,
+        model_provider_name=model_provider_name,
         quality_gate=quality_gate,
         api_base_url=api_base_url,
         project_context=project_context,

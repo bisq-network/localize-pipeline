@@ -28,6 +28,7 @@ project_context: "Translate concise UI text for a software product."
 translation_source: "git"
 
 # --- Model / provider ---
+model_provider: "aisuite"           # Default AISuite-backed provider abstraction.
 model_name: "gpt-4o-mini"          # fast initial translation
 review_model_name: "gpt-4o"        # holistic review pass (set equal to model_name to save cost)
 
@@ -35,6 +36,18 @@ review_model_name: "gpt-4o"        # holistic review pass (set equal to model_na
 # translate with zero data egress and no API key (set the model names to a model
 # you have pulled, e.g. "llama3.1"). Env var OPENAI_BASE_URL overrides this.
 # api_base_url: "http://localhost:11434/v1"
+
+# AISuite lets one config address multiple providers with model names like
+# "openai:gpt-4o-mini" or "anthropic:claude-3-5-sonnet". Bare model names are
+# treated as OpenAI models by default. Use model_provider: "openai_compatible"
+# only when you explicitly want the direct OpenAI SDK fallback path.
+# model_provider: "aisuite"
+# model_name: "openai:gpt-4o-mini"
+# review_model_name: "openai:gpt-4o"
+# aisuite:
+#   provider_configs:
+#     # Keep secrets in environment variables or your secret manager, not here.
+#     openai: {}
 
 # --- Glossary (optional but recommended) ---
 # JSON file of per-language term mappings. See glossary.example.json for the format.

@@ -54,6 +54,10 @@ opens a PR you can review and merge.
 
 ## Using your own model / a local endpoint
 
+The action uses the packaged AISuite provider abstraction by default. Bare model
+names are treated as OpenAI models for compatibility; explicit AISuite names
+such as `openai:gpt-4o-mini` can be set in `config.yaml`.
+
 To translate against any OpenAI-compatible endpoint (a self-hosted Ollama, Groq,
 Together, …) set `api-base-url`. When the endpoint needs no key (Ollama) omit
 `openai-api-key` entirely — your strings never leave your infrastructure:

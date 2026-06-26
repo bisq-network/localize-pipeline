@@ -38,6 +38,7 @@ class TestAppConfig:
             translated_queue_folder="/tmp/translated",
             translation_key_ledger_file_path="/tmp/ledger.json",
             preserve_queues_for_debug=False,
+            model_provider=None,
             openai_client=None
         )
 
@@ -270,14 +271,14 @@ class TestLoadAppConfig:
 
     def test_openai_client_creation_with_api_key(self):
         """Test that OpenAI client is created when API key is present."""
-        mock_config = {"dry_run": False}
+        mock_config = {"dry_run": False, "model_provider": "openai_compatible"}
 
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
                     with patch("src.logging_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
-                        with patch("src.app_config.AsyncOpenAI") as mock_openai:
+                        with patch("src.model_provider.AsyncOpenAI") as mock_openai:
                             mock_client = MagicMock()
                             mock_openai.return_value = mock_client
                             with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}):
@@ -302,15 +303,17 @@ class TestLoadAppConfig:
 
     def test_missing_openai_key_exits_in_production_mode(self):
         """Test that missing OpenAI API key causes system exit in production mode."""
-        mock_config = {"dry_run": False}
+        mock_config = {"dry_run": False, "model_provider": "openai_compatible"}
 
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
-                with patch("src.logging_config.setup_logger") as mock_logger:
-                    mock_logger.return_value = MagicMock()
-                    with patch.dict(os.environ, {}, clear=True):
-                        with pytest.raises(SystemExit):
-                            load_app_config()
+                with patch("os.access", return_value=True):
+                    with patch("src.app_config.load_dotenv"):
+                        with patch("src.logging_config.setup_logger") as mock_logger:
+                            mock_logger.return_value = MagicMock()
+                            with patch.dict(os.environ, {}, clear=True):
+                                with pytest.raises(SystemExit):
+                                    load_app_config()
 
     def test_style_rules_preprocessing(self):
         """Test that style rules are properly preprocessed."""
@@ -514,24 +517,57 @@ class TestProviderAbstraction:
                 with patch("os.access", return_value=True):
                     with patch("src.logging_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
-                        with patch("src.app_config.AsyncOpenAI") as mock_openai:
+                        with patch("src.model_provider.AsyncOpenAI") as mock_openai:
                             mock_openai.return_value = MagicMock()
                             with patch.dict(os.environ, env, clear=True):
                                 config = load_app_config()
         return config, mock_openai
 
-    def test_default_openai_path_unchanged(self):
-        """With no base_url, the client is built with api_key only (backwards compatible)."""
-        config, mock_openai = self._load(
-            {"dry_run": False}, {"OPENAI_API_KEY": "sk-test-key"}
-        )
-        mock_openai.assert_called_once_with(api_key="sk-test-key")
-        assert config.api_base_url is None
+    def test_aisuite_is_default_provider(self):
+        """AISuite is the default abstraction layer for chat model dispatch."""
+        provider = MagicMock()
+        provider.client = object()
+
+        with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": False}))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.logging_config.setup_logger") as mock_logger:
+                        mock_logger.return_value = MagicMock()
+                        with patch("src.app_config.create_model_provider", return_value=provider) as factory:
+                            with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}, clear=True):
+                                config = load_app_config()
+
+        assert config.model_provider_name == "aisuite"
+        _, kwargs = factory.call_args
+        assert kwargs["provider_name"] == "aisuite"
+        assert config.model_provider is provider
+
+    def test_model_provider_name_is_canonicalized(self):
+        provider = MagicMock()
+        provider.client = object()
+
+        with patch("builtins.open", mock_open(read_data=yaml.dump(
+            {"dry_run": False, "model_provider": "openai"}
+        ))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.logging_config.setup_logger") as mock_logger:
+                        mock_logger.return_value = MagicMock()
+                        with patch("src.app_config.create_model_provider", return_value=provider) as factory:
+                            with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}, clear=True):
+                                config = load_app_config()
+
+        assert config.model_provider_name == "openai_compatible"
+        assert factory.call_args.kwargs["provider_name"] == "openai_compatible"
 
     def test_base_url_from_config_passed_to_client(self):
         """api_base_url in config is passed to the OpenAI-compatible client."""
         config, mock_openai = self._load(
-            {"dry_run": False, "api_base_url": "http://localhost:11434/v1"},
+            {
+                "dry_run": False,
+                "model_provider": "openai_compatible",
+                "api_base_url": "http://localhost:11434/v1",
+            },
             {"OPENAI_API_KEY": "sk-test-key"},
         )
         assert config.api_base_url == "http://localhost:11434/v1"
@@ -542,7 +578,11 @@ class TestProviderAbstraction:
     def test_base_url_env_overrides_config(self):
         """OPENAI_BASE_URL env var wins over the config value."""
         config, mock_openai = self._load(
-            {"dry_run": False, "api_base_url": "http://config-host/v1"},
+            {
+                "dry_run": False,
+                "model_provider": "openai_compatible",
+                "api_base_url": "http://config-host/v1",
+            },
             {"OPENAI_API_KEY": "sk-test-key", "OPENAI_BASE_URL": "http://env-host/v1"},
         )
         assert config.api_base_url == "http://env-host/v1"
@@ -552,7 +592,11 @@ class TestProviderAbstraction:
     def test_local_provider_without_key_uses_placeholder(self):
         """A custom endpoint (e.g. Ollama) needs no real key; we must not exit."""
         config, mock_openai = self._load(
-            {"dry_run": False, "api_base_url": "http://localhost:11434/v1"},
+            {
+                "dry_run": False,
+                "model_provider": "openai_compatible",
+                "api_base_url": "http://localhost:11434/v1",
+            },
             {},  # no OPENAI_API_KEY
         )
         _, kwargs = mock_openai.call_args
@@ -562,7 +606,9 @@ class TestProviderAbstraction:
 
     def test_missing_key_without_base_url_still_exits(self):
         """Without a custom endpoint, a missing key is still a hard error."""
-        with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": False}))):
+        with patch("builtins.open", mock_open(read_data=yaml.dump(
+            {"dry_run": False, "model_provider": "openai_compatible"}
+        ))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
                     with patch("src.logging_config.setup_logger") as mock_logger:
@@ -575,13 +621,48 @@ class TestProviderAbstraction:
         """A BYO key on a custom endpoint may not start with sk-; accept it without warning."""
         captured = MagicMock()
         with patch("builtins.open", mock_open(read_data=yaml.dump(
-            {"dry_run": False, "api_base_url": "https://api.groq.com/openai/v1"}
+            {
+                "dry_run": False,
+                "model_provider": "openai_compatible",
+                "api_base_url": "https://api.groq.com/openai/v1",
+            }
         ))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
                     with patch("src.logging_config.setup_logger", return_value=captured):
-                        with patch("src.app_config.AsyncOpenAI", return_value=MagicMock()):
+                        with patch("src.model_provider.AsyncOpenAI", return_value=MagicMock()):
                             with patch.dict(os.environ, {"OPENAI_API_KEY": "gsk_abc123"}, clear=True):
                                 load_app_config()
         warnings = [str(c) for c in captured.warning.call_args_list]
         assert not any("sk-" in w for w in warnings)
+
+    def test_aisuite_backend_is_configurable(self):
+        provider = MagicMock()
+        provider.client = object()
+        mock_config = {
+            "dry_run": False,
+            "model_provider": "aisuite",
+            "aisuite": {
+                "provider_configs": {
+                    "anthropic": {"api_key": "from-env-or-secret"}
+                }
+            },
+        }
+
+        with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("src.logging_config.setup_logger") as mock_logger:
+                        mock_logger.return_value = MagicMock()
+                        with patch("src.app_config.create_model_provider", return_value=provider) as factory:
+                            with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+                                config = load_app_config()
+
+        assert config.model_provider_name == "aisuite"
+        assert config.model_provider is provider
+        assert config.openai_client is provider.client
+        _, kwargs = factory.call_args
+        assert kwargs["provider_name"] == "aisuite"
+        assert kwargs["aisuite_provider_configs"] == {
+            "anthropic": {"api_key": "from-env-or-secret"}
+        }

@@ -36,12 +36,13 @@ class TestHelperFunctions(unittest.TestCase):
 
     def test_count_tokens_fallback(self):
         # Force encoding_for_model to raise to trigger fallback
-        with patch('src.translate_localization_files.tiktoken.encoding_for_model', side_effect=Exception()):
+        with patch('src.translate_localization_files.MODEL_PROVIDER', None):
             # Also patch get_encoding to provide predictable encode
-            fake_enc = MagicMock()
-            fake_enc.encode.side_effect = lambda s: list(s.split())
-            with patch('src.translate_localization_files.tiktoken.get_encoding', return_value=fake_enc):
-                count = count_tokens('one two three')
+            with patch('src.model_provider.tiktoken.encoding_for_model', side_effect=Exception()):
+                fake_enc = MagicMock()
+                fake_enc.encode.side_effect = lambda s: list(s.split())
+                with patch('src.model_provider.tiktoken.get_encoding', return_value=fake_enc):
+                    count = count_tokens('one two three')
         self.assertEqual(count, 3)
 
 
