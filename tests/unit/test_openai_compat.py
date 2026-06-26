@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from openai import OpenAIError
 
-from src.openai_compat import create_chat_completion
+from src.openai_compat import create_chat_completion, create_chat_completion_with_fallback
 
 
 def _response(content="{}"):
@@ -146,3 +146,24 @@ async def test_omits_completion_token_cap_when_no_limit_is_requested():
 
     assert "max_tokens" not in client.calls[0]
     assert "max_completion_tokens" not in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_callable_helper_accepts_sync_completion_callable():
+    calls = []
+    response = _response()
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return response
+
+    result = await create_chat_completion_with_fallback(
+        create,
+        model="gpt-4o",
+        messages=[],
+        completion_token_limit=128,
+    )
+
+    assert result is response
+    assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 128

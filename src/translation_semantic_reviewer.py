@@ -5,16 +5,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import jsonschema
 import yaml
-from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
-from src.openai_compat import create_chat_completion
+from src.model_provider import (
+    ChatModelProvider,
+    DEFAULT_MODEL_PROVIDER,
+    ModelProviderConfigurationError,
+    OpenAICompatibleProvider,
+    create_model_provider,
+)
 from src.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
@@ -143,23 +149,24 @@ def append_semantic_review_findings(
 
 
 async def review_translation_changes(
-    client: AsyncOpenAI,
+    client: Any,
     model: str,
     target_language: str,
     changes: Sequence[TranslationChange],
     style_rules: Sequence[str],
     brand_glossary: Sequence[str],
+    model_provider: Optional[ChatModelProvider] = None,
 ) -> List[Dict[str, str]]:
     if not changes:
         return []
+    provider = model_provider or OpenAICompatibleProvider(client=client)
     messages = build_semantic_review_messages(
         target_language=target_language,
         changes=changes,
         style_rules=style_rules,
         brand_glossary=brand_glossary,
     )
-    response = await create_chat_completion(
-        client,
+    response = await provider.create_chat_completion(
         model=model,
         messages=[
             ChatCompletionSystemMessageParam(role="system", content=messages[0]["content"]),
@@ -199,10 +206,6 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         append_semantic_review_findings(args.validation_summary, [])
         return 0
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return 0
-
     locales = [
         locale["code"]
         for locale in config.get("supported_locales", [])
@@ -234,19 +237,34 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
             config.get("review_model_name", config.get("model_name", "gpt-4o")),
         )
     )
-    client = AsyncOpenAI(api_key=api_key)
+    provider_name = str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
+    api_base_url = os.environ.get("OPENAI_BASE_URL") or config.get("api_base_url")
+    aisuite_config = config.get("aisuite", {}) or {}
+    logger = logging.getLogger(__name__)
+    try:
+        provider = create_model_provider(
+            provider_name=provider_name,
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            api_base_url=api_base_url,
+            logger=logger,
+            aisuite_provider_configs=aisuite_config.get("provider_configs", {}) or {},
+        )
+    except ModelProviderConfigurationError as exc:
+        logger.error("Semantic review model provider configuration failed: %s", exc)
+        return 1
     findings: List[Dict[str, str]] = []
 
     for locale_code in sorted({change.locale_code for change in changes if change.locale_code}):
         locale_changes = [change for change in changes if change.locale_code == locale_code]
         findings.extend(
             await review_translation_changes(
-                client=client,
+                client=provider.client,
                 model=model,
                 target_language=language_names.get(locale_code, locale_code),
                 changes=locale_changes,
                 style_rules=style_rules_by_locale.get(locale_code, []),
                 brand_glossary=brand_glossary,
+                model_provider=provider,
             )
         )
 

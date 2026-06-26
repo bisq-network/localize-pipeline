@@ -1,13 +1,14 @@
 import json
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from src.semantic_quality import TranslationChange
+from src.model_provider import ModelProviderConfigurationError
 from src.translation_semantic_reviewer import (
     _run,
     append_semantic_review_findings,
@@ -188,7 +189,8 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
             )
         ]
     )
-    create_completion = AsyncMock(return_value=response)
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
     changes = [
         TranslationChange(
             file="resources/mobile_es.properties",
@@ -200,23 +202,157 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
         )
     ]
 
-    with patch(
-        "src.translation_semantic_reviewer.create_chat_completion",
-        create_completion,
-    ):
-        findings = await review_translation_changes(
-            client=object(),
-            model="gpt-5.4-mini",
-            target_language="Spanish",
-            changes=changes,
-            style_rules=[],
-            brand_glossary=[],
-        )
+    findings = await review_translation_changes(
+        client=object(),
+        model="gpt-5.4-mini",
+        target_language="Spanish",
+        changes=changes,
+        style_rules=[],
+        brand_glossary=[],
+        model_provider=provider,
+    )
 
     assert findings == []
-    kwargs = create_completion.await_args.kwargs
+    kwargs = provider.create_chat_completion.await_args.kwargs
     assert kwargs["model"] == "gpt-5.4-mini"
     assert kwargs["completion_token_limit"] == 4096
     assert kwargs["response_format"] == {"type": "json_object"}
     assert "max_tokens" not in kwargs
     assert "max_completion_tokens" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: gpt-4o",
+                "supported_locales:",
+                "  - code: de",
+                "    name: German",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = MagicMock()
+    provider.client = object()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"findings": []}))
+                )
+            ]
+        )
+    )
+
+    with (
+        patch(
+            "src.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ),
+        patch(
+            "src.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            return_value=[
+                TranslationChange(
+                    file="resources/messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ],
+        ),
+        patch(
+            "src.translation_semantic_reviewer.create_model_provider",
+            return_value=provider,
+        ) as create_provider,
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                "resources",
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+            ]
+        )
+
+    assert exit_code == 0
+    assert create_provider.call_args.kwargs["provider_name"] == "aisuite"
+    assert json.loads(validation_summary_path.read_text(encoding="utf-8"))[
+        "semantic_review_findings"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(tmp_path, caplog):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: gpt-4o",
+                "supported_locales:",
+                "  - code: de",
+                "    name: German",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch(
+            "src.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ),
+        patch(
+            "src.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            return_value=[
+                TranslationChange(
+                    file="resources/messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ],
+        ),
+        patch(
+            "src.translation_semantic_reviewer.create_model_provider",
+            side_effect=ModelProviderConfigurationError("missing key"),
+        ),
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                "resources",
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+            ]
+        )
+
+    assert exit_code == 1
+    assert "Semantic review model provider configuration failed" in caplog.text
+    assert not validation_summary_path.exists()

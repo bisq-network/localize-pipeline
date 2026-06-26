@@ -6,7 +6,8 @@ external dependencies and file system operations, and also includes unit-like te
 for specific helper functions within the script.
 """
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
+from types import SimpleNamespace
 import pytest
 import src.translate_localization_files
 
@@ -44,12 +45,16 @@ async def test_process_translation_queue_end_to_end(integration_test_environment
     with open(target_file_path, 'w', encoding='utf-8') as f:
         f.write(target_content)
 
-    async def mock_create(*args, **kwargs):
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="Wert zwei"))]
-        return mock_response
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Wert zwei"))]
+    ))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
 
-    with patch('src.translate_localization_files.client.chat.completions.create', new=mock_create):
+    with patch('src.translate_localization_files.MODEL_PROVIDER', provider):
         await src.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
@@ -78,13 +83,17 @@ async def test_handles_already_escaped_quotes_correctly(integration_test_environ
     with open(target_de_path, 'w', encoding='utf-8') as f:
         f.write(target_content)
 
-    async def mock_create(*args, **kwargs):
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="URL ist '{0}'"))]
-        return mock_response
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="URL ist '{0}'"))]
+    ))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
 
     with patch('src.translate_localization_files.lint_properties_file', return_value=[]), \
-         patch('src.translate_localization_files.client.chat.completions.create', new=mock_create):
+         patch('src.translate_localization_files.MODEL_PROVIDER', provider):
         await src.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],

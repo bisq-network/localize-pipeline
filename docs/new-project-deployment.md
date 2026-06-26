@@ -107,6 +107,11 @@ The `TRANSLATOR_PROFILE=my-project` value in `docker/.env` selects
 `profiles/my-project/` for Docker runs. The included Bisq production profile is
 available under `profiles/bisq/` as a complete real-world example.
 
+The default profile uses `model_provider: aisuite`, which is packaged with the
+Docker image. Bare model names are treated as OpenAI models. Set
+`model_provider: openai_compatible` only if you intentionally want the direct
+OpenAI SDK fallback path.
+
 ## Step 4: Build the Docker Image
 
 From the project root, run the build command. This will create a self-contained image with all dependencies.

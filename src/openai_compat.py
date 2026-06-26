@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+import inspect
+from typing import Any, Callable, Literal, Tuple
 
 from openai import OpenAIError
 
@@ -30,6 +31,12 @@ _UNSUPPORTED_PARAMETER_MARKERS = (
 )
 
 
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 def completion_token_parameter_for_model(model: str) -> CompletionTokenParameter:
     """Return the preferred completion-token cap parameter for ``model``.
 
@@ -40,6 +47,8 @@ def completion_token_parameter_for_model(model: str) -> CompletionTokenParameter
     error.
     """
     normalized = model.lower()
+    if ":" in normalized:
+        normalized = normalized.split(":", 1)[1]
     if normalized.startswith(_MAX_COMPLETION_TOKEN_MODEL_PREFIXES):
         return "max_completion_tokens"
     return "max_tokens"
@@ -72,6 +81,26 @@ async def create_chat_completion(
     completion_token_limit: int | None = None,
     **kwargs: Any,
 ) -> Any:
+    """Create a chat completion with model-aware token-limit parameters."""
+    return await create_chat_completion_with_fallback(
+        client.chat.completions.create,
+        model=model,
+        messages=messages,
+        completion_token_limit=completion_token_limit,
+        retry_exception_types=(OpenAIError, TypeError),
+        **kwargs,
+    )
+
+
+async def create_chat_completion_with_fallback(
+    create_completion: Callable[..., Any],
+    *,
+    model: str,
+    messages: Any,
+    completion_token_limit: int | None = None,
+    retry_exception_types: Tuple[type[BaseException], ...] = (Exception,),
+    **kwargs: Any,
+) -> Any:
     """Create a chat completion with model-aware token-limit parameters.
 
     ``completion_token_limit`` is intentionally provider-agnostic. The helper
@@ -79,11 +108,7 @@ async def create_chat_completion(
     once with the alternate name if an OpenAI-compatible API rejects it.
     """
     if completion_token_limit is None:
-        return await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **kwargs,
-        )
+        return await _maybe_await(create_completion(model=model, messages=messages, **kwargs))
 
     first_parameter = completion_token_parameter_for_model(model)
     fallback_parameter: CompletionTokenParameter = (
@@ -98,12 +123,8 @@ async def create_chat_completion(
     )
 
     try:
-        return await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **first_kwargs,
-        )
-    except (OpenAIError, TypeError) as exc:
+        return await _maybe_await(create_completion(model=model, messages=messages, **first_kwargs))
+    except retry_exception_types as exc:
         if not _looks_like_unsupported_parameter(exc, first_parameter):
             raise
 
@@ -119,8 +140,4 @@ async def create_chat_completion(
         fallback_parameter,
         completion_token_limit,
     )
-    return await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        **fallback_kwargs,
-    )
+    return await _maybe_await(create_completion(model=model, messages=messages, **fallback_kwargs))

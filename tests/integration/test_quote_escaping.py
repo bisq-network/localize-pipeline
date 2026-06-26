@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 # Set a dummy API key before importing the main script to prevent SystemExit.
@@ -28,8 +29,7 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
     @patch('src.translate_localization_files.load_glossary')
     @patch('src.translate_localization_files.parse_properties_file')
     @patch('src.translate_localization_files.get_working_tree_changed_keys')
-    @patch('src.translate_localization_files.client.chat.completions.create', new_callable=AsyncMock)
-    async def test_single_quotes_are_escaped(self, mock_create, mock_git_changed_keys, mock_parse_properties, mock_load_glossary, mock_pre_validator, mock_holistic_review, mock_post_validator):
+    async def test_single_quotes_are_escaped(self, mock_git_changed_keys, mock_parse_properties, mock_load_glossary, mock_pre_validator, mock_holistic_review, mock_post_validator):
         from src.translate_localization_files import process_translation_queue, LANGUAGE_CODES, NAME_TO_CODE, REPO_ROOT
 
         # Configure the mocks
@@ -63,9 +63,14 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
 
         # 2. Mock the AI response for the initial translation
         response_text = "Dies ist ein '{0}' Beispiel."
-        mock_create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content=response_text))]
-        )
+        provider = MagicMock()
+        provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=response_text))]
+        ))
+        provider.count_tokens.side_effect = lambda text, model: len(text.split())
+        provider.estimate_run_cost.return_value = MagicMock()
+        provider.format_estimate.return_value = "estimate"
+        provider.is_retryable_error.return_value = False
 
         # 3. Create the dummy files the function needs to find
         source_file_path = os.path.join(self.test_dir, 'app.properties')
@@ -79,7 +84,8 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
         # 4. Run the process, patching globals that are still read directly
         with patch.dict(LANGUAGE_CODES, {"de": "German"}), \
              patch.dict(NAME_TO_CODE, {"german": "de"}), \
-             patch('src.translate_localization_files.INPUT_FOLDER', self.test_dir):
+             patch('src.translate_localization_files.INPUT_FOLDER', self.test_dir), \
+             patch('src.translate_localization_files.MODEL_PROVIDER', provider):
             await process_translation_queue(
                 translation_queue_folder=self.queue_dir,
                 translated_queue_folder=self.translated_dir,
@@ -90,7 +96,7 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
         mock_pre_validator.assert_called()
         mock_holistic_review.assert_awaited()
         # The AI should be called for the initial translation
-        mock_create.assert_awaited()
+        provider.create_chat_completion.assert_awaited()
         # parse_properties_file should be called three times:
         # 1. For the target file
         # 2. For the source file

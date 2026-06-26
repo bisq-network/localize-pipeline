@@ -89,8 +89,10 @@ summary afterward, so you always know what a run costs on your key.
 
 ## Features
 
-* **Your provider, your cost** — OpenAI, or any OpenAI-compatible endpoint
-  (Ollama, Groq, Together, …) via `api_base_url` / `OPENAI_BASE_URL`. No markup, no quota.
+* **Your provider, your cost** — AISuite is the default packaged provider
+  abstraction for multi-provider model names, with OpenAI-compatible endpoints
+  (Ollama, Groq, Together, …) supported through `api_base_url` /
+  `OPENAI_BASE_URL`. No markup, no quota.
 * **Two-step quality process** — a fast initial translation followed by a chunked
   holistic AI review for consistency and quality.
 * **Glossary & style rules** — enforce brand terms, required translations, and
@@ -122,10 +124,27 @@ Key settings:
 | `localization_format` | File format metadata. Built-in: `java_properties`; custom mappings can describe future formats. |
 | `project_context` | Product/domain guidance injected into translation prompts. |
 | `translation_source` | `git` (default for new projects) or `transifex`. |
+| `model_provider` | `aisuite` by default; use `openai_compatible` only for the direct OpenAI SDK fallback path. |
 | `model_name`, `review_model_name` | Translate and review models. |
 | `api_base_url` | OpenAI-compatible endpoint, e.g. a local Ollama server. |
 | `supported_locales` | Target languages. |
 | `style_rules`, `brand_technical_glossary` | Per-locale tone and do-not-translate terms. |
+
+AISuite is the default packaged provider. Bare model names such as
+`gpt-4o-mini` are treated as OpenAI models for compatibility, and explicit
+AISuite names such as `openai:gpt-4o-mini` remain supported. The pipeline still
+owns token counting, cost estimates, retry behavior, and completion-token
+compatibility at its provider boundary, so direct OpenAI SDK fallback runs can
+use the same higher-level config shape.
+
+### Public API boundaries
+
+Reusable modules should import from the stable public packages instead of
+internal implementation files:
+
+* `src.core` — format-agnostic pipeline orchestration contracts.
+* `src.providers` — chat-model provider contracts and provider factories.
+* `src.formats` — localization format metadata and loader helpers.
 
 ### Adding new languages
 

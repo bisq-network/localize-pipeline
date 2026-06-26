@@ -37,6 +37,7 @@ This document outlines the structure and purpose of the files and directories wi
 - **`secrets/`**: (User-managed, gitignored) Stores sensitive files like GPG keys.
 - **`src/`**: Contains the main Python source code for the translation utilities.
   - **`src/pipeline_core.py`**: Format-agnostic run orchestration. It wires injected adapters for change detection, queue processing, reporting, copy-back, and cleanup.
+  - **`src/model_provider.py`**: Provider abstraction for chat completions, token counting, usage tracking, pricing estimates, AISuite dispatch, and the direct OpenAI-compatible fallback.
   - **`src/translate_localization_files.py`**: Java `.properties` runtime adapter and translation implementation. It loads config, provides parser/validator/reporting callables, and invokes `pipeline_core`.
 - **`tests/`**: Contains test files for the project.
 - **`update-translations.sh`**: The main orchestration script, run by the container. It pulls from Transifex, runs the Python script, and manages the Git workflow (branching, committing, creating a PR).
@@ -52,7 +53,9 @@ This document outlines the structure and purpose of the files and directories wi
 
 - **`src/pipeline_core.py`**: Generic Python orchestration for a translation run. It does not know about Java `.properties`, Transifex, GitHub, or OpenAI directly; those behaviors are injected by the runtime entry point.
 
-- **`src/translate_localization_files.py`**: The Java `.properties` runtime adapter. It loads configuration, parses `.properties` files, manages the two-step translation and review process with the OpenAI API, and passes those callables into `pipeline_core`.
+- **`src/model_provider.py`**: AISuite-backed provider boundary. The default backend can dispatch to multiple providers while preserving the pipeline's async interface, usage tracking, token counting, and completion-token compatibility. The direct OpenAI-compatible SDK provider remains available as an explicit fallback.
+
+- **`src/translate_localization_files.py`**: The Java `.properties` runtime adapter. It loads configuration, parses `.properties` files, manages the two-step translation and review process through the configured model provider, and passes those callables into `pipeline_core`.
 
 - **`update-translations.sh`**: The main container orchestration script. It prepares the configured translation source (`git` or `transifex`), runs the Python pipeline, and uses a publisher helper for the Git workflow (branching, committing, creating a PR).
 

@@ -24,6 +24,14 @@ DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
     "gpt-4": {"input": 30.00, "output": 60.00},
     "gpt-4-turbo": {"input": 10.00, "output": 30.00},
 }
+_PRICE_COMPATIBLE_PROVIDER_PREFIXES = frozenset({"openai"})
+
+
+def _price_lookup_model(model: str) -> str:
+    provider, separator, bare_model = model.partition(":")
+    if separator and provider in _PRICE_COMPATIBLE_PROVIDER_PREFIXES:
+        return bare_model
+    return model
 
 
 def cost_for_tokens(
@@ -39,6 +47,8 @@ def cost_for_tokens(
     """
     table = prices if prices is not None else DEFAULT_PRICES
     price = table.get(model)
+    if price is None:
+        price = table.get(_price_lookup_model(model))
     if price is None:
         return None
     return (

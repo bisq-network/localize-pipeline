@@ -8,7 +8,7 @@ to prevent the AI from modifying, removing, or adding placeholders.
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -189,14 +189,14 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
             )
         ]
     )
-    create_completion = AsyncMock(return_value=response)
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.is_retryable_error.return_value = False
 
     with (
         patch("src.translate_localization_files.DRY_RUN", False),
-        patch("src.translate_localization_files.client", object()),
         patch("src.translate_localization_files.REVIEW_MODEL_NAME", "gpt-5.4-mini"),
-        patch("src.translate_localization_files.create_chat_completion", create_completion),
-        patch("src.translate_localization_files.usage_tracker.record_response") as record_response,
+        patch("src.translate_localization_files.MODEL_PROVIDER", provider),
     ):
         result = await holistic_review_async(
             source_content="key1=Hello {0}",
@@ -209,10 +209,9 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
         )
 
     assert result == {"key1": "Hallo {0}"}
-    kwargs = create_completion.await_args.kwargs
+    kwargs = provider.create_chat_completion.await_args.kwargs
     assert kwargs["model"] == "gpt-5.4-mini"
     assert kwargs["completion_token_limit"] == 8192
     assert kwargs["response_format"] == {"type": "json_object"}
     assert "max_tokens" not in kwargs
     assert "max_completion_tokens" not in kwargs
-    record_response.assert_called_once_with("gpt-5.4-mini", response)
