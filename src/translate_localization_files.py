@@ -1303,7 +1303,7 @@ def _iter_localization_profiles(
     if not profiles:
         return (default_profile,)
     if default_profile not in profiles:
-        return (default_profile, *profiles)
+        return (*profiles, default_profile)
     return profiles
 
 

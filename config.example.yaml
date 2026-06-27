@@ -27,8 +27,9 @@ localization_layout:
   source_locale: "en"
 
 # Optional: projects with more than one localization convention can replace the
-# singular settings above with a list. Each profile routes matching files through
-# its own parser/serializer and source-path mapping.
+# singular `localization_format` and `localization_layout` settings above with a
+# list. Each profile routes matching files through its own parser/serializer and
+# source-path mapping.
 # localization_formats:
 #   - id: "java_properties"
 #     layout: "suffix"

@@ -987,6 +987,33 @@ class TestFileDetectionLogic(unittest.TestCase):
             "messages_de.properties",
         ])
 
+    def test_explicit_profiles_take_precedence_over_implicit_default(self):
+        """Compatibility default must not shadow explicitly configured profiles."""
+        from src.localization_formats import JSON_FORMAT
+        from src.localization_layouts import LocalizationLayout
+        from src.localization_profiles import LocalizationProfile
+        from src.translate_localization_files import get_source_filename
+
+        explicit_profiles = (
+            LocalizationProfile(
+                JSON_FORMAT,
+                LocalizationLayout(id="locale_directory", source_locale="en"),
+            ),
+        )
+        with patch(
+                "src.translate_localization_files.LOCALIZATION_PROFILES",
+                explicit_profiles,
+        ), patch(
+                "src.translate_localization_files.LOCALIZATION_FORMAT",
+                JSON_FORMAT,
+        ), patch(
+                "src.translate_localization_files.LOCALIZATION_LAYOUT",
+                LocalizationLayout(id="suffix", source_locale="en"),
+        ):
+            source_path = get_source_filename("locales/de/messages_fr.json", ["de", "fr"])
+
+        self.assertEqual(source_path, "locales/en/messages_fr.json")
+
 
 class TestFilterGitChangedKeys(unittest.TestCase):
     """Tests for filter_git_changed_keys_by_source, which prevents the

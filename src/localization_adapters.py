@@ -268,6 +268,10 @@ def _json_document_from_parsed_lines(parsed_lines: ParsedLines) -> Dict:
     raise ValueError("JSON parsed document metadata is missing.")
 
 
+def _dump_json_payload(payload: Dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
 def _synchronize_json_node(source_node: object, target_node: object) -> JsonNode:
     """Return a target JSON node ordered/shaped like source with translations kept."""
     if isinstance(source_node, dict):
@@ -299,7 +303,7 @@ def reassemble_json_file(parsed_lines: ParsedLines) -> str:
             continue
         path = tuple(line.get("json_path") or _json_key_to_path(str(line["key"])))
         _set_json_path(payload, path, str(line.get("value", "")))
-    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    return _dump_json_payload(payload)
 
 
 def synchronize_json_keys(target_file_path: str, source_file_path: str) -> Tuple[Set[str], Set[str]]:
@@ -311,15 +315,16 @@ def synchronize_json_keys(target_file_path: str, source_file_path: str) -> Tuple
     missing_keys = source_keys - target_keys
     extra_keys = target_keys - source_keys
 
-    if not missing_keys and not extra_keys:
-        return missing_keys, extra_keys
-
     source_payload = _json_document_from_parsed_lines(source_parsed_lines)
     target_payload = _json_document_from_parsed_lines(target_parsed_lines)
-    target_payload = _synchronize_json_node(source_payload, target_payload)
+    synchronized_payload = _synchronize_json_node(source_payload, target_payload)
+    synchronized_content = _dump_json_payload(synchronized_payload)
+
+    if not missing_keys and not extra_keys and synchronized_content == _dump_json_payload(target_payload):
+        return missing_keys, extra_keys
 
     with open(target_file_path, "w", encoding="utf-8") as file:
-        file.write(json.dumps(target_payload, ensure_ascii=False, indent=2) + "\n")
+        file.write(synchronized_content)
 
     return missing_keys, extra_keys
 

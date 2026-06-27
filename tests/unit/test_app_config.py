@@ -226,6 +226,22 @@ class TestLoadAppConfig:
 
         assert config.localization_format == JAVA_PROPERTIES_FORMAT
 
+    def test_load_config_with_invalid_multi_profile_raises(self):
+        mock_config = {
+            "dry_run": True,
+            "localization_formats": [
+                {"id": "unknown_format", "layout": "suffix"},
+            ],
+        }
+
+        with patch("src.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("src.logging_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        with pytest.raises(ValueError, match="Unsupported localization_format"):
+                            load_app_config()
+
     def test_load_config_with_invalid_layout_preserves_source_locale(self):
         mock_config = {
             "dry_run": True,

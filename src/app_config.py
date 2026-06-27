@@ -499,6 +499,8 @@ def load_app_config() -> AppConfig:
     try:
         localization_profiles = load_localization_profiles(config)
     except ValueError:
+        if config.get('localization_formats') is not None:
+            raise
         try:
             localization_format = load_localization_format(config.get('localization_format'))
         except ValueError:
