@@ -25,10 +25,23 @@ model provider and your credentials.
 
 ## Quickstart
 
-Generate a config from an existing localization folder:
+Generate a config from an existing repository. `localize init` looks for common
+Java `.properties` and JSON layouts, detects target locales, and writes a safe
+dry-run config:
 
 ```bash
-./init.sh --input-folder path/to/i18n
+python3 -m venv venv
+./venv/bin/pip install -e .
+localize init
+localize check --config config.yaml
+localize run --dry-run --config config.yaml
+```
+
+If your localization files live outside the detected folder, pass the folder
+explicitly:
+
+```bash
+localize init --input-folder path/to/i18n
 ```
 
 For JSON:
@@ -56,11 +69,10 @@ For a mixed project:
   --localization-profile json:locale_directory
 ```
 
-Then validate and run:
+Then run a real translation by setting `dry_run: false` in `config.yaml` and
+providing credentials:
 
 ```bash
-python3 -m venv venv
-./venv/bin/pip install -e .
 localize validate --config config.yaml
 localize run --config config.yaml
 ```
@@ -160,8 +172,10 @@ Examples:
 
 ```bash
 localize formats
-localize init --input-folder path/to/i18n
+localize init
+localize check --config config.yaml
 localize validate --config config.yaml
+localize run --dry-run --config config.yaml
 localize run --config config.yaml
 ```
 

@@ -104,6 +104,44 @@ def normalize_model_provider_name(provider_name: str) -> str:
     return _MODEL_PROVIDER_ALIASES.get(normalized, normalized)
 
 
+def requires_openai_credentials(
+    *,
+    provider_name: str,
+    model_names: Sequence[str],
+    api_base_url: Optional[str],
+    aisuite_provider_configs: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """Return true when the configured route needs ``OPENAI_API_KEY``.
+
+    Custom OpenAI-compatible endpoints use ``api_base_url`` and may be keyless.
+    AISuite routes only need the OpenAI key when at least one configured model
+    resolves to the default OpenAI provider and no OpenAI provider config already
+    supplies credentials.
+    """
+    normalized = normalize_model_provider_name(provider_name)
+    if normalized == "openai_compatible":
+        if api_base_url:
+            return False
+        return True
+    if normalized != "aisuite":
+        return False
+
+    provider_configs = aisuite_provider_configs or {}
+    openai_provider_config = _aisuite_provider_config(
+        provider_configs,
+        DEFAULT_AISUITE_PROVIDER,
+    )
+    if _provider_config_has_credentials(openai_provider_config):
+        return False
+    if api_base_url:
+        return False
+    return _aisuite_models_route_to_provider(
+        model_names,
+        provider_key=DEFAULT_AISUITE_PROVIDER,
+        default_provider=DEFAULT_AISUITE_PROVIDER,
+    )
+
+
 def _aisuite_provider_key_for_model(model: str, default_provider: str) -> str:
     if ":" in model:
         return model.split(":", 1)[0].strip().lower()
@@ -437,13 +475,11 @@ def create_model_provider(
                 **openai_config,
             }
             openai_provider_config = provider_configs["openai"]
-        if (
-            _aisuite_models_route_to_provider(
-                model_names,
-                provider_key=DEFAULT_AISUITE_PROVIDER,
-                default_provider=DEFAULT_AISUITE_PROVIDER,
-            )
-            and not _provider_config_has_credentials(openai_provider_config)
+        if requires_openai_credentials(
+            provider_name=normalized,
+            model_names=model_names,
+            api_base_url=api_base_url,
+            aisuite_provider_configs=provider_configs,
         ):
             raise ModelProviderConfigurationError(
                 "OPENAI_API_KEY is required when AISuite routes bare or openai: models "

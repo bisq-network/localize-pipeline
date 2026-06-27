@@ -6,9 +6,11 @@ import yaml
 
 from localize.init_config import (
     build_config,
+    detect_project_layout,
     code_to_name,
     detect_locales,
     detect_locales_for_profiles,
+    detect_localization_profiles,
     parse_localization_profile_spec,
     render_config,
     write_config,
@@ -64,6 +66,84 @@ class TestDetectLocales:
         _make_props(str(tmp_path), ["top_de.properties"])
         codes = [loc["code"] for loc in detect_locales(str(tmp_path), source_locale="en")]
         assert codes == ["de", "fr"]
+
+
+class TestDetectProjectLayout:
+    def test_detects_mixed_profiles_and_common_input_folder(self, tmp_path):
+        i18n = tmp_path / "src" / "i18n"
+        i18n.mkdir(parents=True)
+        _make_props(str(i18n), ["messages.properties", "messages_de.properties"])
+        for rel_path in ["locales/en/common.json", "locales/de/common.json", "locales/fr/common.json"]:
+            path = i18n / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "src/i18n"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("java_properties", "suffix"),
+            ("json", "locale_directory"),
+        ]
+        assert detected.locales == [
+            {"code": "de", "name": "German"},
+            {"code": "fr", "name": "French"},
+        ]
+
+    def test_detects_profiles_inside_explicit_input_folder(self, tmp_path):
+        for rel_path in ["en/common.json", "de/common.json"]:
+            path = tmp_path / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+
+        profiles = detect_localization_profiles(str(tmp_path), source_locale="en")
+
+        assert [(fmt.id, layout.id) for fmt, layout in profiles] == [
+            ("json", "locale_directory"),
+        ]
+
+    def test_detects_source_only_suffix_project(self, tmp_path):
+        resources = tmp_path / "resources"
+        resources.mkdir()
+        _make_props(str(resources), ["messages.properties"])
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "resources"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("java_properties", "suffix"),
+        ]
+        assert detected.locales == []
+
+    def test_detects_source_only_json_locale_directory_project(self, tmp_path):
+        source = tmp_path / "locales" / "en" / "common.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "locales"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("json", "locale_directory"),
+        ]
+        assert detected.locales == []
+
+    def test_detects_source_only_json_locale_filename_project(self, tmp_path):
+        i18n = tmp_path / "locales"
+        i18n.mkdir()
+        (i18n / "en.json").write_text('{"hello":"Hello"}\n', encoding="utf-8")
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "locales"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("json", "locale_filename"),
+        ]
+        assert detected.locales == []
 
     def test_deduplicates_locale_across_multiple_base_files(self, tmp_path):
         _make_props(str(tmp_path), [
@@ -164,6 +244,7 @@ class TestBuildConfig:
         assert cfg["input_folder"] == "i18n"
         assert cfg["supported_locales"] == [{"code": "de", "name": "German"}]
         assert "model_name" in cfg and "review_model_name" in cfg
+        assert cfg["dry_run"] is True
         assert cfg["localization_format"] == "java_properties"
         assert cfg["localization_layout"] == {"id": "suffix", "source_locale": "en"}
 
@@ -324,3 +405,79 @@ class TestMainErrorHandling:
             {"code": "de", "name": "German"},
             {"code": "fr", "name": "French"},
         ]
+
+    def test_main_autodetects_input_folder_and_profiles(self, tmp_path):
+        import localize.init_config as init_config
+
+        i18n = tmp_path / "app" / "locales"
+        i18n.mkdir(parents=True)
+        _make_props(str(i18n), ["messages.properties", "messages_de.properties"])
+        output = tmp_path / "config.yaml"
+
+        rc = init_config.main([
+            "--target-project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ])
+
+        config = yaml.safe_load(output.read_text(encoding="utf-8"))
+        assert rc == 0
+        assert config["target_project_root"] == str(tmp_path)
+        assert config["input_folder"] == "app/locales"
+        assert config["localization_format"] == "java_properties"
+        assert config["localization_layout"] == {"id": "suffix", "source_locale": "en"}
+        assert config["supported_locales"] == [{"code": "de", "name": "German"}]
+
+    def test_main_autodetects_source_only_input_folder_with_empty_locales(self, tmp_path, capsys):
+        import localize.init_config as init_config
+
+        i18n = tmp_path / "resources"
+        i18n.mkdir()
+        _make_props(str(i18n), ["messages.properties"])
+        output = tmp_path / "config.yaml"
+
+        rc = init_config.main([
+            "--target-project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ])
+
+        config = yaml.safe_load(output.read_text(encoding="utf-8"))
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert config["input_folder"] == "resources"
+        assert config["supported_locales"] == []
+        assert "Warning: no target locales detected" in captured.err
+
+    def test_main_respects_explicit_format_when_input_folder_is_autodetected(self, tmp_path):
+        import localize.init_config as init_config
+
+        i18n = tmp_path / "app" / "locales"
+        i18n.mkdir(parents=True)
+        _make_props(str(i18n), ["messages.properties", "messages_de.properties"])
+        for rel_path in ["en/common.json", "fr/common.json"]:
+            path = i18n / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        rc = init_config.main([
+            "--target-project-root",
+            str(tmp_path),
+            "--localization-format",
+            "json",
+            "--localization-layout",
+            "locale_directory",
+            "--output",
+            str(output),
+        ])
+
+        config = yaml.safe_load(output.read_text(encoding="utf-8"))
+        assert rc == 0
+        assert "localization_formats" not in config
+        assert config["input_folder"] == "app/locales"
+        assert config["localization_format"] == "json"
+        assert config["localization_layout"] == {"id": "locale_directory", "source_locale": "en"}
+        assert config["supported_locales"] == [{"code": "fr", "name": "French"}]

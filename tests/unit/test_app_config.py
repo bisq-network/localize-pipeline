@@ -372,6 +372,48 @@ class TestLoadAppConfig:
 
         assert config.openai_client is None
 
+    def test_localize_dry_run_env_overrides_config(self):
+        """CLI dry-run mode must force dry_run even when config is false."""
+        with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": False}))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("localize.app_config.load_dotenv"):
+                        with patch("localize.app_config.setup_logger") as mock_logger:
+                            mock_logger.return_value = MagicMock()
+                            with patch.dict(os.environ, {"LOCALIZE_DRY_RUN": "true"}, clear=True):
+                                config = load_app_config()
+
+        assert config.dry_run is True
+        assert config.openai_client is None
+        assert config.model_provider is None
+
+    def test_false_localize_dry_run_env_does_not_disable_config_dry_run(self):
+        with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": True}))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("localize.app_config.load_dotenv"):
+                        with patch("localize.app_config.setup_logger") as mock_logger:
+                            mock_logger.return_value = MagicMock()
+                            with patch.dict(os.environ, {"LOCALIZE_DRY_RUN": "false"}, clear=True):
+                                config = load_app_config()
+
+        assert config.dry_run is True
+        assert config.model_provider is None
+
+    def test_load_config_rejects_non_mapping_aisuite_section(self):
+        with patch("builtins.open", mock_open(read_data=yaml.dump({
+            "dry_run": False,
+            "aisuite": ["provider_configs"],
+        }))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("localize.app_config.load_dotenv"):
+                        with patch("localize.app_config.setup_logger") as mock_logger:
+                            mock_logger.return_value = MagicMock()
+                            with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}, clear=True):
+                                with pytest.raises(SystemExit):
+                                    load_app_config()
+
     def test_missing_openai_key_exits_in_production_mode(self):
         """Test that missing OpenAI API key causes system exit in production mode."""
         mock_config = {"dry_run": False, "model_provider": "openai_compatible"}
@@ -576,6 +618,75 @@ class TestValidateConfig:
         # Should not raise.
         issues = validate_config(cfg, path_exists=lambda p: True)
         assert isinstance(issues, list)
+
+    def test_real_openai_backed_run_without_key_is_error(self):
+        cfg = {**self.GOOD, "dry_run": False, "model_name": "gpt-4o-mini"}
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert any("OPENAI_API_KEY" in e for e in errs)
+
+    def test_dry_run_without_key_is_valid_for_preflight(self):
+        cfg = {**self.GOOD, "dry_run": True, "model_name": "gpt-4o-mini"}
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert not any("OPENAI_API_KEY" in e for e in errs)
+
+    def test_non_openai_aisuite_route_without_openai_key_is_valid_for_preflight(self):
+        cfg = {
+            **self.GOOD,
+            "dry_run": False,
+            "model_name": "anthropic:claude-3-5-sonnet-latest",
+            "review_model_name": "anthropic:claude-3-5-sonnet-latest",
+            "aisuite": {"provider_configs": {"anthropic": {"api_key": "secret"}}},
+        }
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert not any("OPENAI_API_KEY" in e for e in errs)
+
+    def test_malformed_aisuite_provider_config_is_validation_error(self):
+        cfg = {
+            **self.GOOD,
+            "dry_run": False,
+            "aisuite": {"provider_configs": {"openai": ["api_key", "secret"]}},
+        }
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert any("aisuite.provider_configs.openai" in e for e in errs)
+
+    def test_non_mapping_aisuite_section_is_validation_error(self):
+        cfg = {**self.GOOD, "dry_run": False, "aisuite": ["provider_configs"]}
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert any("'aisuite' must be a mapping" in e for e in errs)
+
+    def test_malformed_aisuite_provider_config_is_error_with_custom_endpoint(self):
+        cfg = {
+            **self.GOOD,
+            "dry_run": False,
+            "api_base_url": "http://localhost:11434/v1",
+            "aisuite": {"provider_configs": {"openai": ["api_key", "secret"]}},
+        }
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert any("aisuite.provider_configs.openai" in e for e in errs)
 
 
 class TestProviderAbstraction:

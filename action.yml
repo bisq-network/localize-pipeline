@@ -37,6 +37,10 @@ inputs:
       true for a one-time initial run; leave false for incremental CI.
     required: false
     default: "false"
+  dry-run:
+    description: "Run discovery and validation without model calls or translation writes."
+    required: false
+    default: "false"
   open-pr:
     description: "Open a pull request with the translations (true) or just leave the changes (false)."
     required: false
@@ -74,6 +78,20 @@ runs:
       shell: bash
       run: pip install -r "${{ github.action_path }}/requirements.txt"
 
+    - name: Check localization setup
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        PYTHONPATH: ${{ github.action_path }}
+        TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        OPENAI_BASE_URL: ${{ inputs.api-base-url }}
+        REVIEW_MODEL_NAME: ${{ inputs.review-model }}
+        LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -euo pipefail
+        python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"
+
     - name: Translate changed strings
       shell: bash
       working-directory: ${{ github.workspace }}
@@ -85,6 +103,7 @@ runs:
         REVIEW_MODEL_NAME: ${{ inputs.review-model }}
         PROCESS_ALL_FILES: ${{ inputs.process-all-files }}
         DIFF_BASE_INPUT: ${{ inputs.diff-base }}
+        LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
       run: |
         set -euo pipefail
         # An all-zero SHA (first push to a branch) is not a valid diff base; fall back

@@ -23,28 +23,38 @@ For development:
 
 ```bash
 localize formats
-localize init --input-folder path/to/i18n
+localize init
+localize check --config config.yaml
 localize validate --config config.yaml
+localize run --config config.yaml --dry-run
 localize run --config config.yaml
 ```
 
 | Command | What it does |
 | --- | --- |
 | `formats` | Lists registered formats and whether each has a runtime adapter. |
-| `init` | Scaffolds a minimal config and detects locales from existing files. |
+| `init` | Scaffolds a dry-run config and detects input folder, formats, layouts, and locales from existing files. |
+| `check` | Runs self-service preflight checks for config, paths, formats, endpoint, and required credentials. |
 | `validate` | Checks config shape, paths, locales, formats, layouts, and endpoint settings. |
-| `run` | Executes the translation pipeline. |
+| `run` | Executes the translation pipeline. Use `--dry-run` to force a preview without editing config. |
 
 The module form is equivalent:
 
 ```bash
+python -m localize.cli check --config config.yaml
 python -m localize.cli validate --config config.yaml
 python -m localize.cli run --config config.yaml
 ```
 
 ## Scaffold Configs
 
-Default Java `.properties`:
+Autodetect from the current repository:
+
+```bash
+localize init
+```
+
+Default Java `.properties` with an explicit folder:
 
 ```bash
 localize init --input-folder i18n
@@ -75,6 +85,10 @@ localize init \
 ```
 
 `--localization-profile` is repeatable and uses `FORMAT:LAYOUT` syntax.
+
+Generated configs default to `dry_run: true` so first runs can validate
+discovery, queueing, and reports without model calls. Set `dry_run: false` when
+you are ready to let the pipeline write translations.
 
 ## Mixed-Format Config
 

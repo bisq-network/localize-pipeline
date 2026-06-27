@@ -140,6 +140,81 @@ def test_cli_validate_reports_valid_config(tmp_path, capsys):
     assert "Configuration OK" in captured.out
 
 
+def test_cli_check_alias_runs_preflight_validation(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": str(i18n),
+            "localization_format": "json",
+            "localization_layout": "suffix",
+            "dry_run": True,
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Preflight OK" in captured.out
+
+
+def test_cli_check_false_dry_run_env_does_not_override_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("LOCALIZE_DRY_RUN", "false")
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": str(i18n),
+            "dry_run": True,
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Preflight OK" in captured.out
+
+
+def test_cli_check_applies_review_model_env_override(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "gpt-4o")
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": str(i18n),
+            "dry_run": False,
+            "model_name": "anthropic:claude-3-5-sonnet-latest",
+            "review_model_name": "anthropic:claude-3-5-sonnet-latest",
+            "aisuite": {"provider_configs": {"anthropic": {"api_key": "secret"}}},
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "OPENAI_API_KEY" in captured.err
+
+
 def test_cli_validate_accepts_mixed_format_profiles(tmp_path, capsys):
     repo = tmp_path / "repo"
     i18n = repo / "i18n"
@@ -191,6 +266,21 @@ def test_cli_run_sets_config_env_and_delegates_to_runtime(tmp_path, monkeypatch)
     runtime.main.assert_awaited_once()
 
 
+def test_cli_run_dry_run_sets_runtime_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALIZE_DRY_RUN", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("dry_run: false\n", encoding="utf-8")
+    runtime = SimpleNamespace(main=AsyncMock())
+
+    with patch("localize.cli.importlib.import_module", return_value=runtime):
+        exit_code = cli.main(["run", "--config", str(config_path), "--dry-run"])
+
+    assert exit_code == 0
+    assert os.environ["TRANSLATOR_CONFIG_FILE"] == str(config_path)
+    assert os.environ["LOCALIZE_DRY_RUN"] == "true"
+    runtime.main.assert_awaited_once()
+
+
 def test_cli_init_delegates_to_existing_init_config():
     with patch("localize.cli.init_config_main", return_value=0) as init_main:
         exit_code = cli.main(["init", "--input-folder", "i18n"])
@@ -211,8 +301,9 @@ def test_readme_documents_cli_quickstart():
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "localize init" in readme
+    assert "localize check" in readme
     assert "localize validate" in readme
-    assert "localize run" in readme
+    assert "localize run --dry-run" in readme
 
 
 def test_generic_examples_are_cli_validatable():

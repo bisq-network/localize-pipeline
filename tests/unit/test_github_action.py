@@ -35,11 +35,22 @@ def test_uses_github_token_not_ssh_deploy_key(action):
 
 def test_translate_step_wires_provider_and_process_all_env(action):
     steps = action["runs"]["steps"]
-    translate = next(s for s in steps if s.get("env", {}).get("OPENAI_BASE_URL") is not None)
+    translate = next(s for s in steps if s["name"] == "Translate changed strings")
     env = translate["env"]
     assert env["OPENAI_BASE_URL"] == "${{ inputs.api-base-url }}"
     assert env["PROCESS_ALL_FILES"] == "${{ inputs.process-all-files }}"
+    assert env["LOCALIZE_DRY_RUN"] == "${{ inputs.dry-run }}"
     assert 'python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"' in translate["run"]
+
+
+def test_action_runs_preflight_check_before_translation(action):
+    steps = action["runs"]["steps"]
+    preflight_index = next(i for i, step in enumerate(steps) if step["name"] == "Check localization setup")
+    translate_index = next(i for i, step in enumerate(steps) if step["name"] == "Translate changed strings")
+    assert preflight_index < translate_index
+    assert steps[preflight_index]["env"]["OPENAI_BASE_URL"] == "${{ inputs.api-base-url }}"
+    assert steps[preflight_index]["env"]["REVIEW_MODEL_NAME"] == "${{ inputs.review-model }}"
+    assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
 
 
 def test_incremental_by_default_via_diff_base(action):
@@ -49,6 +60,7 @@ def test_incremental_by_default_via_diff_base(action):
     assert inputs["diff-base"]["default"] == "${{ github.event.before }}"
     # A full re-scan must be opt-in, not the default.
     assert inputs["process-all-files"]["default"] == "false"
+    assert inputs["dry-run"]["default"] == "false"
     # The diff base is wired through to the pipeline env var.
     rendered = ACTION.read_text(encoding="utf-8")
     assert "TRANSLATION_DIFF_BASE" in rendered

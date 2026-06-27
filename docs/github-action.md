@@ -1,8 +1,8 @@
 # GitHub Action
 
 Use the composite action when you want translation PRs from normal CI. The action
-installs the pipeline, runs `localize run`, commits changed localization files,
-and opens a pull request with the workflow token.
+installs the pipeline, runs `localize check`, runs `localize run`, commits
+changed localization files, and opens a pull request with the workflow token.
 
 ## Minimal Workflow
 
@@ -32,6 +32,10 @@ jobs:
 
 The default run is incremental. It compares the working tree against
 `${{ github.event.before }}` and translates only the affected locale files.
+
+For a no-cost setup preview, add `dry-run: true`. The action still validates the
+config and discovery path, but the runtime skips model calls and translation
+writes.
 
 ## First Run
 
@@ -130,6 +134,7 @@ jobs:
 | `review-model` | empty | Override the holistic-review model. |
 | `diff-base` | `${{ github.event.before }}` | Ref used for changed-string detection. |
 | `process-all-files` | `false` | Translate all target files. Use for backfills. |
+| `dry-run` | `false` | Preview discovery and validation without model calls or translation writes. |
 | `open-pr` | `true` | Open a PR or leave changes in the workspace. |
 | `pr-branch` | `ai-translations` | Branch for translation changes. |
 | `pr-title` | `Update AI translations` | PR title. |
@@ -139,9 +144,10 @@ jobs:
 
 ## What The Action Runs
 
-The translate step runs:
+The preflight and translate steps run:
 
 ```bash
+python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"
 python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"
 ```
 

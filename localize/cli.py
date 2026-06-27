@@ -37,6 +37,16 @@ def _effective_api_base_url(config: dict[str, Any]) -> str | None:
     return None
 
 
+def _effective_dry_run_override() -> bool | None:
+    raw_value = os.environ.get("LOCALIZE_DRY_RUN")
+    if raw_value is None:
+        return None
+    normalized = raw_value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    return None
+
+
 def _print_config_issues(issues: Sequence[ConfigIssue]) -> None:
     for issue in issues:
         print(f"{issue.level}: {issue.message}", file=sys.stderr)
@@ -53,7 +63,7 @@ def _cmd_formats(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_validate(args: argparse.Namespace) -> int:
+def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> int:
     config_path = Path(args.config).expanduser().resolve()
     if not config_path.exists():
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
@@ -64,21 +74,36 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"error: could not read configuration: {exc}", file=sys.stderr)
         return 1
 
+    review_model_override = os.environ.get("REVIEW_MODEL_NAME")
+    if review_model_override:
+        config = {**config, "review_model_name": review_model_override}
     issues = validate_config(
         config,
         effective_api_base_url=_effective_api_base_url(config),
+        api_key_available=bool(os.environ.get("OPENAI_API_KEY")),
+        dry_run_override=_effective_dry_run_override(),
     )
     _print_config_issues(issues)
     has_errors = any(issue.level == "error" for issue in issues)
     if has_errors:
         return 1
-    print("Configuration OK")
+    print(success_message)
     return 0
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    return _cmd_validate_config(args, success_message="Configuration OK")
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    return _cmd_validate_config(args, success_message="Preflight OK")
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
     os.environ["TRANSLATOR_CONFIG_FILE"] = str(config_path)
+    if args.dry_run:
+        os.environ["LOCALIZE_DRY_RUN"] = "true"
     runtime = importlib.import_module("localize.translate_localization_files")
     asyncio.run(runtime.main())
     return 0
@@ -142,11 +167,23 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     validate_parser.set_defaults(func=_cmd_validate)
 
+    check_parser = subparsers.add_parser(
+        "check",
+        help="Run self-service preflight checks before translation.",
+    )
+    check_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    check_parser.set_defaults(func=_cmd_check)
+
     run_parser = subparsers.add_parser(
         "run",
         help="Run the configured translation pipeline.",
     )
     run_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Force dry-run mode for this invocation without editing config.yaml.",
+    )
     run_parser.set_defaults(func=_cmd_run)
 
     init_parser = subparsers.add_parser(
