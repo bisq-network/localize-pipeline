@@ -31,7 +31,10 @@ from openai.types.chat import (
 from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
-from src.localization_adapters import get_localization_adapter, lint_properties_file
+from src.localization_adapters import (
+    get_localization_adapter,
+    lint_properties_file as lint_properties_file,
+)
 from src.localization_formats import LocalizationFormat
 from src.localization_layouts import LocalizationLayout
 from src.model_provider import OpenAICompatibleProvider
