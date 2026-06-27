@@ -96,6 +96,7 @@ def test_bisq_profile_packages_config_and_glossary_assets():
     glossary = yaml.safe_load(BISQ_PROFILE_GLOSSARY.read_text(encoding="utf-8"))
 
     assert config["localization_format"] == "java_properties"
+    assert config["input_folder"] == "/target_repo/i18n/src/main/resources"
     assert "Bisq" in config["project_context"]
     assert "semantic_quality_rules" in config
     assert config["glossary_file_path"] == "glossary.json"
