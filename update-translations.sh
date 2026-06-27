@@ -126,6 +126,12 @@ def raw_format_id(profile):
     return raw_format
 
 
+def format_extension(raw_value):
+    if isinstance(raw_value, dict):
+        return raw_value.get("file_extension") or raw_value.get("extension") or ""
+    return ""
+
+
 with open(sys.argv[1], "r", encoding="utf-8") as file:
     config = yaml.safe_load(file) or {}
 
@@ -137,11 +143,8 @@ if isinstance(profiles, list) and profiles:
             explicit_extension = (
                 profile.get("file_extension")
                 or profile.get("extension")
-                or (
-                    profile.get("format", {}).get("file_extension")
-                    if isinstance(profile.get("format"), dict)
-                    else ""
-                )
+                or format_extension(profile.get("format"))
+                or format_extension(profile.get("localization_format"))
             )
             normalized = normalize_extension(explicit_extension)
             if normalized:

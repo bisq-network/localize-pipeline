@@ -10,6 +10,7 @@ from localize.localization_profiles import LocalizationProfile
 from localize.semantic_quality import SemanticRule
 from localize.translation_quality_gate import (
     QualityGateConfig,
+    analyze_all_translation_entries_for_profiles,
     analyze_semantic_qa_changes,
     analyze_semantic_qa_changes_for_profiles,
     analyze_source_identical_changes_for_profiles,
@@ -188,6 +189,31 @@ diff --git a/resources/de/common.json b/resources/de/common.json
     }
 
 
+def test_quality_gate_deduplicates_overlapping_profile_source_checks(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
++++ b/resources/messages_de.properties
++title=Open trades
+"""
+
+    stats = analyze_source_identical_changes_for_profiles(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+        ),
+    )
+
+    assert stats.changed_entries_count == 1
+    assert stats.unexpected_source_identical_count == 1
+
+
 def test_semantic_qa_analyzes_changed_entries_across_profiles(tmp_path):
     repo_root = tmp_path
     input_folder = repo_root / "resources"
@@ -229,6 +255,70 @@ diff --git a/resources/de/common.json b/resources/de/common.json
         "messages_de.properties",
         "de/common.json",
     }
+
+
+def test_semantic_qa_deduplicates_overlapping_profile_changed_entries(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
++++ b/resources/messages_de.properties
++title=Open trades
+"""
+
+    stats = analyze_semantic_qa_changes_for_profiles(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        semantic_rules=[
+            SemanticRule(
+                id="no-english",
+                message="German translation still contains source text.",
+                locales=("de",),
+                severity="warning",
+                forbidden_target_regex=r"Open trades",
+            )
+        ],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+        ),
+    )
+
+    assert stats.warnings_count == 1
+    assert len(stats.examples) == 1
+
+
+def test_semantic_qa_deduplicates_overlapping_profile_full_audit_entries(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    _write_properties(input_folder / "messages_de.properties", {"title": "Open trades"})
+
+    stats = analyze_all_translation_entries_for_profiles(
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        semantic_rules=[
+            SemanticRule(
+                id="no-english",
+                message="German translation still contains source text.",
+                locales=("de",),
+                severity="warning",
+                forbidden_target_regex=r"Open trades",
+            )
+        ],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+        ),
+    )
+
+    assert stats.warnings_count == 1
+    assert len(stats.examples) == 1
 
 
 def test_quality_gate_blocks_many_unexpected_source_identical_changes(tmp_path):

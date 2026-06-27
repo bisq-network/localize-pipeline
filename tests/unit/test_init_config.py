@@ -119,10 +119,13 @@ class TestDetectLocales:
         _make_props(str(tmp_path), ["messages.properties", "messages_de.properties"])
         json_en = tmp_path / "en" / "common.json"
         json_de = tmp_path / "de" / "common.json"
+        json_fr = tmp_path / "fr" / "common.json"
         json_en.parent.mkdir()
         json_de.parent.mkdir()
+        json_fr.parent.mkdir()
         json_en.write_text('{"hello":"Hello"}\n', encoding="utf-8")
         json_de.write_text('{"hello":"Hallo"}\n', encoding="utf-8")
+        json_fr.write_text('{"hello":"Bonjour"}\n', encoding="utf-8")
 
         codes = [
             loc["code"]
@@ -136,7 +139,7 @@ class TestDetectLocales:
             )
         ]
 
-        assert codes == ["de"]
+        assert codes == ["de", "fr"]
 
 
 class TestCodeToName:
@@ -290,10 +293,13 @@ class TestMainErrorHandling:
         _make_props(str(tmp_path), ["messages.properties", "messages_de.properties"])
         json_en = tmp_path / "en" / "common.json"
         json_de = tmp_path / "de" / "common.json"
+        json_fr = tmp_path / "fr" / "common.json"
         json_en.parent.mkdir()
         json_de.parent.mkdir()
+        json_fr.parent.mkdir()
         json_en.write_text('{"hello":"Hello"}\n', encoding="utf-8")
         json_de.write_text('{"hello":"Hallo"}\n', encoding="utf-8")
+        json_fr.write_text('{"hello":"Bonjour"}\n', encoding="utf-8")
         output = tmp_path / "config.yaml"
 
         rc = init_config.main([
@@ -314,4 +320,7 @@ class TestMainErrorHandling:
             "java_properties",
             "json",
         ]
-        assert config["supported_locales"] == [{"code": "de", "name": "German"}]
+        assert config["supported_locales"] == [
+            {"code": "de", "name": "German"},
+            {"code": "fr", "name": "French"},
+        ]

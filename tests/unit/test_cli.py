@@ -63,6 +63,59 @@ register_localization_adapter(adapter)
     assert "demo_plugin_format" in captured.out
 
 
+def test_cli_loads_plugin_module_after_subcommand(tmp_path, monkeypatch, capsys):
+    plugin_path = tmp_path / "demo_plugin_late.py"
+    plugin_path.write_text(
+        """
+from localize.formats import LocalizationFileAdapter, LocalizationFormat, register_localization_adapter
+
+fmt = LocalizationFormat(
+    id="demo_plugin_format",
+    display_name="Demo Plugin",
+    file_extension=".demo",
+    code_fence="text",
+    locale_suffix_regex=r"_(?P<locale>[A-Za-z]{2})",
+)
+
+adapter = LocalizationFileAdapter(
+    localization_format=fmt,
+    parse_file=lambda path: ([], {}),
+    reassemble_file=lambda lines: "",
+    synchronize_keys=lambda target, source: (set(), set()),
+    lint_file=lambda path: [],
+    extract_changed_key_from_diff_line=lambda line: None,
+    build_review_content=lambda translations, keys: "",
+    escape_translation=lambda source, value: value,
+)
+
+register_localization_adapter(adapter)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        exit_code = cli.main(["formats", "--plugin", "demo_plugin_late"])
+        captured = capsys.readouterr()
+    finally:
+        unregister_localization_adapter("demo_plugin_format")
+
+    assert exit_code == 0
+    assert "demo_plugin_format" in captured.out
+
+
+def test_cli_init_loads_plugin_after_subcommand_without_forwarding_it():
+    with (
+        patch("localize.cli.load_plugins") as load_plugins,
+        patch("localize.cli.init_config_main", return_value=0) as init_main,
+    ):
+        exit_code = cli.main(["init", "--plugin=demo_plugin", "--input-folder", "i18n"])
+
+    assert exit_code == 0
+    load_plugins.assert_called_once_with(["demo_plugin"])
+    init_main.assert_called_once_with(["--input-folder", "i18n"])
+
+
 def test_cli_validate_reports_valid_config(tmp_path, capsys):
     repo = tmp_path / "repo"
     i18n = repo / "i18n"

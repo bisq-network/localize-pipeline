@@ -161,12 +161,58 @@ def test_filesystem_source_connector_copies_archives_and_cleans_relative_files(t
     changed = connector.get_changed_translation_files(str(input_folder), str(tmp_path), process_all_files=True)
     connector.archive_original_files(changed, str(input_folder), str(archive))
     connector.copy_files_to_translation_queue(changed, str(input_folder), str(queue))
+    assert (queue / "nested" / "messages_de.json").read_text(encoding="utf-8") == '{"hello":"Hallo"}\n'
     connector.cleanup_queue_folders(str(queue), str(translated))
 
     assert detected == [True]
     assert changed == ["nested/messages_de.json"]
     assert (archive / "nested" / "messages_de.json").read_text(encoding="utf-8") == '{"hello":"Hallo"}\n'
     assert not queue.exists()
+
+
+@pytest.mark.parametrize(
+    ("translation_queue", "translated_queue", "expected_message"),
+    [
+        ("input", "translated", "separate from repo_root and input_folder"),
+        ("queue", "input", "separate from repo_root and input_folder"),
+        ("queue", "queue", "must be different"),
+    ],
+)
+def test_filesystem_source_connector_rejects_queue_path_collisions(
+    tmp_path,
+    translation_queue,
+    translated_queue,
+    expected_message,
+):
+    input_folder = tmp_path / "input"
+    input_folder.mkdir()
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    with pytest.raises(ValueError, match=expected_message):
+        connector.validate_paths(
+            str(input_folder),
+            str(tmp_path / translation_queue),
+            str(tmp_path / translated_queue),
+            str(tmp_path),
+        )
+
+
+def test_filesystem_source_connector_requires_validated_paths_before_cleanup(tmp_path):
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    with pytest.raises(ValueError, match="validated before cleanup"):
+        connector.cleanup_queue_folders(str(tmp_path / "queue"), str(tmp_path / "translated"))
+
+
+@pytest.mark.parametrize("unsafe_path", ["/tmp/secret.properties", "../secret.properties"])
+def test_filesystem_source_connector_rejects_unsafe_changed_file_paths(tmp_path, unsafe_path):
+    input_folder = tmp_path / "input"
+    archive = tmp_path / "archive"
+    input_folder.mkdir()
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    with pytest.raises(ValueError):
+        connector.archive_original_files([unsafe_path], str(input_folder), str(archive))
 
 
 def test_file_reporter_connector_writes_machine_and_human_reports(tmp_path):

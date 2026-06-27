@@ -6,7 +6,7 @@ import logging
 import json
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Protocol
 
@@ -116,19 +116,37 @@ class NoopPipelinePublisher:
         return None
 
 
-@dataclass(frozen=True)
+@dataclass
 class FilesystemSourceConnector:
     """Reusable filesystem implementation of source, queue, and archive steps."""
 
     detect_changed_translation_files: Callable[..., List[str]]
+    _validated_queue_pairs: set[tuple[Path, Path]] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def validate_paths(self, input_folder: str, translation_queue: str, translated_queue: str, repo_root: str) -> None:
         if not os.path.isdir(repo_root):
             raise FileNotFoundError(f"Repository root does not exist: {repo_root}")
         if not os.path.isdir(input_folder):
             raise FileNotFoundError(f"Input folder does not exist: {input_folder}")
-        Path(translation_queue).mkdir(parents=True, exist_ok=True)
-        Path(translated_queue).mkdir(parents=True, exist_ok=True)
+        repo_root_path = Path(repo_root).resolve()
+        input_folder_path = Path(input_folder).resolve()
+        translation_queue_path, translated_queue_path = self._resolve_queue_pair(
+            translation_queue,
+            translated_queue,
+        )
+        self._validate_queue_pair(
+            translation_queue_path,
+            translated_queue_path,
+            protected_paths=(repo_root_path, input_folder_path),
+        )
+        translation_queue_path.mkdir(parents=True, exist_ok=True)
+        translated_queue_path.mkdir(parents=True, exist_ok=True)
+        self._validated_queue_pairs.add((translation_queue_path, translated_queue_path))
 
     def get_changed_translation_files(
         self,
@@ -161,18 +179,54 @@ class FilesystemSourceConnector:
             shutil.copy2(source_path, target_path)
 
     def cleanup_queue_folders(self, translation_queue: str, translated_queue: str) -> None:
-        for folder in (translation_queue, translated_queue):
+        queue_pair = self._resolve_queue_pair(translation_queue, translated_queue)
+        if queue_pair not in self._validated_queue_pairs:
+            raise ValueError("Queue folders must be validated before cleanup.")
+        for folder in queue_pair:
             shutil.rmtree(folder, ignore_errors=True)
+        self._validated_queue_pairs.discard(queue_pair)
 
     @staticmethod
     def _copy_relative_files(changed_files: List[str], source_root: str, destination_root: str) -> None:
+        source_root_path = Path(source_root).resolve()
+        destination_root_path = Path(destination_root).resolve()
         for relative_file in changed_files:
-            source_path = Path(source_root) / relative_file
+            relative_path = Path(relative_file)
+            if relative_path.is_absolute():
+                raise ValueError(f"Changed file must be relative: {relative_file}")
+
+            source_path = (source_root_path / relative_path).resolve()
+            try:
+                safe_relative_path = source_path.relative_to(source_root_path)
+            except ValueError as exc:
+                raise ValueError(f"Changed file escapes source root: {relative_file}") from exc
+
             if not source_path.is_file():
                 continue
-            destination_path = Path(destination_root) / relative_file
+            destination_path = (destination_root_path / safe_relative_path).resolve()
+            try:
+                destination_path.relative_to(destination_root_path)
+            except ValueError as exc:
+                raise ValueError(f"Changed file escapes destination root: {relative_file}") from exc
             destination_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination_path)
+
+    @staticmethod
+    def _resolve_queue_pair(translation_queue: str, translated_queue: str) -> tuple[Path, Path]:
+        return (Path(translation_queue).resolve(), Path(translated_queue).resolve())
+
+    @staticmethod
+    def _validate_queue_pair(
+        translation_queue: Path,
+        translated_queue: Path,
+        *,
+        protected_paths: tuple[Path, ...],
+    ) -> None:
+        reserved_paths = set(protected_paths)
+        if translation_queue in reserved_paths or translated_queue in reserved_paths:
+            raise ValueError("Queue folders must be separate from repo_root and input_folder.")
+        if translation_queue == translated_queue:
+            raise ValueError("translation_queue and translated_queue must be different folders.")
 
 
 @dataclass(frozen=True)

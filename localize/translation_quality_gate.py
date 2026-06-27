@@ -20,8 +20,9 @@ from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
     SemanticRule,
-    analyze_all_translation_entries,
+    TranslationChange,
     analyze_translation_changes,
+    iter_all_translation_entries,
     iter_translation_changes_from_diff,
     load_semantic_rules,
     normalize_value,
@@ -108,8 +109,6 @@ def analyze_source_identical_changes(
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
-    stats = SourceIdenticalStats()
-
     changes = iter_translation_changes_from_diff(
         diff_text=diff_text,
         repo_root=repo_root,
@@ -119,6 +118,20 @@ def analyze_source_identical_changes(
         localization_layout=localization_layout,
         hydrate_source=True,
     )
+    return _analyze_source_identical_translation_changes(
+        changes=changes,
+        brand_glossary=brand_glossary,
+        examples_limit=examples_limit,
+    )
+
+
+def _analyze_source_identical_translation_changes(
+    changes: Iterable[TranslationChange],
+    brand_glossary: Iterable[str],
+    examples_limit: int,
+) -> SourceIdenticalStats:
+    stats = SourceIdenticalStats()
+
     for change in changes:
         if change.source_value is None:
             continue
@@ -165,27 +178,50 @@ def analyze_source_identical_changes(
     return stats
 
 
-def _merge_source_identical_stats(
-    stats_list: Iterable[SourceIdenticalStats],
-    examples_limit: int = 10,
-) -> SourceIdenticalStats:
-    merged = SourceIdenticalStats()
-    for stats in stats_list:
-        merged.changed_entries_count += stats.changed_entries_count
-        merged.checked_entries_count += stats.checked_entries_count
-        merged.source_identical_count += stats.source_identical_count
-        merged.expected_source_identical_count += stats.expected_source_identical_count
-        merged.unexpected_source_identical_count += stats.unexpected_source_identical_count
-        merged.control_character_findings_count += stats.control_character_findings_count
-        merged.examples.extend(stats.examples)
-        merged.control_character_examples.extend(stats.control_character_examples)
-    merged.examples = merged.examples[:examples_limit]
-    merged.control_character_examples = merged.control_character_examples[:examples_limit]
-    if merged.checked_entries_count:
-        merged.unexpected_source_identical_ratio = (
-            merged.unexpected_source_identical_count / merged.checked_entries_count
+def _deduplicate_translation_changes(changes: Iterable[TranslationChange]) -> List[TranslationChange]:
+    unique_changes: List[TranslationChange] = []
+    seen: set[tuple[str, str, str]] = set()
+    for change in changes:
+        identity = (change.file, change.locale_code, change.key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_changes.append(change)
+    return unique_changes
+
+
+def _iter_profile_translation_changes(
+    diff_text: str,
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    localization_profiles: Sequence[LocalizationProfile],
+) -> Iterable[TranslationChange]:
+    for profile in localization_profiles:
+        yield from iter_translation_changes_from_diff(
+            diff_text=diff_text,
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_format=profile.localization_format,
+            localization_layout=profile.localization_layout,
         )
-    return merged
+
+
+def _iter_profile_translation_entries(
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    localization_profiles: Sequence[LocalizationProfile],
+) -> Iterable[TranslationChange]:
+    for profile in localization_profiles:
+        yield from iter_all_translation_entries(
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_format=profile.localization_format,
+            localization_layout=profile.localization_layout,
+        )
 
 
 def analyze_source_identical_changes_for_profiles(
@@ -198,20 +234,17 @@ def analyze_source_identical_changes_for_profiles(
     examples_limit: int = 10,
 ) -> SourceIdenticalStats:
     """Analyze suspicious source-identical changes across configured profiles."""
-    return _merge_source_identical_stats(
-        (
-            analyze_source_identical_changes(
+    return _analyze_source_identical_translation_changes(
+        changes=_deduplicate_translation_changes(
+            _iter_profile_translation_changes(
                 diff_text=diff_text,
                 repo_root=repo_root,
                 input_folder=input_folder,
                 locale_codes=locale_codes,
-                brand_glossary=brand_glossary,
-                examples_limit=examples_limit,
-                localization_format=profile.localization_format,
-                localization_layout=profile.localization_layout,
+                localization_profiles=localization_profiles,
             )
-            for profile in localization_profiles
         ),
+        brand_glossary=brand_glossary,
         examples_limit=examples_limit,
     )
 
@@ -260,18 +293,15 @@ def analyze_semantic_qa_changes_for_profiles(
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     """Scan changed translations across all configured format/layout profiles."""
-    changes = []
-    for profile in localization_profiles:
-        changes.extend(
-            iter_translation_changes_from_diff(
-                diff_text=diff_text,
-                repo_root=repo_root,
-                input_folder=input_folder,
-                locale_codes=locale_codes,
-                localization_format=profile.localization_format,
-                localization_layout=profile.localization_layout,
-            )
+    changes = _deduplicate_translation_changes(
+        _iter_profile_translation_changes(
+            diff_text=diff_text,
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_profiles=localization_profiles,
         )
+    )
     return analyze_translation_changes(
         changes=changes,
         semantic_rules=semantic_rules,
@@ -292,24 +322,21 @@ def analyze_all_translation_entries_for_profiles(
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     """Scan all translations across all configured format/layout profiles."""
-    stats: Optional[SemanticQAStats] = None
-    for profile in localization_profiles:
-        stats = _merge_semantic_stats(
-            stats,
-            analyze_all_translation_entries(
-                repo_root=repo_root,
-                input_folder=input_folder,
-                locale_codes=locale_codes,
-                brand_glossary=brand_glossary,
-                semantic_rules=semantic_rules,
-                retained_source_word_allowlist=retained_source_word_allowlist,
-                examples_limit=examples_limit,
-                localization_format=profile.localization_format,
-                localization_layout=profile.localization_layout,
-            ),
-            examples_limit=examples_limit,
+    changes = _deduplicate_translation_changes(
+        _iter_profile_translation_entries(
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_profiles=localization_profiles,
         )
-    return stats or SemanticQAStats()
+    )
+    return analyze_translation_changes(
+        changes=changes,
+        semantic_rules=semantic_rules,
+        brand_glossary=brand_glossary,
+        retained_source_word_allowlist=retained_source_word_allowlist,
+        examples_limit=examples_limit,
+    )
 
 
 def load_quality_gate_config(

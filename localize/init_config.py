@@ -270,8 +270,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             parse_localization_profile_spec(spec, source_locale=args.source_locale)
             for spec in args.localization_profile
         ]
-        localization_format = _resolve_localization_format(args.localization_format)
-        localization_layout = _resolve_localization_layout(args.localization_layout, args.source_locale)
+        if localization_profiles:
+            localization_format = JAVA_PROPERTIES_FORMAT
+            localization_layout = _resolve_localization_layout(SUFFIX_LAYOUT.id, args.source_locale)
+        else:
+            localization_format = _resolve_localization_format(args.localization_format)
+            localization_layout = _resolve_localization_layout(args.localization_layout, args.source_locale)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

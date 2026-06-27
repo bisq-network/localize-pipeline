@@ -183,6 +183,8 @@ def test_publish_adapter_supports_mixed_format_profiles():
     ]
 
     assert "localization_formats" in function_body
+    assert "format_extension(profile.get(\"format\"))" in function_body
+    assert "format_extension(profile.get(\"localization_format\"))" in function_body
     assert "extensions.add(extension_for_format(format_id))" in function_body
     assert "print(\"|\".join(sorted(extensions)))" in function_body
 

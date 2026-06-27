@@ -558,9 +558,33 @@ def analyze_all_translation_entries(
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
 ) -> SemanticQAStats:
+    return analyze_translation_changes(
+        changes=list(
+            iter_all_translation_entries(
+                repo_root=repo_root,
+                input_folder=input_folder,
+                locale_codes=locale_codes,
+                localization_format=localization_format,
+                localization_layout=localization_layout,
+            )
+        ),
+        semantic_rules=semantic_rules,
+        brand_glossary=brand_glossary,
+        retained_source_word_allowlist=retained_source_word_allowlist,
+        examples_limit=examples_limit,
+    )
+
+
+def iter_all_translation_entries(
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
+    localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
+) -> Iterable[TranslationChange]:
+    """Yield every target translation entry for the configured format/layout."""
     input_folder_path = Path(input_folder)
     adapter = get_localization_adapter(localization_format)
-    changes: List[TranslationChange] = []
 
     for target_path in sorted(input_folder_path.rglob(f"*{localization_format.file_extension}")):
         target_rel_path = _relpath(str(target_path), str(input_folder_path))
@@ -581,21 +605,11 @@ def analyze_all_translation_entries(
         _, target_translations = adapter.parse_file(str(target_path))
 
         for key, target_value in target_translations.items():
-            changes.append(
-                TranslationChange(
-                    file=target_rel_path,
-                    locale_code=locale_code,
-                    key=key,
-                    source_value=source_translations.get(key),
-                    old_value=None,
-                    new_value=target_value,
-                )
+            yield TranslationChange(
+                file=target_rel_path,
+                locale_code=locale_code,
+                key=key,
+                source_value=source_translations.get(key),
+                old_value=None,
+                new_value=target_value,
             )
-
-    return analyze_translation_changes(
-        changes=changes,
-        semantic_rules=semantic_rules,
-        brand_glossary=brand_glossary,
-        retained_source_word_allowlist=retained_source_word_allowlist,
-        examples_limit=examples_limit,
-    )

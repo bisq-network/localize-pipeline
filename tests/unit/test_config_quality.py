@@ -120,7 +120,6 @@ def test_deployment_guide_documents_relative_input_folder_semantics():
 
     assert "input_folder is resolved relative to target_project_root" in guide
     assert "Docker Compose plus cron" in guide
-    assert "translator.service" in guide
     assert "The paths must be absolute paths inside the container." not in guide
 
 

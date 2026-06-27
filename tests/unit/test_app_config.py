@@ -92,7 +92,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {}, clear=True):
                             config = load_app_config()
@@ -124,7 +124,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -172,7 +172,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -199,7 +199,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -219,7 +219,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -236,7 +236,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         with pytest.raises(ValueError, match="Unsupported localization_format"):
@@ -251,7 +251,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -267,7 +267,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -283,7 +283,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
@@ -296,7 +296,7 @@ class TestLoadAppConfig:
 
         with patch("localize.app_config._load_yaml_config", return_value=mock_config):
             with patch("os.path.exists", return_value=False):
-                with patch("localize.logging_config.setup_logger") as mock_logger:
+                with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {"PROCESS_ALL_FILES": "true"}, clear=True):
                         config = load_app_config()
@@ -310,7 +310,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {
                             "REVIEW_MODEL_NAME": "gpt-4o",
@@ -332,7 +332,7 @@ class TestLoadAppConfig:
                 mock_exists.side_effect = lambda path: path.endswith("/.env") or path.endswith("config.yaml")
                 with patch("os.access", return_value=True):
                     with patch("localize.app_config.load_dotenv") as mock_load_dotenv:
-                        with patch("localize.logging_config.setup_logger") as mock_logger:
+                        with patch("localize.app_config.setup_logger") as mock_logger:
                             mock_logger.return_value = MagicMock()
                             with patch.dict(os.environ, {}, clear=True):
                                 load_app_config()
@@ -347,7 +347,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch("localize.model_provider.AsyncOpenAI") as mock_openai:
                             mock_client = MagicMock()
@@ -365,7 +365,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
                             config = load_app_config()
@@ -380,7 +380,7 @@ class TestLoadAppConfig:
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
                     with patch("localize.app_config.load_dotenv"):
-                        with patch("localize.logging_config.setup_logger") as mock_logger:
+                        with patch("localize.app_config.setup_logger") as mock_logger:
                             mock_logger.return_value = MagicMock()
                             with patch.dict(os.environ, {}, clear=True):
                                 with pytest.raises(SystemExit):
@@ -401,7 +401,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {}, clear=True):
                             config = load_app_config()
@@ -429,7 +429,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {}, clear=True):
                             config = load_app_config()
@@ -461,7 +461,7 @@ class TestLoadAppConfig:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {"TRANSLATOR_CONFIG_FILE": "/custom/config.yaml"}):
                             config = load_app_config()
@@ -586,7 +586,7 @@ class TestProviderAbstraction:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch("localize.model_provider.AsyncOpenAI") as mock_openai:
                             mock_openai.return_value = MagicMock()
@@ -602,7 +602,7 @@ class TestProviderAbstraction:
         with patch("builtins.open", mock_open(read_data=yaml.dump({"dry_run": False}))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch("localize.app_config.create_model_provider", return_value=provider) as factory:
                             with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}, clear=True):
@@ -619,7 +619,7 @@ class TestProviderAbstraction:
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
                     with patch("localize.app_config.load_dotenv"):
-                        with patch("localize.logging_config.setup_logger") as mock_logger:
+                        with patch("localize.app_config.setup_logger") as mock_logger:
                             mock_logger.return_value = MagicMock()
                             with patch.dict(os.environ, {}, clear=True):
                                 with pytest.raises(SystemExit):
@@ -634,7 +634,7 @@ class TestProviderAbstraction:
         ))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch("localize.app_config.create_model_provider", return_value=provider) as factory:
                             with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}, clear=True):
@@ -694,7 +694,7 @@ class TestProviderAbstraction:
         ))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {}, clear=True):
                             with pytest.raises(SystemExit):
@@ -712,7 +712,7 @@ class TestProviderAbstraction:
         ))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger", return_value=captured):
+                    with patch("localize.app_config.setup_logger", return_value=captured):
                         with patch("localize.model_provider.AsyncOpenAI", return_value=MagicMock()):
                             with patch.dict(os.environ, {"OPENAI_API_KEY": "gsk_abc123"}, clear=True):
                                 load_app_config()
@@ -735,7 +735,7 @@ class TestProviderAbstraction:
         with patch("builtins.open", mock_open(read_data=yaml.dump(mock_config))):
             with patch("os.path.exists", return_value=True):
                 with patch("os.access", return_value=True):
-                    with patch("localize.logging_config.setup_logger") as mock_logger:
+                    with patch("localize.app_config.setup_logger") as mock_logger:
                         mock_logger.return_value = MagicMock()
                         with patch("localize.app_config.create_model_provider", return_value=provider) as factory:
                             with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):

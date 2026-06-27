@@ -88,6 +88,31 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return init_config_main(list(args.init_args))
 
 
+def _extract_plugin_args(raw_argv: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Return plugin modules and argv with all --plugin flags removed."""
+    plugins: list[str] = []
+    command_argv: list[str] = []
+    index = 0
+    while index < len(raw_argv):
+        argument = raw_argv[index]
+        if argument == "--plugin":
+            if index + 1 >= len(raw_argv):
+                raise ValueError("argument --plugin: expected one argument")
+            plugins.append(raw_argv[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--plugin="):
+            plugin = argument.split("=", 1)[1]
+            if not plugin:
+                raise ValueError("argument --plugin: expected one argument")
+            plugins.append(plugin)
+            index += 1
+            continue
+        command_argv.append(argument)
+        index += 1
+    return plugins, command_argv
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="localize",
@@ -137,12 +162,16 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = _build_parser()
-    args, forwarded_args = parser.parse_known_args(raw_argv)
+    try:
+        plugin_args, command_argv = _extract_plugin_args(raw_argv)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args, forwarded_args = parser.parse_known_args(command_argv)
     if args.command == "init":
         args.init_args = forwarded_args
     elif forwarded_args:
         parser.error(f"unrecognized arguments: {' '.join(forwarded_args)}")
-    load_plugins(args.plugin)
+    load_plugins([*plugin_args, *args.plugin])
     return int(args.func(args))
 
 
