@@ -115,6 +115,7 @@ def test_transifex_pull_is_skipped_when_source_is_git():
 
     assert "prepare_translation_source()" in script
     assert '"$translation_source" == "git"' in script
+    assert "using localization files already in the repository" in script
     # The guard must be evaluated before the tx pull command is constructed.
     guard_index = script.index('"$translation_source" == "git"')
     tx_pull_index = script.index('TX_PULL_CMD="tx pull')
@@ -142,6 +143,7 @@ def test_publish_adapter_wraps_commit_and_pr_flow():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     assert "publish_translation_changes()" in script
+    assert "translation_file_extension_regex()" in script
     assert "translation_file_status_regex()" in script
     assert "collect_changed_translation_files()" in script
     publish_def_index = script.index("publish_translation_changes()")
@@ -155,10 +157,36 @@ def test_publish_adapter_preserves_both_paths_for_translation_renames():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     assert "translation_file_status_regex() {\n    translation_file_change_regex\n}" in script
+    assert 'extension_regex="\\\\.($(translation_file_extension_regex))$"' in script
     assert 'old_path = substr(path, 1, index(path, " -> ") - 1)' in script
     assert 'new_path = substr(path, index(path, " -> ") + 4)' in script
-    assert "if (old_path ~ /\\.(properties|po|mo)$/) print old_path" in script
-    assert "if (new_path ~ /\\.(properties|po|mo)$/) print new_path" in script
+    assert "if (old_path ~ extension_regex) print old_path" in script
+    assert "if (new_path ~ extension_regex) print new_path" in script
+
+
+def test_publish_adapter_supports_json_translation_files():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "translation_file_extension_regex()" in script
+    assert "format_id=$(yq -r '(.localization_format.id // .localization_format // \"java_properties\")'" in script
+    assert "extension=$(yq -r '(.localization_format.file_extension // \"\")'" in script
+    assert "json)\n            printf 'json'" in script
+    assert "java_properties|\"\"|\"null\")\n            printf 'properties'" in script
+
+
+def test_translation_file_extension_override_precedes_format_id_defaults():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    function_body = script[
+        script.index("translation_file_extension_regex() {"):
+        script.index("collect_changed_translation_files()")
+    ]
+
+    extension_normalize_index = function_body.index('extension="${extension#.}"')
+    case_index = function_body.index('case "$format_id" in')
+
+    assert extension_normalize_index < case_index
+    assert "return" in function_body[extension_normalize_index:case_index]
 
 
 def test_pr_body_includes_token_usage_cost_summary():

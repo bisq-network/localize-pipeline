@@ -5,24 +5,33 @@
 # see profiles/bisq/config.yaml (the Bisq production profile).
 #
 # Tip: run `./init.sh --input-folder path/to/i18n` to scaffold this automatically
-# by detecting the locales from your existing *.properties files.
+# by detecting the locales from your existing localization files.
 
 # --- Paths (required) ---
-# Absolute path to the git repository whose .properties files you translate.
+# Absolute path to the git repository whose localization files you translate.
 target_project_root: "/path/to/your/git/repo"
-# Folder containing the .properties files (absolute, or relative to target_project_root).
-input_folder: "/path/to/properties/files"
+# Folder containing localization files (absolute, or relative to target_project_root).
+input_folder: "/path/to/localization/files"
 
 # --- Localization format ---
-# Built-in: "java_properties". Future formats can provide the same metadata shape.
+# Built-ins: "java_properties", "json".
+# JSON string leaves are addressed internally with JSON Pointer keys, so nested
+# files can be translated without ambiguous dot-path flattening.
 localization_format: "java_properties"
+# Built-ins:
+# - suffix: messages_de.properties, messages.de.json, messages-de.json
+# - locale_directory: locales/de/messages.json with source at locales/en/messages.json
+# - locale_filename: locales/de.json with source at locales/en.json
+localization_layout:
+  id: "suffix"
+  source_locale: "en"
 
 # Optional product/domain context injected into translation prompts.
 # Keep this generic for reusable configs; project-specific configs can be more precise.
 project_context: "Translate concise UI text for a software product."
 
 # --- Where translations come from before the AI step ---
-# "git"      = use the .properties files already in your repository (no external TMS).
+# "git"      = use the localization files already in your repository (no external TMS).
 # "transifex" = pull the latest translations via the `tx` CLI first (needs .tx/config).
 # Foreign OSS projects without Transifex should keep "git".
 translation_source: "git"

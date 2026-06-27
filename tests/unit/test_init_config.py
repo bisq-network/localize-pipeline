@@ -19,6 +19,12 @@ def _make_props(folder, names):
             f.write("key=value\n")
 
 
+def _make_json(folder, names):
+    for name in names:
+        with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
+            f.write('{"key":"value"}\n')
+
+
 class TestDetectLocales:
     def test_detects_locale_suffixes_excluding_source(self, tmp_path):
         _make_props(str(tmp_path), [
@@ -64,6 +70,49 @@ class TestDetectLocales:
         codes = [loc["code"] for loc in detect_locales(str(tmp_path), source_locale="en")]
         assert codes == ["de"]
 
+    def test_detects_json_locale_suffixes_when_requested(self, tmp_path):
+        _make_json(str(tmp_path), [
+            "app.json", "app_en.json", "app_de.json", "messages.pt-BR.json", "messages.es-419.json",
+        ])
+        codes = [
+            loc["code"]
+            for loc in detect_locales(str(tmp_path), source_locale="en", localization_format="json")
+        ]
+        assert codes == ["de", "es-419", "pt-BR"]
+
+    def test_detects_json_locale_directory_layout(self, tmp_path):
+        for rel_path in ["en/common.json", "de/common.json", "es-419/common.json", "fr/common.json"]:
+            path = tmp_path / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"key":"value"}\n', encoding="utf-8")
+
+        codes = [
+            loc["code"]
+            for loc in detect_locales(
+                str(tmp_path),
+                source_locale="en",
+                localization_format="json",
+                localization_layout={"id": "locale_directory", "source_locale": "en"},
+            )
+        ]
+
+        assert codes == ["de", "es-419", "fr"]
+
+    def test_detects_json_locale_filename_layout_with_numeric_region(self, tmp_path):
+        _make_json(str(tmp_path), ["en.json", "es-419.json"])
+
+        codes = [
+            loc["code"]
+            for loc in detect_locales(
+                str(tmp_path),
+                source_locale="en",
+                localization_format="json",
+                localization_layout={"id": "locale_filename", "source_locale": "en"},
+            )
+        ]
+
+        assert codes == ["es-419"]
+
 
 class TestCodeToName:
     def test_known_code(self):
@@ -88,6 +137,27 @@ class TestBuildConfig:
         assert cfg["supported_locales"] == [{"code": "de", "name": "German"}]
         assert "model_name" in cfg and "review_model_name" in cfg
         assert cfg["localization_format"] == "java_properties"
+        assert cfg["localization_layout"] == {"id": "suffix", "source_locale": "en"}
+
+    def test_accepts_json_localization_format(self):
+        cfg = build_config(
+            target_project_root="/repo",
+            input_folder="i18n",
+            locales=[{"code": "de", "name": "German"}],
+            localization_format="json",
+        )
+        assert cfg["localization_format"] == "json"
+
+    def test_accepts_localization_layout(self):
+        cfg = build_config(
+            target_project_root="/repo",
+            input_folder="i18n",
+            locales=[{"code": "de", "name": "German"}],
+            localization_format="json",
+            localization_layout={"id": "locale_directory", "source_locale": "en"},
+        )
+
+        assert cfg["localization_layout"] == {"id": "locale_directory", "source_locale": "en"}
 
     def test_optional_base_url_included_when_provided(self):
         cfg = build_config(

@@ -866,6 +866,38 @@ class TestFileDetectionLogic(unittest.TestCase):
 
         self.assertEqual(sorted(files), ["mobile_de.properties", "mobile_es.properties"])
 
+    @patch('subprocess.run')
+    def test_get_changed_files_supports_json_locale_directory_layout(self, mock_subprocess_run):
+        """Directory-based locale projects should not need locale suffix filenames."""
+        from src.localization_formats import JSON_FORMAT
+        from src.localization_layouts import LocalizationLayout
+        from src.translate_localization_files import get_changed_translation_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = temp_dir
+            input_folder = os.path.join(temp_dir, "locales")
+            for rel_path in [
+                "en/common.json",
+                "de/common.json",
+                "fr/common.json",
+            ]:
+                path = os.path.join(input_folder, rel_path)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as temp_file:
+                    temp_file.write('{"k":"v"}\n')
+
+            git_output = " M locales/en/common.json\n"
+            mock_subprocess_run.return_value = MagicMock(stdout=git_output, stderr="", check_returncode=MagicMock())
+
+            with patch("src.translate_localization_files.LOCALIZATION_FORMAT", JSON_FORMAT), \
+                 patch(
+                     "src.translate_localization_files.LOCALIZATION_LAYOUT",
+                     LocalizationLayout(id="locale_directory", source_locale="en"),
+                 ):
+                files = get_changed_translation_files(input_folder, repo_root)
+
+        self.assertEqual(files, ["de/common.json", "fr/common.json"])
+
 
 class TestFilterGitChangedKeys(unittest.TestCase):
     """Tests for filter_git_changed_keys_by_source, which prevents the

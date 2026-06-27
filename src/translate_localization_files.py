@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import uuid
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Tuple, Optional, Set
 
@@ -32,21 +31,29 @@ from openai.types.chat import (
 from tqdm.asyncio import tqdm
 
 from src.app_config import load_app_config
-from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
+from src.localization_adapters import (
+    get_localization_adapter,
+    lint_properties_file as lint_properties_file,
+)
+from src.localization_formats import LocalizationFormat
+from src.localization_layouts import LocalizationLayout
 from src.model_provider import OpenAICompatibleProvider
+from src.placeholder_rules import (
+    extract_placeholder_tokens,
+    protect_placeholders,
+    restore_placeholders as restore_protected_placeholders,
+)
 from src.pipeline_core import (
     TranslationPipelineOptions,
     TranslationPipelinePaths,
     TranslationPipelineSteps,
     run_translation_pipeline,
 )
-from src.properties_parser import parse_properties_file, reassemble_file
 from src.translation_prompts import build_translation_system_prompt
 from src.translation_validator import (
     check_placeholder_parity,
     check_encoding_and_mojibake,
     find_disallowed_control_characters,
-    synchronize_keys
 )
 
 # --- Constants and Globals ---
@@ -86,6 +93,7 @@ PRECOMPUTED_STYLE_RULES_TEXT = config.precomputed_style_rules_text
 BRAND_GLOSSARY = config.brand_glossary
 PROJECT_CONTEXT = config.project_context
 LOCALIZATION_FORMAT = config.localization_format
+LOCALIZATION_LAYOUT = config.localization_layout
 TRANSLATION_QUEUE_FOLDER = config.translation_queue_folder
 TRANSLATED_QUEUE_FOLDER = config.translated_queue_folder
 TRANSLATION_KEY_LEDGER_FILE_PATH = config.translation_key_ledger_file_path
@@ -95,92 +103,6 @@ client = config.openai_client
 _FALLBACK_PROVIDER = OpenAICompatibleProvider(client=None)
 
 # --- End Config and Globals ---
-
-_SUPPRESS_PATTERN = re.compile(
-    r'#\s*suppress\s+inspection\s+"[^"]*$'
-)
-
-
-def _lint_comment_syntax(line: str, line_number: int) -> Optional[str]:
-    """Return an error string if ``line`` has a known malformed comment pattern.
-
-    Detects ``# suppress inspection "...`` missing the closing double-quote.
-    """
-    if _SUPPRESS_PATTERN.match(line):
-        return (
-            f'Linter Error: Malformed suppress comment missing closing '
-            f'quote on line {line_number}.'
-        )
-    return None
-
-
-def lint_properties_file(file_path: str) -> List[str]:
-    """
-    Lints a .properties file to check for common issues.
-
-    Args:
-        file_path: The path to the .properties file.
-
-    Returns:
-        A list of error messages. An empty list means no errors were found.
-    """
-    errors = []
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for i, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-
-                if line.startswith('#') or line.startswith('!'):
-                    err = _lint_comment_syntax(line, i)
-                    if err:
-                        errors.append(err)
-                    continue
-
-                if '=' in line or ':' in line:
-                    sep_idx = -1
-                    for j, ch in enumerate(line):
-                        if ch in ('=', ':') and (j == 0 or line[j - 1] != '\\'):
-                            sep_idx = j
-                            break
-                    if sep_idx == -1:
-                        continue
-                    key, value = line[:sep_idx], line[sep_idx + 1:]
-                    key = key.strip()
-
-                    # Check for malformed keys (e.g., double dots)
-                    if '..' in key:
-                        errors.append(f"Linter Error: Malformed key '{key}' with double dots found on line {i}.")
-
-                    # Temporarily remove a trailing backslash if it's for line continuation,
-                    # so it's not incorrectly flagged as an invalid escape sequence.
-                    value_to_check = value.rstrip('\r\n')
-                    # Treat as continuation only if an odd number of trailing backslashes
-                    m = re.search(r'(\\+)$', value_to_check)
-                    if m and (len(m.group(1)) % 2 == 1):
-                        value_to_check = value_to_check[:-1]
-
-                    # Allow: \t \n \f \r \\ \= \: \# \! space, \", and \uXXXX (4 hex digits)
-                    # This regex is loosened to ignore \n and \" which appear in some source files.
-                    if re.search(r'\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])', value_to_check):
-                        errors.append(
-                            f"Linter Error: Invalid escape sequence in value for key '{key}' on line {i}."
-                        )
-
-                    control_character_findings = find_disallowed_control_characters(value_to_check)
-                    if control_character_findings:
-                        preview = ", ".join(control_character_findings[:3])
-                        suffix = " ..." if len(control_character_findings) > 3 else ""
-                        errors.append(
-                            f"Linter Error: Disallowed control character artifact in value for key "
-                            f"'{key}' on line {i}: {preview}{suffix}."
-                        )
-
-    except (IOError, OSError, UnicodeDecodeError) as e:
-        errors.append(f"Linter Error: Could not read or process file {file_path}. Reason: {e}")
-
-    return errors
 
 def language_code_to_name(language_code: str) -> Optional[str]:
     """
@@ -440,27 +362,6 @@ def extract_texts_to_translate(
     return texts_to_translate, indices, keys_to_translate
 
 
-def _extract_properties_key_from_diff_line(diff_line: str) -> Optional[str]:
-    """Extract a properties key from one added git diff line."""
-    stripped_line = diff_line.strip()
-    if not stripped_line:
-        return None
-    if stripped_line.startswith('#') or stripped_line.startswith('!'):
-        return None
-    equals_position = diff_line.find('=')
-    colon_position = diff_line.find(':')
-    if equals_position == -1 and colon_position == -1:
-        return None
-    if equals_position == -1:
-        separator_position = colon_position
-    elif colon_position == -1:
-        separator_position = equals_position
-    else:
-        separator_position = min(equals_position, colon_position)
-    key = diff_line[:separator_position].strip()
-    return key or None
-
-
 def filter_git_changed_keys_by_source(
         git_changed_keys: Set[str],
         source_translations: Dict[str, str],
@@ -537,11 +438,12 @@ def get_working_tree_changed_keys(target_file_path: str, repo_root: str) -> Set[
             )
             return set()
 
+        adapter = get_localization_adapter(LOCALIZATION_FORMAT)
         changed_keys: Set[str] = set()
         for line in result.stdout.splitlines():
             if not line.startswith('+') or line.startswith('+++'):
                 continue
-            key = _extract_properties_key_from_diff_line(line[1:])
+            key = adapter.extract_changed_key_from_diff_line(line[1:])
             if key:
                 changed_keys.add(key)
         return changed_keys
@@ -629,21 +531,7 @@ def extract_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
     Returns:
         Tuple[str, Dict[str, str]]: The processed text and placeholder mapping.
     """
-    if not isinstance(text, str):
-        raise ValueError("Input text must be a string.")
-
-    # Pattern to match placeholders like `{0}` or `{name}` and HTML-like tags
-    pattern = re.compile(r'(<[^<>]+>)|({[^{}]+})')
-    placeholder_mapping = {}
-
-    def replace_placeholder(match):
-        full_match = match.group(0)
-        placeholder_token = f"__PH_{uuid.uuid4().hex}__"
-        placeholder_mapping[placeholder_token] = full_match
-        return placeholder_token
-
-    processed_text = pattern.sub(replace_placeholder, text)
-    return processed_text, placeholder_mapping
+    return protect_placeholders(text)
 
 def restore_placeholders(text: str, placeholder_mapping: Dict[str, str]) -> str:
     """
@@ -656,9 +544,7 @@ def restore_placeholders(text: str, placeholder_mapping: Dict[str, str]) -> str:
     Returns:
         str: The text with placeholders restored.
     """
-    for token, placeholder in placeholder_mapping.items():
-        text = text.replace(token, placeholder)
-    return text
+    return restore_protected_placeholders(text, placeholder_mapping)
 
 def protect_placeholders_in_properties(content: str) -> Tuple[str, Dict[str, str]]:
     """
@@ -676,21 +562,7 @@ def protect_placeholders_in_properties(content: str) -> Tuple[str, Dict[str, str
         - protected_content: Content with placeholders replaced by __PH_xxx__ tokens
         - placeholder_mapping: Dict mapping tokens back to original placeholders
     """
-    if not content:
-        return "", {}
-
-    # Pattern to match placeholders like {0}, {1}, {name} and HTML-like tags
-    pattern = re.compile(r'(<[^<>]+>)|({[^{}]+})')
-    placeholder_mapping = {}
-
-    def replace_placeholder(match):
-        full_match = match.group(0)
-        placeholder_token = f"__PH_{uuid.uuid4().hex}__"
-        placeholder_mapping[placeholder_token] = full_match
-        return placeholder_token
-
-    protected_content = pattern.sub(replace_placeholder, content)
-    return protected_content, placeholder_mapping
+    return protect_placeholders(content)
 
 def restore_placeholders_in_properties(content: str, placeholder_mapping: Dict[str, str]) -> str:
     """
@@ -706,13 +578,7 @@ def restore_placeholders_in_properties(content: str, placeholder_mapping: Dict[s
     Returns:
         Content with all placeholders restored to original {0}, {1}, etc.
     """
-    if not content or not placeholder_mapping:
-        return content
-
-    for token, placeholder in placeholder_mapping.items():
-        content = content.replace(token, placeholder)
-
-    return content
+    return restore_protected_placeholders(content, placeholder_mapping)
 
 def clean_translated_text(translated_text: str, original_text: str) -> str:
     """
@@ -784,13 +650,13 @@ async def _handle_retry(attempt: int, max_retries: int, base_delay: float, key: 
 
 def run_pre_translation_validation(target_file_path: str, source_file_path: str) -> Tuple[List[str], Set[str]]:
     """
-    Runs a series of validation and preparation checks on a target properties file.
+    Runs validation and preparation checks on a target localization file.
     - Synchronizes keys with the source file (adds missing, removes extra).
     - Checks for encoding issues and placeholder mismatches.
 
     Args:
-        target_file_path: The absolute path to the target language .properties file.
-        source_file_path: The absolute path to the source English .properties file.
+        target_file_path: The absolute path to the target language localization file.
+        source_file_path: The absolute path to the source English localization file.
 
     Returns:
         A tuple containing:
@@ -800,16 +666,17 @@ def run_pre_translation_validation(target_file_path: str, source_file_path: str)
     errors: List[str] = []
     newly_added_keys: Set[str] = set()
     filename = os.path.basename(target_file_path)
+    adapter = get_localization_adapter(LOCALIZATION_FORMAT)
     logger.info(f"Running pre-translation validation for '{filename}'...")
 
     # 1. Synchronize keys (add missing, remove extra)
     try:
-        missing_keys, _extra_keys = synchronize_keys(target_file_path, source_file_path)
+        missing_keys, _extra_keys = adapter.synchronize_keys(target_file_path, source_file_path)
         newly_added_keys = missing_keys
         logger.info(f"Key synchronization complete for '{filename}'.")
-    except (IOError, OSError) as e:
+    except Exception as e:
         logger.exception("Failed to synchronize keys for '%s'", filename)
-        errors.append(f"I/O error during key synchronization: {e}")
+        errors.append(f"Error during key synchronization: {e}")
         return errors, newly_added_keys  # Fail hard if we can't even sync the file
 
     # 2. Check encoding and mojibake on the (potentially modified) file
@@ -820,11 +687,11 @@ def run_pre_translation_validation(target_file_path: str, source_file_path: str)
     # Load file content for placeholder check
     try:
         # Re-parse the files as they might have been changed by synchronize_keys
-        _, target_translations = parse_properties_file(target_file_path)
-        _, source_translations = parse_properties_file(source_file_path)
-    except (IOError, OSError) as e:
-        logger.exception("Validation failed for '%s': Could not parse properties file after key sync", filename)
-        errors.append(f"Could not parse properties file after key sync: {e}")
+        _, target_translations = adapter.parse_file(target_file_path)
+        _, source_translations = adapter.parse_file(source_file_path)
+    except Exception as e:
+        logger.exception("Validation failed for '%s': Could not parse localization file after key sync", filename)
+        errors.append(f"Could not parse localization file after key sync: {e}")
         return errors, newly_added_keys
 
     # 3. Check placeholder parity
@@ -862,6 +729,7 @@ def run_post_translation_validation(
     logger.info(f"Running post-translation validation for '{filename}'...")
 
     temp_file_path = None
+    adapter = get_localization_adapter(LOCALIZATION_FORMAT)
     try:
         # Create a temporary file with delete=False to control its lifecycle.
         with tempfile.NamedTemporaryFile(
@@ -885,17 +753,15 @@ def run_post_translation_validation(
 
         # 2. Check placeholder parity on the final content
         try:
-            _, final_translations = parse_properties_file(temp_file_path)
+            _, final_translations = adapter.parse_file(temp_file_path)
             common_keys = set(source_translations.keys()).intersection(set(final_translations.keys()))
             for key in common_keys:
                 source_value = source_translations.get(key, "")
                 target_value = final_translations.get(key, "")
                 if not check_placeholder_parity(source_value, target_value):
                     is_valid = False
-                    # Extract placeholders for detailed logging
-                    placeholder_regex = re.compile(r'\{([^{}]+)\}')
-                    source_placeholders = placeholder_regex.findall(source_value)
-                    target_placeholders = placeholder_regex.findall(target_value)
+                    source_placeholders = list(extract_placeholder_tokens(source_value).elements())
+                    target_placeholders = list(extract_placeholder_tokens(target_value).elements())
                     logger.error(
                         f"Post-translation validation failed for '{filename}': Placeholder mismatch for key '{key}'.\n"
                         f"  Source value: {source_value}\n"
@@ -903,10 +769,10 @@ def run_post_translation_validation(
                         f"  Source placeholders: {source_placeholders}\n"
                         f"  Target placeholders: {target_placeholders}"
                     )
-        except (IOError, OSError):
+        except Exception:
             is_valid = False
             logger.exception(
-                "Post-translation validation failed for '%s': Could not parse final properties content", filename)
+                "Post-translation validation failed for '%s': Could not parse final localization content", filename)
 
     finally:
         # Ensure the temporary file is cleaned up
@@ -978,10 +844,8 @@ def run_per_key_validation_with_summary(
             failed_keys.append(key)
             placeholder_mismatch_keys.append(key)
 
-            # Extract placeholder details for detailed logging
-            placeholder_regex = re.compile(r'\{([^{}]+)\}')
-            source_placeholders = placeholder_regex.findall(source_value)
-            target_placeholders = placeholder_regex.findall(target_value)
+            source_placeholders = list(extract_placeholder_tokens(source_value).elements())
+            target_placeholders = list(extract_placeholder_tokens(target_value).elements())
 
             logger.warning(
                 f"Key '{key}' failed validation in '{filename}' - reverting to source.\n"
@@ -1202,7 +1066,7 @@ You are a lead editor and quality assurance specialist for software localization
     - These tokens are automatically managed by the system
 3.  **CRITICAL - Translate ALL Other Text**: You MUST ensure that ALL regular text (text that is NOT a placeholder token) is properly translated, even if it appears between, before, or after placeholder tokens. Do not leave any translatable text untranslated just because it is near placeholders.
 4.  **Apply All Quality Rules**: Meticulously apply the language-specific quality checklist to every key in your scope.
-5.  **Do Not Escape Single Quotes**: The system will handle all necessary escaping for Java `MessageFormat`. Return single quotes (') as literal characters in the JSON values.
+5.  **Preserve Format Semantics**: Return plain translated string values. The system will serialize and escape values according to the target localization format. For Java `MessageFormat` strings, return single quotes (') as literal characters; the system handles required escaping.
 6.  **Output JSON Only**: Your final output **must** be a single, valid JSON object that adheres to the required schema. This object should contain ONLY the keys listed in the "Strictly Limited Scope" section above, with their final, corrected translations as the values.
 7.  **Do Not Add Explanations**: Do not output any text, markdown, or explanations before or after the JSON object.
 
@@ -1244,8 +1108,8 @@ async def holistic_review_async(
     as a JSON object.
 
     Args:
-        source_content (str): The full content of the source (English) .properties file.
-        translated_content (str): The full content of the draft translated .properties file.
+        source_content (str): The source localization content for the scoped keys.
+        translated_content (str): The draft translated localization content for the scoped keys.
         target_language (str): The target language of the translation.
         keys_to_review (List[str]): The specific list of keys to review and return.
         semaphore (asyncio.Semaphore): For concurrency control.
@@ -1357,18 +1221,23 @@ async def holistic_review_async(
 
         return None  # Fallback after all retries
 
-def _escape_messageformat_if_needed(src_text: str, value: str) -> str:
-    if re.search(r'\{[^{}]+\}', src_text):
-        value = value.replace("''", "'")
-        value = value.replace("'", "''")
-    return value
+
+def _escape_output_value(
+        adapter,
+        source_translations: Dict[str, str],
+        key: str,
+        value: str,
+) -> str:
+    return adapter.escape_translation(source_translations.get(key, ""), value)
+
 
 def integrate_translations(
         parsed_lines: List[Dict],
         translations: List[str],
         indices: List[int],
         keys: List[str],
-        source_translations: Dict[str, str]
+        source_translations: Dict[str, str],
+        localization_format: LocalizationFormat = LOCALIZATION_FORMAT,
 ) -> List[Dict]:
     """
     Integrate translated texts back into the parsed lines.
@@ -1383,11 +1252,9 @@ def integrate_translations(
     Returns:
         List[Dict]: The updated parsed lines.
     """
+    adapter = get_localization_adapter(localization_format)
     for idx, (translation_idx, key) in enumerate(zip(indices, keys)):
-        translated_text = translations[idx]
-        original_source_text = source_translations.get(key, "")
-
-        translated_text = _escape_messageformat_if_needed(original_source_text, translated_text)
+        translated_text = _escape_output_value(adapter, source_translations, key, translations[idx])
 
         if translation_idx < len(parsed_lines):
             # Update existing entry
@@ -1420,7 +1287,7 @@ def extract_language_from_filename(filename: str, supported_codes: List[str]) ->
     Returns:
         Optional[str]: The language code if found, else None.
     """
-    return LOCALIZATION_FORMAT.extract_supported_locale_suffix(filename, supported_codes)
+    return LOCALIZATION_LAYOUT.extract_locale(filename, supported_codes, LOCALIZATION_FORMAT)
 
 def get_source_filename(translation_file: str, supported_codes: List[str]) -> str:
     """
@@ -1447,7 +1314,35 @@ def get_source_filename(translation_file: str, supported_codes: List[str]) -> st
         >>> get_source_filename('app.properties', ['es', 'de'])
         'app.properties'
     """
-    return LOCALIZATION_FORMAT.source_filename(translation_file, supported_codes)
+    return LOCALIZATION_LAYOUT.source_path_for_target(translation_file, supported_codes, LOCALIZATION_FORMAT)
+
+
+def is_target_localization_file(
+        relative_path: str,
+        supported_codes: Optional[List[str]] = None,
+        localization_format: Optional[LocalizationFormat] = None,
+        localization_layout: Optional[LocalizationLayout] = None,
+) -> bool:
+    """Return true when ``relative_path`` is a configured target locale file."""
+    return (localization_layout or LOCALIZATION_LAYOUT).is_target_file(
+        relative_path,
+        supported_codes or list(LANGUAGE_CODES.keys()),
+        localization_format or LOCALIZATION_FORMAT,
+    )
+
+
+def is_source_localization_file(
+        relative_path: str,
+        supported_codes: Optional[List[str]] = None,
+        localization_format: Optional[LocalizationFormat] = None,
+        localization_layout: Optional[LocalizationLayout] = None,
+) -> bool:
+    """Return true when ``relative_path`` is a configured source locale file."""
+    return (localization_layout or LOCALIZATION_LAYOUT).is_source_file(
+        relative_path,
+        supported_codes or list(LANGUAGE_CODES.keys()),
+        localization_format or LOCALIZATION_FORMAT,
+    )
 
 def move_files_to_archive(input_folder_path: str, archive_folder_path: str):
     """
@@ -1460,9 +1355,9 @@ def move_files_to_archive(input_folder_path: str, archive_folder_path: str):
     os.makedirs(archive_folder_path, exist_ok=True)
     for root, _, files in os.walk(input_folder_path):
         for filename in files:
-            if LOCALIZATION_FORMAT.is_supported_file(filename) and LOCALIZATION_FORMAT.is_locale_file(filename):
-                # Construct relative path to maintain directory structure
-                relative_path = os.path.relpath(os.path.join(root, filename), input_folder_path)
+            # Construct relative path to maintain directory structure
+            relative_path = os.path.relpath(os.path.join(root, filename), input_folder_path)
+            if is_target_localization_file(relative_path):
                 source_path = os.path.join(input_folder_path, relative_path)
                 dest_path = os.path.join(archive_folder_path, relative_path)
 
@@ -1488,8 +1383,8 @@ def copy_translated_files_back(
     """
     for root, _dirs, files in os.walk(translated_queue_folder):
         for name in files:
-            if LOCALIZATION_FORMAT.is_supported_file(name) and LOCALIZATION_FORMAT.is_locale_file(name):
-                rel_path = os.path.relpath(os.path.join(root, name), translated_queue_folder)
+            rel_path = os.path.relpath(os.path.join(root, name), translated_queue_folder)
+            if is_target_localization_file(rel_path):
                 translated_file_path = os.path.join(translated_queue_folder, rel_path)
                 dest_path = os.path.join(input_folder_path, rel_path)
                 if DRY_RUN:
@@ -1534,8 +1429,8 @@ def get_changed_translation_files(
     Use git to find changed translation files in the input folder.
 
     If the TRANSLATION_FILTER_GLOB environment variable is set, this function will
-    only return files that match the provided glob pattern. Otherwise, it returns all
-    changed .properties files.
+    only return files that match the provided glob pattern. Otherwise, it returns
+    changed files for the configured localization format.
 
     Args:
         input_folder_path (str): The absolute path to the input folder.
@@ -1550,6 +1445,17 @@ def get_changed_translation_files(
         """Return True when a relative file path is inside an archive directory."""
         normalized_path = relative_path.replace('\\', '/')
         return normalized_path.startswith('archive/') or '/archive/' in normalized_path
+
+    def is_discoverable_target_file(relative_path: str) -> bool:
+        """Return true for target files that should be queued for locale extraction."""
+        if is_target_localization_file(relative_path):
+            return True
+        if LOCALIZATION_LAYOUT.id == "suffix":
+            return (
+                LOCALIZATION_FORMAT.is_supported_file(relative_path)
+                and LOCALIZATION_FORMAT.is_locale_file(os.path.basename(relative_path))
+            )
+        return False
 
     def apply_filter_glob(files: List[str]) -> List[str]:
         """Apply optional TRANSLATION_FILTER_GLOB filtering to discovered files."""
@@ -1578,12 +1484,10 @@ def get_changed_translation_files(
         discovered_files: List[str] = []
         for root, _, files in os.walk(input_folder_path):
             for filename in files:
-                if not LOCALIZATION_FORMAT.is_supported_file(filename):
-                    continue
-                if not LOCALIZATION_FORMAT.is_locale_file(filename):
-                    continue
                 absolute_path = os.path.join(root, filename)
                 relative_path = os.path.relpath(absolute_path, input_folder_path)
+                if not is_discoverable_target_file(relative_path):
+                    continue
                 if is_archive_path(relative_path):
                     continue
                 discovered_files.append(relative_path)
@@ -1652,23 +1556,21 @@ def get_changed_translation_files(
                 continue
             # Extract the filename relative to input_folder
             rel_path = os.path.relpath(filepath, rel_input_folder)
+            rel_path = rel_path.replace('\\', '/')
             if is_archive_path(rel_path):
                 continue
             # Check if it's a translation file (has language suffix). Supports
             # hyphenated locale codes like zh-Hans, zh-Hant.
-            if LOCALIZATION_FORMAT.is_locale_file(os.path.basename(filepath)):
+            if is_discoverable_target_file(rel_path):
                 changed_translation_files.add(rel_path)
-            else:
-                changed_source_files.add(rel_path.replace('\\', '/'))
+            elif is_source_localization_file(rel_path):
+                changed_source_files.add(rel_path)
 
         # Resilience to delayed Transifex propagation:
         # if source files changed, also enqueue all related locale files even if unchanged in git status.
         if changed_source_files:
             for translation_rel_path in discover_translation_files():
-                rel_dir = os.path.dirname(translation_rel_path)
-                translation_filename = os.path.basename(translation_rel_path)
-                source_filename = get_source_filename(translation_filename, list(LANGUAGE_CODES.keys()))
-                source_rel_path = os.path.join(rel_dir, source_filename) if rel_dir else source_filename
+                source_rel_path = get_source_filename(translation_rel_path, list(LANGUAGE_CODES.keys()))
                 if source_rel_path.replace('\\', '/') in changed_source_files:
                     changed_translation_files.add(translation_rel_path)
 
@@ -1723,7 +1625,7 @@ async def process_translation_queue(
         validation_summary: Optional[Dict[str, Dict[str, object]]] = None
 ) -> Tuple[int, List[str], Dict[str, List[str]], int]:
     """
-    Process all .properties files in the translation queue folder.
+    Process all localization files in the translation queue folder.
 
     Args:
         translation_queue_folder (str): The folder containing files to translate.
@@ -1737,20 +1639,14 @@ async def process_translation_queue(
         - A dictionary of skipped files, mapping filename to a list of error strings.
         - Total number of keys translated across all files.
     """
-    if LOCALIZATION_FORMAT.id != JAVA_PROPERTIES_FORMAT.id:
-        raise NotImplementedError(
-            "Only localization_format=java_properties is supported by the current parser pipeline. "
-            "Add format-specific parser, serializer, linter, and placeholder hooks before processing "
-            f"{LOCALIZATION_FORMAT.id} files."
-        )
+    adapter = get_localization_adapter(LOCALIZATION_FORMAT)
 
-    properties_files = []
+    localization_files = []
     for root, _, files in os.walk(translation_queue_folder):
         for name in files:
-            if LOCALIZATION_FORMAT.is_supported_file(name):
-                # Get the relative path from the queue folder to preserve subdirectories
-                relative_path = os.path.relpath(os.path.join(root, name), translation_queue_folder)
-                properties_files.append(relative_path)
+            relative_path = os.path.relpath(os.path.join(root, name), translation_queue_folder)
+            if is_target_localization_file(relative_path):
+                localization_files.append(relative_path)
 
     # Load the glossary from the JSON file
     glossary = load_glossary(glossary_file_path)
@@ -1770,7 +1666,7 @@ async def process_translation_queue(
     total_keys_translated = 0
     skipped_files: Dict[str, List[str]] = {}
 
-    for translation_file in properties_files:
+    for translation_file in localization_files:
         # Extract the language code from the filename
         language_code = extract_language_from_filename(translation_file, list(LANGUAGE_CODES.keys()))
         if not language_code:
@@ -1784,7 +1680,6 @@ async def process_translation_queue(
 
         # Define full paths
         translation_file_path = os.path.join(translation_queue_folder, translation_file)
-        # Use get_source_filename() to correctly handle underscores in base filenames (e.g., mu_sig)
         source_file_name = get_source_filename(translation_file, list(LANGUAGE_CODES.keys()))
         source_file_path = os.path.join(INPUT_FOLDER, source_file_name)
 
@@ -1806,7 +1701,7 @@ async def process_translation_queue(
 
         # --- Pre-flight Linter Check ---
         # Before processing, lint the file to catch basic syntax errors.
-        lint_errors = lint_properties_file(translation_file_path)
+        lint_errors = adapter.lint_file(translation_file_path)
         if lint_errors:
             logger.error(f"Linter found errors in '{translation_file}'. Skipping translation for this file.")
             for error in lint_errors:
@@ -1816,8 +1711,8 @@ async def process_translation_queue(
         # --- End Linter Check ---
 
         # Load files
-        parsed_lines, target_translations = parse_properties_file(translation_file_path)
-        _, source_translations = parse_properties_file(source_file_path)
+        parsed_lines, target_translations = adapter.parse_file(translation_file_path)
+        _, source_translations = adapter.parse_file(source_file_path)
 
         # Extract texts to translate
         file_ledger_entries = key_ledger.get(translation_file, {})
@@ -1905,9 +1800,10 @@ async def process_translation_queue(
             translations,
             indices,
             keys_to_translate,
-            source_translations
+            source_translations,
+            LOCALIZATION_FORMAT,
         )
-        draft_content = reassemble_file(draft_lines)
+        draft_content = adapter.reassemble_file(draft_lines)
 
         # --- Holistic Review Step ---
         # Instead of one large review, we chunk the keys to avoid token limits.
@@ -1929,7 +1825,7 @@ async def process_translation_queue(
         ) as temp_f:
             temp_f.write(draft_content)
             temp_draft_path = temp_f.name
-        _, draft_translations = parse_properties_file(temp_draft_path)
+        _, draft_translations = adapter.parse_file(temp_draft_path)
         os.remove(temp_draft_path)
 
         final_corrected_translations = {}
@@ -1937,8 +1833,8 @@ async def process_translation_queue(
 
         review_results = await asyncio.gather(
             *[holistic_review_async(
-                source_content="\n".join([f"{key}={source_translations.get(key, '')}" for key in key_chunk]),
-                translated_content="\n".join([f"{key}={draft_translations.get(key, '')}" for key in key_chunk]),
+                source_content=adapter.build_review_content(source_translations, key_chunk),
+                translated_content=adapter.build_review_content(draft_translations, key_chunk),
                 target_language=target_language,
                 keys_to_review=key_chunk,
                 semaphore=semaphore,
@@ -1985,7 +1881,12 @@ async def process_translation_queue(
             if line['type'] == 'entry':
                 key = line.get('key')
                 if key in final_corrected_translations:
-                    new_value = final_corrected_translations[key]
+                    new_value = _escape_output_value(
+                        adapter,
+                        source_translations,
+                        key,
+                        final_corrected_translations[key],
+                    )
                     old_value = line['value']
                     if old_value != new_value:
                         review_changes += 1
@@ -2033,7 +1934,7 @@ async def process_translation_queue(
 
         # Reassemble the final file content with validated translations
         updated_lines = draft_lines
-        new_file_content = reassemble_file(updated_lines)
+        new_file_content = adapter.reassemble_file(updated_lines)
         # --- End Per-Key Validation ---
 
         translated_file_path = os.path.join(translated_queue_folder, translation_file)
@@ -2096,7 +1997,7 @@ def generate_translation_summary(
 
     Args:
         summary_path: Where to write the JSON file.
-        processed_files: List of translated filenames (e.g. ``bisq_easy_de.properties``).
+        processed_files: List of translated file paths (e.g. ``bisq_easy_de.properties``).
         new_keys_count: Total number of newly added translation keys.
         updated_keys_count: Total number of updated translation keys.
         supported_codes: Language codes for locale extraction. Defaults to
@@ -2110,16 +2011,15 @@ def generate_translation_summary(
     locales: set[str] = set()
 
     for filename in processed_files:
-        basename = os.path.basename(filename)
-        code = extract_language_from_filename(basename, sorted_codes)
+        code = extract_language_from_filename(filename, sorted_codes)
         if code:
             locales.add(code)
-            source_basename = os.path.basename(LOCALIZATION_FORMAT.source_filename(basename, sorted_codes))
+            source_basename = os.path.basename(get_source_filename(filename, sorted_codes))
             if source_basename.endswith(LOCALIZATION_FORMAT.file_extension):
                 module = source_basename[:-len(LOCALIZATION_FORMAT.file_extension)]
             else:
                 module = os.path.splitext(source_basename)[0]
-            if module and module != basename:
+            if module and module != os.path.basename(filename):
                 modules.add(module)
 
     sorted_modules = sorted(modules)

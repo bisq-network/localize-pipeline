@@ -1,7 +1,7 @@
 # Add AI translation to your project with GitHub Actions
 
 This repository ships a drop-in composite action. It translates your changed
-`.properties` files and opens a pull request — entirely inside your CI, using the
+Java `.properties` or JSON localization files and opens a pull request — entirely inside your CI, using the
 workflow's `GITHUB_TOKEN`. No account, no quota, no SSH deploy key.
 
 ## 1. Scaffold a config (once)
@@ -10,11 +10,20 @@ From a checkout of your repo:
 
 ```bash
 ./init.sh --input-folder path/to/your/i18n
+# or, for JSON locale files:
+./init.sh --input-folder path/to/your/i18n --localization-format json
+# or, for JSON files stored as locales/en/*.json and locales/de/*.json:
+./init.sh --input-folder path/to/your/i18n --localization-format json --localization-layout locale_directory
 # or, to translate locally with Ollama (zero data egress, no API key):
 ./init.sh --input-folder path/to/your/i18n --api-base-url http://localhost:11434/v1
 ```
 
 Commit the generated `config.yaml`.
+
+If your JSON files use native locale directories such as
+`locales/en/messages.json` and `locales/de/messages.json`, set
+`localization_layout.id: locale_directory` and
+`localization_layout.source_locale: en` in that config.
 
 ## 2. Add the workflow
 

@@ -41,7 +41,7 @@ def test_semantic_reviewer_prompt_is_json_only_and_context_rich():
     assert "source_value" in combined
     assert "old_target_value" in combined
     assert "new_target_value" in combined
-    assert '"file": "relative/path/to/file.properties"' in combined
+    assert '"file": "relative/path/to/locale-file"' in combined
     assert "Clear network address: {0}" in combined
     assert "Borrar dirección de red: {0}" in combined
     assert "Do not translate clear as delete" in combined

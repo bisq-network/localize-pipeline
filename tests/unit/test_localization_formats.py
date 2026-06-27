@@ -3,6 +3,7 @@
 import pytest
 
 from src.localization_formats import (
+    JSON_FORMAT,
     JAVA_PROPERTIES_FORMAT,
     LocalizationFormat,
     load_localization_format,
@@ -50,6 +51,7 @@ def test_custom_format_can_describe_future_locale_file_conventions():
 def test_load_localization_format_defaults_to_java_properties():
     assert load_localization_format(None) == JAVA_PROPERTIES_FORMAT
     assert load_localization_format("java_properties") == JAVA_PROPERTIES_FORMAT
+    assert load_localization_format("json") == JSON_FORMAT
 
 
 def test_load_localization_format_allows_overrides_for_future_formats():
@@ -71,22 +73,17 @@ def test_load_localization_format_rejects_unknown_registry_id():
         load_localization_format("android_xml")
 
 
-@pytest.mark.asyncio
-async def test_process_translation_queue_rejects_non_java_properties_format(monkeypatch, tmp_path):
-    from src import translate_localization_files as translation_pipeline
+def test_json_format_matches_common_locale_filename_conventions():
+    fmt = JSON_FORMAT
 
-    fmt = LocalizationFormat(
-        id="json_flat",
-        display_name="Flat JSON",
-        file_extension=".json",
-        code_fence="json",
-        locale_suffix_regex=r"_([a-z]{2})\.json$",
-    )
-    monkeypatch.setattr(translation_pipeline, "LOCALIZATION_FORMAT", fmt)
-
-    with pytest.raises(NotImplementedError, match="java_properties"):
-        await translation_pipeline.process_translation_queue(
-            str(tmp_path),
-            str(tmp_path / "translated"),
-            str(tmp_path / "glossary.json"),
-        )
+    assert fmt.id == "json"
+    assert fmt.file_extension == ".json"
+    assert fmt.code_fence == "json"
+    assert fmt.is_locale_file("messages_de.json")
+    assert fmt.is_locale_file("messages.de.json")
+    assert fmt.is_locale_file("messages-de.json")
+    assert fmt.extract_supported_locale_suffix("messages_pt_BR.json", ["pt_BR"]) == "pt_BR"
+    assert fmt.extract_supported_locale_suffix("messages.pt-BR.json", ["pt-BR"]) == "pt-BR"
+    assert fmt.extract_locale_suffix("messages.json") is None
+    assert fmt.source_filename("wallet_pt_BR.json", ["pt_BR", "pt"]) == "wallet.json"
+    assert fmt.source_filename("wallet.pt-BR.json", ["pt-BR", "pt"]) == "wallet.json"

@@ -1,11 +1,15 @@
 from pathlib import Path
+import json
 
+from src.localization_formats import JSON_FORMAT
+from src.localization_layouts import LocalizationLayout
 from src.semantic_quality import (
     SemanticRule,
     TranslationChange,
     analyze_all_translation_entries,
     evaluate_retained_source_words,
     evaluate_semantic_rules,
+    iter_translation_changes_from_diff,
     load_semantic_rules,
 )
 from src.translation_quality_gate import (
@@ -26,6 +30,11 @@ def _write_properties(path: Path, entries: dict[str, str]) -> None:
         "\n".join(f"{key}={value}" for key, value in entries.items()) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def test_declarative_semantic_rule_blocks_forbidden_target_text(tmp_path):
@@ -236,6 +245,65 @@ def test_full_semantic_audit_scans_entries_without_diff(tmp_path):
     assert stats.findings_count == 1
     assert stats.warnings_count == 1
     assert stats.examples[0]["file"] == "mobile_es.properties"
+
+
+def test_full_semantic_audit_scans_json_locale_directory_entries(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "locales"
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    _write_json(input_folder / "en" / "common.json", {"label": "Settlement Details"})
+    _write_json(input_folder / "es" / "common.json", {"label": "Detalles Settlement"})
+
+    stats = analyze_all_translation_entries(
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["es"],
+        brand_glossary=[],
+        semantic_rules=[],
+        localization_format=JSON_FORMAT,
+        localization_layout=layout,
+    )
+
+    assert stats.findings_count == 1
+    assert stats.examples[0]["file"] == "es/common.json"
+    assert stats.examples[0]["key"] == "/label"
+
+
+def test_changed_json_diff_yields_only_changed_leaf(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "locales"
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    _write_json(
+        input_folder / "en" / "common.json",
+        {
+            "title": "Open trades",
+            "steps": [{"label": "Review details"}],
+        },
+    )
+    _write_json(
+        input_folder / "de" / "common.json",
+        {
+            "title": "Open trades",
+            "steps": [{"label": "Review details"}],
+        },
+    )
+    diff_text = """diff --git a/locales/de/common.json b/locales/de/common.json
++++ b/locales/de/common.json
++  "title": "Open trades",
+"""
+
+    changes = list(iter_translation_changes_from_diff(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        localization_format=JSON_FORMAT,
+        localization_layout=layout,
+    ))
+
+    assert [(change.key, change.new_value) for change in changes] == [
+        ("/title", "Open trades"),
+    ]
 
 
 def test_feedback_rules_load_review_source_metadata():

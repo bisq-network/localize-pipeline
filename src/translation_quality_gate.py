@@ -13,19 +13,18 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
-from src.properties_parser import parse_properties_file
+from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat, load_localization_format
+from src.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout, load_localization_layout
 from src.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
     SemanticRule,
     analyze_all_translation_entries,
     analyze_translation_changes,
-    iter_added_properties_entries as _iter_added_properties_entries,
     iter_translation_changes_from_diff,
     load_semantic_rules,
     normalize_value,
     normalize_retained_source_word_allowlist,
-    source_filename_for_locale_file,
 )
 from src.translation_validator import find_disallowed_control_characters
 
@@ -104,53 +103,46 @@ def analyze_source_identical_changes(
     locale_codes: Sequence[str],
     brand_glossary: Iterable[str],
     examples_limit: int = 10,
+    localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
+    localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
-    repo_root_path = Path(repo_root)
-    input_folder_path = Path(input_folder)
-    source_cache: Dict[Path, Dict[str, str]] = {}
     stats = SourceIdenticalStats()
 
-    for changed_file, key, target_value in _iter_added_properties_entries(diff_text):
-        changed_path = repo_root_path / changed_file
-        source_name = source_filename_for_locale_file(changed_path.name, locale_codes)
-        if not source_name:
-            continue
-
-        source_path = changed_path.with_name(source_name)
-        if not source_path.exists():
-            continue
-
-        if source_path not in source_cache:
-            _, source_translations = parse_properties_file(str(source_path))
-            source_cache[source_path] = source_translations
-        else:
-            source_translations = source_cache[source_path]
-
-        if key not in source_translations:
+    changes = iter_translation_changes_from_diff(
+        diff_text=diff_text,
+        repo_root=repo_root,
+        input_folder=input_folder,
+        locale_codes=locale_codes,
+        localization_format=localization_format,
+        localization_layout=localization_layout,
+        hydrate_source=True,
+    )
+    for change in changes:
+        if change.source_value is None:
             continue
 
         stats.changed_entries_count += 1
 
-        control_findings = find_disallowed_control_characters(target_value)
+        control_findings = find_disallowed_control_characters(change.new_value)
         if control_findings:
             stats.control_character_findings_count += len(control_findings)
             if len(stats.control_character_examples) < examples_limit:
                 stats.control_character_examples.append(
                     {
-                        "file": _relpath(str(changed_path), str(input_folder_path)),
-                        "key": key,
+                        "file": change.file,
+                        "key": change.key,
                         "findings": ", ".join(control_findings[:3]),
                     }
                 )
 
-        source_value = source_translations[key]
-        if normalize_value(source_value) != normalize_value(target_value):
+        source_value = change.source_value
+        if normalize_value(source_value) != normalize_value(change.new_value):
             stats.checked_entries_count += 1
             continue
 
         stats.source_identical_count += 1
-        if is_expected_source_identical(key, source_value, brand_glossary):
+        if is_expected_source_identical(change.key, source_value, brand_glossary):
             stats.expected_source_identical_count += 1
             continue
 
@@ -159,9 +151,9 @@ def analyze_source_identical_changes(
         if len(stats.examples) < examples_limit:
             stats.examples.append(
                 {
-                    "file": _relpath(str(changed_path), str(input_folder_path)),
-                    "key": key,
-                    "value": target_value,
+                    "file": change.file,
+                    "key": change.key,
+                    "value": change.new_value,
                 }
             )
 
@@ -181,6 +173,8 @@ def analyze_semantic_qa_changes(
     semantic_rules: Sequence[SemanticRule] = (),
     retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     examples_limit: int = 10,
+    localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
+    localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
 ) -> SemanticQAStats:
     """Scan changed translations for configured semantic regressions."""
     changes = list(
@@ -189,6 +183,8 @@ def analyze_semantic_qa_changes(
             repo_root=repo_root,
             input_folder=input_folder,
             locale_codes=locale_codes,
+            localization_format=localization_format,
+            localization_layout=localization_layout,
         )
     )
     return analyze_translation_changes(
@@ -238,6 +234,22 @@ def load_quality_gate_config(
         brand_glossary,
         load_semantic_rules(raw_config.get("semantic_quality_rules", [])),
     )
+
+
+def load_quality_gate_localization_metadata(
+    config_path: str,
+) -> Tuple[LocalizationFormat, LocalizationLayout]:
+    """Load localization format/layout metadata used by quality gates."""
+    with open(config_path, "r", encoding="utf-8") as file:
+        raw_config = yaml.safe_load(file) or {}
+
+    localization_format = load_localization_format(raw_config.get("localization_format"))
+    localization_layout = load_localization_layout(
+        raw_config.get("localization_layout"),
+        source_locale=str(raw_config.get("source_locale") or "en"),
+    )
+
+    return localization_format, localization_layout
 
 
 def load_validation_summary(path: str) -> Dict[str, Any]:
@@ -555,6 +567,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(args.config)
+    localization_format, localization_layout = load_quality_gate_localization_metadata(args.config)
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
     source_stats = analyze_source_identical_changes(
         diff_text=diff_text,
@@ -562,6 +575,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         input_folder=args.input_folder,
         locale_codes=locale_codes,
         brand_glossary=brand_glossary,
+        localization_format=localization_format,
+        localization_layout=localization_layout,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
@@ -572,6 +587,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             brand_glossary=brand_glossary,
             semantic_rules=semantic_rules,
             retained_source_word_allowlist=config.retained_source_word_allowlist,
+            localization_format=localization_format,
+            localization_layout=localization_layout,
         )
     else:
         semantic_stats = analyze_semantic_qa_changes(
@@ -582,6 +599,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             brand_glossary=brand_glossary,
             semantic_rules=semantic_rules,
             retained_source_word_allowlist=config.retained_source_word_allowlist,
+            localization_format=localization_format,
+            localization_layout=localization_layout,
         )
     report = build_quality_gate_report(
         source_stats=source_stats,

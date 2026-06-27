@@ -125,6 +125,15 @@ key2=No placeholders here"""
         assert protected == content
         assert len(placeholder_map) == 0
 
+    def test_json_object_syntax_is_not_treated_as_placeholder(self):
+        """JSON review snippets should keep structural braces visible."""
+        content = json.dumps({"/hello": "Hello"})
+
+        protected, placeholder_map = protect_placeholders_in_properties(content)
+
+        assert protected == content
+        assert placeholder_map == {}
+
     def test_unique_protection_tokens(self):
         """Each placeholder should get a unique protection token."""
         content = "key1={0} and {0}"  # Same placeholder repeated

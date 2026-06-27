@@ -1,6 +1,6 @@
-name: "AI .properties translation"
+name: "AI localization translation"
 description: >-
-  Translate changed Java .properties files with OpenAI (or a local Ollama / any
+  Translate changed Java .properties or JSON localization files with OpenAI (or a local Ollama / any
   OpenAI-compatible endpoint) and open a pull request. Runs entirely in your CI
   using the workflow's GITHUB_TOKEN — no account, no quota, no baked SSH key.
 
@@ -124,5 +124,5 @@ runs:
           echo "Pull request already exists for $branch; it now points at the latest push."
         else
           gh pr create --head "$branch" --title "$PR_TITLE" \
-            --body "Automated translation update. Review the changed .properties files before merging."
+            --body "Automated translation update. Review the changed localization files before merging."
         fi

@@ -6,10 +6,13 @@ external dependencies and file system operations, and also includes unit-like te
 for specific helper functions within the script.
 """
 import os
+import json
 from unittest.mock import AsyncMock, patch, MagicMock
 from types import SimpleNamespace
 import pytest
 import src.translate_localization_files
+from src.localization_formats import JSON_FORMAT
+from src.localization_layouts import LocalizationLayout
 
 # All fixtures are now defined in conftest.py and are auto-discovered by pytest.
 
@@ -106,3 +109,122 @@ async def test_handles_already_escaped_quotes_correctly(integration_test_environ
         expected_content = "key.name=URL ist ''{0}''"
         assert final_content == expected_content
         assert "''''" not in final_content
+
+
+@pytest.mark.asyncio
+async def test_process_translation_queue_translates_json_locale_file(integration_test_environment):
+    env = integration_test_environment
+    source_content = {
+        "hello": "Hello",
+        "nested": {
+            "title": "Title {0}",
+        },
+        "count": 3,
+    }
+    target_content = {
+        "hello": "Hallo",
+    }
+    source_file_path = os.path.join(env['input_folder'], 'app.json')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.json')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        json.dump(source_content, f, ensure_ascii=False, indent=2)
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        json.dump(target_content, f, ensure_ascii=False, indent=2)
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=[
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Titel {0}"))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps({"/nested/title": "Titel {0}"})
+        ))]),
+    ])
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('src.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('src.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('src.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('src.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('src.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await src.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved']
+        )
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'app_de.json')
+    assert os.path.exists(output_file_path)
+    with open(output_file_path, 'r', encoding='utf-8') as f:
+        final_payload = json.load(f)
+
+    assert final_payload == {
+        "hello": "Hallo",
+        "nested": {
+            "title": "Titel {0}",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_translation_queue_translates_json_locale_directory_layout(integration_test_environment):
+    env = integration_test_environment
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    source_content = {
+        "hello": "Hello",
+        "steps": [
+            {"title": "Review details"},
+        ],
+    }
+    target_content = {
+        "hello": "Hallo",
+    }
+    source_file_path = os.path.join(env['input_folder'], 'en', 'app.json')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'de', 'app.json')
+    os.makedirs(os.path.dirname(source_file_path), exist_ok=True)
+    os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        json.dump(source_content, f, ensure_ascii=False, indent=2)
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        json.dump(target_content, f, ensure_ascii=False, indent=2)
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=[
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Details prüfen"))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps({"/steps/0/title": "Details prüfen"})
+        ))]),
+    ])
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('src.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('src.translate_localization_files.LOCALIZATION_LAYOUT', layout), \
+         patch('src.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('src.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('src.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('src.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await src.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved']
+        )
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'de', 'app.json')
+    assert os.path.exists(output_file_path)
+    with open(output_file_path, 'r', encoding='utf-8') as f:
+        final_payload = json.load(f)
+
+    assert final_payload == {
+        "hello": "Hallo",
+        "steps": [
+            {"title": "Details prüfen"},
+        ],
+    }

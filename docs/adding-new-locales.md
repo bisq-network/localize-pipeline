@@ -221,14 +221,19 @@ Style rules present: True
 
 #### 5.1. Create Test Files
 
-For a complete end-to-end test, you can create sample `.properties` files:
+For a complete end-to-end test, create a sample locale file that matches your
+configured `localization_format` and `localization_layout`:
 
 ```bash
 # In the target project's i18n folder
 cd /path/to/bisq2/i18n/src/main/resources
 
-# Create a test file with your new locale code
+# Suffix layout with Java .properties
 echo "test.key=Test value" > test_th.properties
+
+# Locale-directory layout with JSON
+mkdir -p th
+printf '{ "test.key": "Test value" }\n' > th/messages.json
 ```
 
 #### 5.2. Run Translation (Dry Run)
@@ -321,8 +326,13 @@ style_rules:
 #### Issue: Locale not detected
 **Symptoms:** Translation pipeline doesn't recognize new locale files
 **Solution:**
-- Verify locale code format matches regex: `_[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?\.properties$`
-- Check that files are named correctly (e.g., `default_th.properties`)
+- Verify `localization_layout` matches your repository convention.
+- For `suffix`, check that files are named correctly (e.g., `default_th.properties`,
+  `default_th.json`, or `default.th.json`).
+- For `locale_directory`, check that the locale is a path segment
+  (e.g., `locales/th/messages.json`).
+- For `locale_filename`, check that the locale is the filename stem
+  (e.g., `locales/th.json`).
 - Ensure the locale is in the `supported_locales` list
 
 #### Issue: Style rules not applied
@@ -343,19 +353,40 @@ If you encounter issues:
 4. Consult the project's main README.md for general troubleshooting
 5. Check the `docs/` directory for additional documentation
 
-## Supported Locale Formats
+## Supported Locale Layouts
 
-The system recognizes the following locale code patterns in filenames:
+The default `suffix` layout recognizes the following locale code patterns in
+filenames:
 
 | Pattern | Example | Description |
 |---------|---------|-------------|
-| `_xx` | `_de.properties` | Simple 2-letter code |
-| `_xxx` | `_pcm.properties` | 3-letter code (rare) |
-| `_xx_YY` | `_pt_BR.properties` | Language + region (uppercase) |
-| `_xx-Yyyy` | `_zh-Hans.properties` | Language + script/region (mixed case) |
-| `_xx_Yyyy` | `_af_ZA.properties` | Alternative underscore format |
+| `_xx` | `_de.properties`, `_de.json` | Simple 2-letter code |
+| `_xxx` | `_pcm.properties`, `_pcm.json` | 3-letter code (rare) |
+| `_xx_YY` | `_pt_BR.properties`, `_pt_BR.json` | Language + region (uppercase) |
+| `_xx-Yyyy` | `_zh-Hans.properties`, `_zh-Hans.json` | Language + script/region (mixed case) |
+| `_xx_Yyyy` | `_af_ZA.properties`, `_af_ZA.json` | Alternative underscore format |
 
-**Regex pattern:** `_[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?\.properties$`
+For JSON projects that use native directory conventions, set:
+
+```yaml
+localization_format: "json"
+localization_layout:
+  id: "locale_directory"
+  source_locale: "en"
+```
+
+This maps `locales/de/messages.json` back to `locales/en/messages.json`.
+
+For JSON projects that use locale filenames, set:
+
+```yaml
+localization_format: "json"
+localization_layout:
+  id: "locale_filename"
+  source_locale: "en"
+```
+
+This maps `locales/de.json` back to `locales/en.json`.
 
 ## Best Practices
 
@@ -374,7 +405,7 @@ The system recognizes the following locale code patterns in filenames:
 
 ### Testing
 - Always run the full test suite before committing
-- Test with actual `.properties` files when possible
+- Test with actual localization files for the configured format/layout when possible
 - Verify both detection and translation of new locale files
 - Check that glossary terms are correctly substituted in translations
 
@@ -401,7 +432,7 @@ Use this checklist when adding a new locale:
   - [ ] Unit tests passed (45/45)
   - [ ] Integration verification completed
 - [ ] Tested translation pipeline:
-  - [ ] Created test `.properties` files
+  - [ ] Created test localization files
   - [ ] Ran dry-run translation
   - [ ] Verified locale detection
   - [ ] Checked glossary application

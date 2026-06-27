@@ -1,11 +1,17 @@
 from pathlib import Path
+import json
 
+import pytest
+
+from src.localization_formats import JSON_FORMAT
+from src.localization_layouts import LocalizationLayout
 from src.translation_quality_gate import (
     QualityGateConfig,
     analyze_semantic_qa_changes,
     analyze_source_identical_changes,
     build_quality_gate_report,
     load_quality_gate_config,
+    load_quality_gate_localization_metadata,
     load_validation_summary,
     render_quality_gate_markdown,
 )
@@ -19,6 +25,11 @@ def _write_properties(path: Path, entries: dict[str, str]) -> None:
         "\n".join(f"{key}={value}" for key, value in entries.items()) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def test_source_identical_gate_ignores_glossary_tokens_and_enum_keys(tmp_path):
@@ -57,6 +68,65 @@ def test_source_identical_gate_ignores_glossary_tokens_and_enum_keys(tmp_path):
     assert stats.expected_source_identical_count == 2
     assert stats.unexpected_source_identical_count == 2
     assert stats.unexpected_source_identical_ratio == 2 / 3
+
+
+def test_source_identical_gate_supports_json_locale_directory_layout(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "locales"
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    _write_json(
+        input_folder / "en" / "common.json",
+        {
+            "title": "Open trades",
+            "nested": {"cta": "Continue"},
+            "steps": [{"label": "Review details"}],
+        },
+    )
+    _write_json(
+        input_folder / "de" / "common.json",
+        {
+            "title": "Open trades",
+            "nested": {"cta": "Weiter"},
+            "steps": [{"label": "Review details"}],
+        },
+    )
+    diff_text = """diff --git a/locales/de/common.json b/locales/de/common.json
++++ b/locales/de/common.json
++  "title": "Open trades",
+"""
+
+    stats = analyze_source_identical_changes(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        localization_format=JSON_FORMAT,
+        localization_layout=layout,
+    )
+
+    assert stats.changed_entries_count == 1
+    assert stats.source_identical_count == 1
+    assert stats.unexpected_source_identical_count == 1
+    assert stats.examples == [
+        {"file": "de/common.json", "key": "/title", "value": "Open trades"},
+    ]
+
+
+def test_quality_gate_localization_metadata_rejects_invalid_format(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("localization_format: unknown\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported localization_format"):
+        load_quality_gate_localization_metadata(str(config_path))
+
+
+def test_quality_gate_localization_metadata_rejects_invalid_layout(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("localization_layout: unknown\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported localization_layout"):
+        load_quality_gate_localization_metadata(str(config_path))
 
 
 def test_quality_gate_blocks_many_unexpected_source_identical_changes(tmp_path):

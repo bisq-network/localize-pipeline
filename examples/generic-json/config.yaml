@@ -1,0 +1,19 @@
+# Generic JSON example profile.
+
+target_project_root: "/path/to/your/git/repo"
+input_folder: "examples/generic-json/resources"
+localization_format: "json"
+localization_layout:
+  id: "suffix"
+  source_locale: "en"
+translation_source: "git"
+model_provider: "aisuite"
+model_name: "gpt-4o-mini"
+review_model_name: "gpt-4o"
+glossary_file_path: "examples/generic-json/glossary.json"
+brand_technical_glossary:
+  - Bitcoin
+dry_run: false
+supported_locales:
+  - code: "de"
+    name: "German"

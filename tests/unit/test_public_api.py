@@ -35,8 +35,24 @@ def test_provider_public_api_exports_default_backends():
 
 
 def test_format_public_api_exports_localization_format_metadata():
-    from src.formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat, load_localization_format
+    from src.formats import (
+        JSON_FORMAT,
+        JAVA_PROPERTIES_FORMAT,
+        LOCALE_DIRECTORY_LAYOUT,
+        SUFFIX_LAYOUT,
+        LocalizationFormat,
+        LocalizationLayout,
+        get_localization_adapter,
+        load_localization_format,
+        load_localization_layout,
+    )
 
     assert JAVA_PROPERTIES_FORMAT.id == "java_properties"
+    assert JSON_FORMAT.id == "json"
+    assert SUFFIX_LAYOUT.id == "suffix"
+    assert LOCALE_DIRECTORY_LAYOUT.id == "locale_directory"
     assert LocalizationFormat.__name__ == "LocalizationFormat"
+    assert LocalizationLayout.__name__ == "LocalizationLayout"
     assert load_localization_format("java_properties") == JAVA_PROPERTIES_FORMAT
+    assert load_localization_layout("suffix") == SUFFIX_LAYOUT
+    assert get_localization_adapter(JSON_FORMAT).localization_format == JSON_FORMAT

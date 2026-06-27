@@ -25,7 +25,7 @@ from src.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
 )
-from src.translation_quality_gate import get_staged_diff
+from src.translation_quality_gate import get_staged_diff, load_quality_gate_localization_metadata
 
 
 SEMANTIC_REVIEW_SCHEMA = {
@@ -82,7 +82,7 @@ def build_semantic_review_messages(
         "response_schema": {
             "findings": [
                 {
-                    "file": "relative/path/to/file.properties",
+                    "file": "relative/path/to/locale-file",
                     "key": "changed.key.only",
                     "severity": "error|warning",
                     "reason": "Short reviewer rationale.",
@@ -217,12 +217,15 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         if isinstance(locale, dict) and locale.get("code")
     }
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
+    localization_format, localization_layout = load_quality_gate_localization_metadata(args.config)
     changes = list(
         iter_translation_changes_from_diff(
             diff_text=diff_text,
             repo_root=args.repo_root,
             input_folder=args.input_folder,
             locale_codes=locales,
+            localization_format=localization_format,
+            localization_layout=localization_layout,
         )
     )
     if not changes:

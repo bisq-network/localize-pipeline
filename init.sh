@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Docker-free quickstart: scaffold a minimal config.yaml by auto-detecting the
-# target locales from your *.properties files.
+# Docker-free quickstart: scaffold a minimal config.yaml by auto-detecting
+# target locales from your localization files.
 #
 # Usage:
-#   ./init.sh --input-folder path/to/i18n [--target-project-root .] [--overwrite]
+#   ./init.sh --input-folder path/to/i18n [--localization-format java_properties|json] [--localization-layout suffix|locale_directory|locale_filename] [--target-project-root .] [--overwrite]
 #   ./init.sh --input-folder path/to/i18n --api-base-url http://localhost:11434/v1   # Ollama
 #
 # All arguments are forwarded to `python -m src.init_config`.

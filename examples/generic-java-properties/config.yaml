@@ -2,6 +2,9 @@
 target_project_root: "."
 input_folder: "resources"
 localization_format: "java_properties"
+localization_layout:
+  id: "suffix"
+  source_locale: "en"
 project_context: "Translate concise UI text for a software product."
 translation_source: "git"
 

@@ -1,9 +1,9 @@
 """Docker-free quickstart: scaffold a minimal config.yaml for a new project.
 
-Auto-detects target locales from existing ``*_<locale>.properties`` files and
-writes a small, generic config that defaults to the git translation source and
-OpenAI gpt-4o-mini/gpt-4o. The goal is a 5-minute first run without editing a
-400-line example by hand.
+Auto-detects target locales from existing localization files and writes a small,
+generic config that defaults to the git translation source and OpenAI
+gpt-4o-mini/gpt-4o. The goal is a 5-minute first run without editing a 400-line
+example by hand.
 
 Usage::
 
@@ -14,12 +14,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from typing import Dict, List, Optional
 
 import yaml
 
-from src.locale_utils import extract_locale_suffix
+from src.localization_formats import (
+    JAVA_PROPERTIES_FORMAT,
+    LocalizationFormat,
+    load_localization_format,
+)
+from src.localization_layouts import (
+    SUFFIX_LAYOUT,
+    LocalizationLayout,
+    load_localization_layout,
+)
 
 # Human-readable names for common locale codes; unknown codes fall back to the code.
 _LOCALE_NAMES: Dict[str, str] = {
@@ -47,22 +57,73 @@ def code_to_name(code: str) -> str:
     return _LOCALE_NAMES.get(code, code)
 
 
-def detect_locales(input_folder: str, source_locale: str = "en") -> List[Dict[str, str]]:
-    """Detect target locales from ``*_<locale>.properties`` files in ``input_folder``.
+def _resolve_localization_format(raw_value: object) -> LocalizationFormat:
+    if isinstance(raw_value, LocalizationFormat):
+        return raw_value
+    try:
+        return load_localization_format(raw_value)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _resolve_localization_layout(raw_value: object, source_locale: str = "en") -> LocalizationLayout:
+    if isinstance(raw_value, LocalizationLayout):
+        return raw_value
+    try:
+        return load_localization_layout(raw_value, source_locale=source_locale)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def detect_locales(
+    input_folder: str,
+    source_locale: str = "en",
+    localization_format: object = JAVA_PROPERTIES_FORMAT.id,
+    localization_layout: object = SUFFIX_LAYOUT.id,
+) -> List[Dict[str, str]]:
+    """Detect target locales from localization files in ``input_folder``.
 
     Returns a sorted, de-duplicated list of ``{"code", "name"}`` dicts, excluding
     the source locale. Returns an empty list if the folder does not exist.
     """
+    fmt = _resolve_localization_format(localization_format)
+    layout = _resolve_localization_layout(localization_layout, source_locale)
     if not os.path.isdir(input_folder):
         return []
     codes = set()
-    # Walk recursively, matching how the pipeline discovers .properties files.
-    for _root, _dirs, files in os.walk(input_folder):
+    # Walk recursively, matching how the pipeline discovers localization files.
+    for root, _dirs, files in os.walk(input_folder):
         for entry in files:
-            code = extract_locale_suffix(entry)
+            if not fmt.is_supported_file(entry):
+                continue
+            rel_path = os.path.relpath(os.path.join(root, entry), input_folder)
+            code = layout.extract_locale(rel_path, _candidate_locale_codes(rel_path, fmt), fmt)
             if code and code != source_locale:
                 codes.add(code)
     return [{"code": code, "name": code_to_name(code)} for code in sorted(codes)]
+
+
+_LOCALE_CODE_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+
+
+def _candidate_locale_codes(relative_path: str, localization_format: LocalizationFormat) -> List[str]:
+    """Return broad locale candidates for autodetection before config exists."""
+    candidates: set[str] = set()
+    basename = os.path.basename(relative_path)
+    suffix_code = localization_format.extract_locale_suffix(basename)
+    if suffix_code:
+        candidates.add(suffix_code)
+    stem, _extension = os.path.splitext(basename)
+    if _looks_like_locale_code(stem):
+        candidates.add(stem)
+    for segment in relative_path.replace("\\", "/").split("/")[:-1]:
+        if _looks_like_locale_code(segment):
+            candidates.add(segment)
+    return sorted(candidates, key=len, reverse=True)
+
+
+def _looks_like_locale_code(value: str) -> bool:
+    return bool(value) and bool(_LOCALE_CODE_RE.fullmatch(value))
 
 
 def build_config(
@@ -73,12 +134,21 @@ def build_config(
     model_name: str = "gpt-4o-mini",
     review_model_name: str = "gpt-4o",
     api_base_url: Optional[str] = None,
+    localization_format: object = JAVA_PROPERTIES_FORMAT.id,
+    localization_layout: object = SUFFIX_LAYOUT.id,
+    source_locale: str = "en",
 ) -> Dict[str, object]:
     """Build a minimal configuration dict for a new project (git source by default)."""
+    fmt = _resolve_localization_format(localization_format)
+    layout = _resolve_localization_layout(localization_layout, source_locale)
     config: Dict[str, object] = {
         "target_project_root": target_project_root,
         "input_folder": input_folder,
-        "localization_format": "java_properties",
+        "localization_format": fmt.id,
+        "localization_layout": {
+            "id": layout.id,
+            "source_locale": layout.source_locale,
+        },
         "translation_source": "git",
         "model_name": model_name,
         "review_model_name": review_model_name,
@@ -112,10 +182,14 @@ def write_config(path: str, content: str, overwrite: bool = False) -> None:
 def _parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m src.init_config",
-        description="Scaffold a minimal config.yaml by detecting locales from .properties files.",
+        description="Scaffold a minimal config.yaml by detecting locales from localization files.",
     )
     parser.add_argument("--input-folder", required=True,
-                        help="Folder containing your *.properties files.")
+                        help="Folder containing your localization files.")
+    parser.add_argument("--localization-format", default=JAVA_PROPERTIES_FORMAT.id,
+                        help="Built-in localization format id (java_properties or json).")
+    parser.add_argument("--localization-layout", default=SUFFIX_LAYOUT.id,
+                        help="Built-in localization layout id (suffix, locale_directory, or locale_filename).")
     parser.add_argument("--target-project-root", default=".",
                         help="Path to the git repository root (default: current directory).")
     parser.add_argument("--source-locale", default="en",
@@ -131,7 +205,19 @@ def _parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv)
-    locales = detect_locales(args.input_folder, source_locale=args.source_locale)
+    try:
+        localization_format = _resolve_localization_format(args.localization_format)
+        localization_layout = _resolve_localization_layout(args.localization_layout, args.source_locale)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    locales = detect_locales(
+        args.input_folder,
+        source_locale=args.source_locale,
+        localization_format=localization_format,
+        localization_layout=localization_layout,
+    )
     if not locales:
         print(
             f"Warning: no target locales detected in '{args.input_folder}'. "
@@ -143,6 +229,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         input_folder=args.input_folder,
         locales=locales,
         api_base_url=args.api_base_url,
+        localization_format=localization_format,
+        localization_layout=localization_layout,
+        source_locale=args.source_locale,
     )
     try:
         write_config(args.output, render_config(config), overwrite=args.overwrite)

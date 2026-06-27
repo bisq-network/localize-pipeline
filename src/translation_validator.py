@@ -1,7 +1,7 @@
 from typing import Dict, Set, Tuple, List
 import re
-from collections import Counter
 from src.properties_parser import parse_properties_file, reassemble_file
+from src.placeholder_rules import extract_placeholder_tokens
 
 _ALLOWED_CONTROL_CODEPOINTS = {0x09, 0x0A, 0x0D}
 _UNICODE_ESCAPE_PATTERN = re.compile(r'\\u([0-9a-fA-F]{4})')
@@ -68,13 +68,7 @@ def check_placeholder_parity(base_string: str, target_string: str) -> bool:
     Returns:
         True if the set of placeholders in both strings is identical, False otherwise.
     """
-    # Regex to find placeholders like {0}, {1}, {name}, etc.
-    placeholder_regex = re.compile(r'\{([^{}]+)\}')
-
-    base_placeholders = Counter(placeholder_regex.findall(base_string))
-    target_placeholders = Counter(placeholder_regex.findall(target_string))
-
-    return base_placeholders == target_placeholders
+    return extract_placeholder_tokens(base_string) == extract_placeholder_tokens(target_string)
 
 def _find_insertion_index_for_missing_key(
         key: str,
