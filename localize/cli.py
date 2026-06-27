@@ -74,6 +74,9 @@ def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> i
         print(f"error: could not read configuration: {exc}", file=sys.stderr)
         return 1
 
+    review_model_override = os.environ.get("REVIEW_MODEL_NAME")
+    if review_model_override:
+        config = {**config, "review_model_name": review_model_override}
     issues = validate_config(
         config,
         effective_api_base_url=_effective_api_base_url(config),

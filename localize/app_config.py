@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import yaml
 from dotenv import load_dotenv
@@ -209,10 +209,11 @@ def validate_config(
     model_provider_name = normalize_model_provider_name(
         str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     )
-    aisuite_config = config.get("aisuite", {}) or {}
-    aisuite_provider_configs = (
-        aisuite_config.get("provider_configs", {}) if isinstance(aisuite_config, dict) else {}
-    ) or {}
+    try:
+        aisuite_provider_configs = _extract_aisuite_provider_configs(config)
+    except ModelProviderConfigurationError as exc:
+        issues.append(ConfigIssue("error", str(exc)))
+        aisuite_provider_configs = {}
     try:
         needs_openai_credentials = requires_openai_credentials(
             provider_name=model_provider_name,
@@ -242,6 +243,20 @@ def _log_config_issues(issues: List[ConfigIssue], logger: logging.Logger) -> Non
             logger.error("Configuration problem: %s", issue.message)
         else:
             logger.warning("Configuration note: %s", issue.message)
+
+
+def _extract_aisuite_provider_configs(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return validated AISuite provider configs from raw config."""
+    aisuite_config = config.get('aisuite', {}) or {}
+    if not isinstance(aisuite_config, Mapping):
+        raise ModelProviderConfigurationError("'aisuite' must be a mapping when configured.")
+
+    provider_configs = aisuite_config.get('provider_configs', {}) or {}
+    if not isinstance(provider_configs, Mapping):
+        raise ModelProviderConfigurationError(
+            "'aisuite.provider_configs' must be a mapping when configured."
+        )
+    return dict(provider_configs)
 
 
 def _compute_project_root() -> str:
@@ -504,8 +519,11 @@ def load_app_config() -> AppConfig:
     model_provider_name = normalize_model_provider_name(
         str(config.get('model_provider', DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     )
-    aisuite_config = config.get('aisuite', {}) or {}
-    aisuite_provider_configs = aisuite_config.get('provider_configs', {}) or {}
+    try:
+        aisuite_provider_configs = _extract_aisuite_provider_configs(config)
+    except ModelProviderConfigurationError as exc:
+        logger.critical("CRITICAL: %s", exc)
+        sys.exit(1)
     retranslate_identical_source_strings = bool(config.get('retranslate_identical_source_strings', False))
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(

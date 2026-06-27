@@ -86,6 +86,7 @@ runs:
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         OPENAI_BASE_URL: ${{ inputs.api-base-url }}
+        REVIEW_MODEL_NAME: ${{ inputs.review-model }}
         LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
       run: |
         set -euo pipefail

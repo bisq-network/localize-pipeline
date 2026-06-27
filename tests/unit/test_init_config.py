@@ -103,6 +103,48 @@ class TestDetectProjectLayout:
             ("json", "locale_directory"),
         ]
 
+    def test_detects_source_only_suffix_project(self, tmp_path):
+        resources = tmp_path / "resources"
+        resources.mkdir()
+        _make_props(str(resources), ["messages.properties"])
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "resources"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("java_properties", "suffix"),
+        ]
+        assert detected.locales == []
+
+    def test_detects_source_only_json_locale_directory_project(self, tmp_path):
+        source = tmp_path / "locales" / "en" / "common.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "locales"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("json", "locale_directory"),
+        ]
+        assert detected.locales == []
+
+    def test_detects_source_only_json_locale_filename_project(self, tmp_path):
+        i18n = tmp_path / "locales"
+        i18n.mkdir()
+        (i18n / "en.json").write_text('{"hello":"Hello"}\n', encoding="utf-8")
+
+        detected = detect_project_layout(str(tmp_path), source_locale="en")
+
+        assert detected is not None
+        assert detected.input_folder == "locales"
+        assert [(fmt.id, layout.id) for fmt, layout in detected.localization_profiles] == [
+            ("json", "locale_filename"),
+        ]
+        assert detected.locales == []
+
     def test_deduplicates_locale_across_multiple_base_files(self, tmp_path):
         _make_props(str(tmp_path), [
             "a_de.properties", "b_de.properties", "a_en.properties",
@@ -386,6 +428,28 @@ class TestMainErrorHandling:
         assert config["localization_format"] == "java_properties"
         assert config["localization_layout"] == {"id": "suffix", "source_locale": "en"}
         assert config["supported_locales"] == [{"code": "de", "name": "German"}]
+
+    def test_main_autodetects_source_only_input_folder_with_empty_locales(self, tmp_path, capsys):
+        import localize.init_config as init_config
+
+        i18n = tmp_path / "resources"
+        i18n.mkdir()
+        _make_props(str(i18n), ["messages.properties"])
+        output = tmp_path / "config.yaml"
+
+        rc = init_config.main([
+            "--target-project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ])
+
+        config = yaml.safe_load(output.read_text(encoding="utf-8"))
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert config["input_folder"] == "resources"
+        assert config["supported_locales"] == []
+        assert "Warning: no target locales detected" in captured.err
 
     def test_main_respects_explicit_format_when_input_folder_is_autodetected(self, tmp_path):
         import localize.init_config as init_config

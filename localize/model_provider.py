@@ -118,11 +118,10 @@ def requires_openai_credentials(
     resolves to the default OpenAI provider and no OpenAI provider config already
     supplies credentials.
     """
-    if api_base_url:
-        return False
-
     normalized = normalize_model_provider_name(provider_name)
     if normalized == "openai_compatible":
+        if api_base_url:
+            return False
         return True
     if normalized != "aisuite":
         return False
@@ -133,6 +132,8 @@ def requires_openai_credentials(
         DEFAULT_AISUITE_PROVIDER,
     )
     if _provider_config_has_credentials(openai_provider_config):
+        return False
+    if api_base_url:
         return False
     return _aisuite_models_route_to_provider(
         model_names,

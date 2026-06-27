@@ -49,6 +49,7 @@ def test_action_runs_preflight_check_before_translation(action):
     translate_index = next(i for i, step in enumerate(steps) if step["name"] == "Translate changed strings")
     assert preflight_index < translate_index
     assert steps[preflight_index]["env"]["OPENAI_BASE_URL"] == "${{ inputs.api-base-url }}"
+    assert steps[preflight_index]["env"]["REVIEW_MODEL_NAME"] == "${{ inputs.review-model }}"
     assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
 
 

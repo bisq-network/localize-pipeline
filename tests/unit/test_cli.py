@@ -188,6 +188,33 @@ def test_cli_check_false_dry_run_env_does_not_override_config(tmp_path, monkeypa
     assert "Preflight OK" in captured.out
 
 
+def test_cli_check_applies_review_model_env_override(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "gpt-4o")
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": str(i18n),
+            "dry_run": False,
+            "model_name": "anthropic:claude-3-5-sonnet-latest",
+            "review_model_name": "anthropic:claude-3-5-sonnet-latest",
+            "aisuite": {"provider_configs": {"anthropic": {"api_key": "secret"}}},
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "OPENAI_API_KEY" in captured.err
+
+
 def test_cli_validate_accepts_mixed_format_profiles(tmp_path, capsys):
     repo = tmp_path / "repo"
     i18n = repo / "i18n"

@@ -41,7 +41,7 @@ If your localization files live outside the detected folder, pass the folder
 explicitly:
 
 ```bash
-./init.sh --input-folder path/to/i18n
+localize init --input-folder path/to/i18n
 ```
 
 For JSON:

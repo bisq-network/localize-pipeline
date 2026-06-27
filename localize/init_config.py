@@ -157,13 +157,7 @@ def detect_localization_profiles(
     for localization_format in list_localization_formats().values():
         for layout_id in ("suffix", "locale_directory", "locale_filename"):
             layout = _resolve_localization_layout(layout_id, source_locale)
-            locales = detect_locales(
-                input_folder,
-                source_locale=source_locale,
-                localization_format=localization_format,
-                localization_layout=layout,
-            )
-            if locales and _has_source_file(input_folder, localization_format, layout):
+            if _has_source_file(input_folder, localization_format, layout):
                 profiles.append((localization_format, layout))
     return profiles
 
@@ -232,12 +226,29 @@ def _has_source_file(
             if not localization_format.is_supported_file(entry):
                 continue
             rel_path = os.path.relpath(os.path.join(root, entry), input_folder)
-            if localization_layout.is_source_file(
-                rel_path,
-                [localization_layout.source_locale],
-                localization_format,
-            ):
+            if _is_autodetect_source_file(rel_path, localization_format, localization_layout):
                 return True
+    return False
+
+
+def _is_autodetect_source_file(
+    relative_path: str,
+    localization_format: LocalizationFormat,
+    localization_layout: LocalizationLayout,
+) -> bool:
+    rel_parts = relative_path.replace("\\", "/").split("/")
+    basename = rel_parts[-1]
+    stem, _extension = os.path.splitext(basename)
+    if localization_layout.id == "suffix":
+        return (
+            localization_format.extract_locale_suffix(basename) is None
+            and not _looks_like_locale_code(stem)
+            and not any(_looks_like_locale_code(part) for part in rel_parts[:-1])
+        )
+    if localization_layout.id == "locale_directory":
+        return localization_layout.source_locale in rel_parts[:-1]
+    if localization_layout.id == "locale_filename":
+        return stem == localization_layout.source_locale
     return False
 
 
@@ -265,6 +276,15 @@ def _discover_localization_roots(target_project_root: str, source_locale: str) -
                 _collect_locale_directory_root(
                     roots,
                     target_project_root,
+                    rel_parts,
+                    localization_format,
+                    source_locale,
+                )
+                _collect_source_root(
+                    roots,
+                    target_project_root,
+                    root,
+                    entry,
                     rel_parts,
                     localization_format,
                     source_locale,
@@ -317,6 +337,32 @@ def _collect_locale_directory_root(
         source_parts = [*rel_parts[:index], source_locale, *rel_parts[index + 1:]]
         source_path = os.path.join(target_project_root, *source_parts)
         if os.path.exists(source_path) and localization_format.is_supported_file(filename):
+            root_parts = rel_parts[:index]
+            roots.add(os.path.join(target_project_root, *root_parts) if root_parts else target_project_root)
+
+
+def _collect_source_root(
+    roots: set[str],
+    target_project_root: str,
+    root: str,
+    entry: str,
+    rel_parts: List[str],
+    localization_format: LocalizationFormat,
+    source_locale: str,
+) -> None:
+    stem, _extension = os.path.splitext(entry)
+    if (
+        localization_format.extract_locale_suffix(entry) is None
+        and not _looks_like_locale_code(stem)
+        and not any(_looks_like_locale_code(part) for part in rel_parts[:-1])
+    ):
+        roots.add(root)
+
+    if stem == source_locale:
+        roots.add(root)
+
+    for index, segment in enumerate(rel_parts[:-1]):
+        if segment == source_locale:
             root_parts = rel_parts[:index]
             roots.add(os.path.join(target_project_root, *root_parts) if root_parts else target_project_root)
 

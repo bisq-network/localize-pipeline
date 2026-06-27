@@ -400,6 +400,20 @@ class TestLoadAppConfig:
         assert config.dry_run is True
         assert config.model_provider is None
 
+    def test_load_config_rejects_non_mapping_aisuite_section(self):
+        with patch("builtins.open", mock_open(read_data=yaml.dump({
+            "dry_run": False,
+            "aisuite": ["provider_configs"],
+        }))):
+            with patch("os.path.exists", return_value=True):
+                with patch("os.access", return_value=True):
+                    with patch("localize.app_config.load_dotenv"):
+                        with patch("localize.app_config.setup_logger") as mock_logger:
+                            mock_logger.return_value = MagicMock()
+                            with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-key"}, clear=True):
+                                with pytest.raises(SystemExit):
+                                    load_app_config()
+
     def test_missing_openai_key_exits_in_production_mode(self):
         """Test that missing OpenAI API key causes system exit in production mode."""
         mock_config = {"dry_run": False, "model_provider": "openai_compatible"}
@@ -642,6 +656,29 @@ class TestValidateConfig:
         cfg = {
             **self.GOOD,
             "dry_run": False,
+            "aisuite": {"provider_configs": {"openai": ["api_key", "secret"]}},
+        }
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert any("aisuite.provider_configs.openai" in e for e in errs)
+
+    def test_non_mapping_aisuite_section_is_validation_error(self):
+        cfg = {**self.GOOD, "dry_run": False, "aisuite": ["provider_configs"]}
+        errs = self._errors(validate_config(
+            cfg,
+            path_exists=lambda p: True,
+            api_key_available=False,
+        ))
+        assert any("'aisuite' must be a mapping" in e for e in errs)
+
+    def test_malformed_aisuite_provider_config_is_error_with_custom_endpoint(self):
+        cfg = {
+            **self.GOOD,
+            "dry_run": False,
+            "api_base_url": "http://localhost:11434/v1",
             "aisuite": {"provider_configs": {"openai": ["api_key", "secret"]}},
         }
         errs = self._errors(validate_config(
