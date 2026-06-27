@@ -388,6 +388,24 @@ localization_layout:
 
 This maps `locales/de.json` back to `locales/en.json`.
 
+Projects that contain more than one localization convention can configure
+several profiles instead of the singular `localization_format` setting:
+
+```yaml
+localization_formats:
+  - id: "java_properties"
+    layout: "suffix"
+  - id: "json"
+    layout:
+      id: "locale_directory"
+      source_locale: "en"
+```
+
+When a source file changes, the pipeline queues only target files that map back
+through the same profile. A change to `messages.properties` does not enqueue
+`locales/de/messages.json`, and a change to `locales/en/messages.json` does not
+enqueue `messages_de.properties`.
+
 ## Best Practices
 
 ### Style Rules

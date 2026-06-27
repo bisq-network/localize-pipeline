@@ -40,6 +40,7 @@ This document outlines the structure and purpose of the files and directories wi
   - **`src/model_provider.py`**: Provider abstraction for chat completions, token counting, usage tracking, pricing estimates, AISuite dispatch, and the direct OpenAI-compatible fallback.
   - **`src/localization_adapters.py`**: Runtime parser/serializer/validator adapters for supported localization formats.
   - **`src/localization_layouts.py`**: Source/target path layout helpers for suffix files, locale directories, and locale filenames.
+  - **`src/localization_profiles.py`**: Configured format/layout pairs for projects that use one or more localization conventions.
 - **`src/cli.py`**: Reusable `localize` command entry point for init, validate,
   format discovery, and running the configured pipeline.
 - **`src/translate_localization_files.py`**: Translation runtime. It loads config, selects the localization adapter, manages the two-step translation/review process, and invokes `pipeline_core`.
@@ -61,8 +62,9 @@ This document outlines the structure and purpose of the files and directories wi
 
 - **`src/localization_adapters.py`**: Format adapter implementations for Java `.properties` and JSON. Adapters expose parse, serialize, key synchronization, linting, diff-key extraction, review snippets, and format-specific escaping behind one runtime contract.
 - **`src/localization_layouts.py`**: Layout implementations that map target locale paths back to source locale paths without coupling the runtime to one filename convention.
+- **`src/localization_profiles.py`**: Profile loader for single-format and mixed-format configs. Each queued file resolves to one profile before parsing, validation, prompt construction, and serialization.
 
-- **`src/translate_localization_files.py`**: The translation runtime. It loads configuration, selects the configured localization adapter, manages the two-step translation and review process through the configured model provider, and passes orchestration callables into `pipeline_core`.
+- **`src/translate_localization_files.py`**: The translation runtime. It loads configuration, resolves queued files to configured localization profiles, manages the two-step translation and review process through the configured model provider, and passes orchestration callables into `pipeline_core`.
 - **`src/connectors.py`**: Public source/processor/reporter/publisher connector
   contracts for projects that want to compose the core pipeline without using
   the default shell publisher.

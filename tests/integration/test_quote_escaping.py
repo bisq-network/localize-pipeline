@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 # Set a dummy API key before importing the main script to prevent SystemExit.
 os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY_FOR_TESTING'
 
+from src.localization_formats import JAVA_PROPERTIES_FORMAT
 from src.properties_parser import reassemble_file
 
 
@@ -78,7 +79,8 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
         provider.create_chat_completion.assert_awaited()
         mock_git_changed_keys.assert_called_once_with(
             os.path.join(self.test_dir, 'app_de.properties'),
-            REPO_ROOT
+            REPO_ROOT,
+            JAVA_PROPERTIES_FORMAT,
         )
 
         output_file_path = os.path.join(self.translated_dir, 'app_de.properties')

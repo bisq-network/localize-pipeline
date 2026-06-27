@@ -25,6 +25,19 @@ If your JSON files use native locale directories such as
 `localization_layout.id: locale_directory` and
 `localization_layout.source_locale: en` in that config.
 
+If a project contains multiple localization conventions, replace the singular
+`localization_format` setting with profile entries:
+
+```yaml
+localization_formats:
+  - id: "java_properties"
+    layout: "suffix"
+  - id: "json"
+    layout:
+      id: "locale_directory"
+      source_locale: "en"
+```
+
 ## 2. Add the workflow
 
 Create `.github/workflows/translate.yml` in your repo:

@@ -145,8 +145,9 @@ Key settings:
 | Setting | Purpose |
 |---|---|
 | `target_project_root`, `input_folder` | Where your repo and localization files live. |
-| `localization_format` | Built-in format id: `java_properties` or `json`. |
+| `localization_format` | Built-in format id: `java_properties` or `json` for single-format projects. |
 | `localization_layout` | File layout id: `suffix`, `locale_directory`, or `locale_filename`. |
+| `localization_formats` | Optional list of format/layout profiles for mixed projects. |
 | `project_context` | Product/domain guidance injected into translation prompts. |
 | `translation_source` | `git` (default for new projects) or `transifex`. |
 | `model_provider` | `aisuite` by default; use `openai_compatible` only for the direct OpenAI SDK fallback path. |
@@ -170,7 +171,7 @@ internal implementation files:
 * `src.core` — format-agnostic pipeline orchestration contracts.
 * `src.providers` — chat-model provider contracts and provider factories.
 * `src.formats` — localization format/layout metadata, runtime adapters, adapter
-  registration, and conformance-test helpers.
+  registration, configured format profiles, and conformance-test helpers.
 
 CLI details: **[Localization CLI guide](./docs/localization-cli.md)**.
 

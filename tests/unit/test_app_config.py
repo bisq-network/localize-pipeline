@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from src.app_config import AppConfig, load_app_config, validate_config
-from src.localization_formats import JAVA_PROPERTIES_FORMAT
+from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
 from src.localization_layouts import SUFFIX_LAYOUT
 
 
@@ -51,6 +51,7 @@ class TestAppConfig:
         assert config.project_context == "A desktop trading app."
         assert config.localization_format == JAVA_PROPERTIES_FORMAT
         assert config.localization_layout == SUFFIX_LAYOUT
+        assert config.localization_profiles[0].localization_format == JAVA_PROPERTIES_FORMAT
 
 
 class TestLoadAppConfig:
@@ -182,6 +183,33 @@ class TestLoadAppConfig:
         assert config.localization_format.file_extension == ".json"
         assert config.localization_layout.id == "locale_directory"
         assert config.localization_layout.source_locale == "en"
+        assert config.localization_profiles[0].localization_format.id == "custom_json"
+
+    def test_load_config_reads_multiple_localization_profiles(self):
+        mock_config = {
+            "dry_run": True,
+            "localization_formats": [
+                {"id": "java_properties", "layout": "suffix"},
+                {
+                    "id": "json",
+                    "layout": {"id": "locale_directory", "source_locale": "en"},
+                },
+            ],
+        }
+
+        with patch("src.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("src.logging_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        config = load_app_config()
+
+        assert [profile.localization_format for profile in config.localization_profiles] == [
+            JAVA_PROPERTIES_FORMAT,
+            JSON_FORMAT,
+        ]
+        assert config.localization_format == JAVA_PROPERTIES_FORMAT
+        assert config.localization_profiles[1].localization_layout.id == "locale_directory"
 
     def test_load_config_with_invalid_format_falls_back_to_java_properties(self):
         mock_config = {
@@ -197,6 +225,22 @@ class TestLoadAppConfig:
                         config = load_app_config()
 
         assert config.localization_format == JAVA_PROPERTIES_FORMAT
+
+    def test_load_config_with_invalid_multi_profile_raises(self):
+        mock_config = {
+            "dry_run": True,
+            "localization_formats": [
+                {"id": "unknown_format", "layout": "suffix"},
+            ],
+        }
+
+        with patch("src.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("src.logging_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        with pytest.raises(ValueError, match="Unsupported localization_format"):
+                            load_app_config()
 
     def test_load_config_with_invalid_layout_preserves_source_locale(self):
         mock_config = {

@@ -37,6 +37,7 @@ from src.localization_adapters import (
 )
 from src.localization_formats import LocalizationFormat
 from src.localization_layouts import LocalizationLayout
+from src.localization_profiles import LocalizationProfile
 from src.model_provider import OpenAICompatibleProvider
 from src.placeholder_rules import (
     extract_placeholder_tokens,
@@ -94,6 +95,7 @@ BRAND_GLOSSARY = config.brand_glossary
 PROJECT_CONTEXT = config.project_context
 LOCALIZATION_FORMAT = config.localization_format
 LOCALIZATION_LAYOUT = config.localization_layout
+LOCALIZATION_PROFILES = config.localization_profiles
 TRANSLATION_QUEUE_FOLDER = config.translation_queue_folder
 TRANSLATED_QUEUE_FOLDER = config.translated_queue_folder
 TRANSLATION_KEY_LEDGER_FILE_PATH = config.translation_key_ledger_file_path
@@ -412,7 +414,11 @@ def filter_git_changed_keys_by_source(
     return filtered
 
 
-def get_working_tree_changed_keys(target_file_path: str, repo_root: str) -> Set[str]:
+def get_working_tree_changed_keys(
+        target_file_path: str,
+        repo_root: str,
+        localization_format: Optional[LocalizationFormat] = None,
+) -> Set[str]:
     """
     Return keys that were added/updated for ``target_file_path`` in git working tree.
 
@@ -438,7 +444,7 @@ def get_working_tree_changed_keys(target_file_path: str, repo_root: str) -> Set[
             )
             return set()
 
-        adapter = get_localization_adapter(LOCALIZATION_FORMAT)
+        adapter = get_localization_adapter(localization_format or LOCALIZATION_FORMAT)
         changed_keys: Set[str] = set()
         for line in result.stdout.splitlines():
             if not line.startswith('+') or line.startswith('+++'):
@@ -648,7 +654,11 @@ async def _handle_retry(attempt: int, max_retries: int, base_delay: float, key: 
         logger.error(f"Translation failed for key '{key}' after {max_retries} attempts.")
         return False
 
-def run_pre_translation_validation(target_file_path: str, source_file_path: str) -> Tuple[List[str], Set[str]]:
+def run_pre_translation_validation(
+        target_file_path: str,
+        source_file_path: str,
+        localization_format: Optional[LocalizationFormat] = None,
+) -> Tuple[List[str], Set[str]]:
     """
     Runs validation and preparation checks on a target localization file.
     - Synchronizes keys with the source file (adds missing, removes extra).
@@ -666,7 +676,7 @@ def run_pre_translation_validation(target_file_path: str, source_file_path: str)
     errors: List[str] = []
     newly_added_keys: Set[str] = set()
     filename = os.path.basename(target_file_path)
-    adapter = get_localization_adapter(LOCALIZATION_FORMAT)
+    adapter = get_localization_adapter(localization_format or LOCALIZATION_FORMAT)
     logger.info(f"Running pre-translation validation for '{filename}'...")
 
     # 1. Synchronize keys (add missing, remove extra)
@@ -712,7 +722,8 @@ def run_pre_translation_validation(target_file_path: str, source_file_path: str)
 def run_post_translation_validation(
         final_content: str,
         source_translations: Dict[str, str],
-        filename: str
+        filename: str,
+        localization_format: Optional[LocalizationFormat] = None,
 ) -> bool:
     """
     Runs a series of validation checks on the final translated file content.
@@ -729,13 +740,14 @@ def run_post_translation_validation(
     logger.info(f"Running post-translation validation for '{filename}'...")
 
     temp_file_path = None
-    adapter = get_localization_adapter(LOCALIZATION_FORMAT)
+    effective_format = localization_format or LOCALIZATION_FORMAT
+    adapter = get_localization_adapter(effective_format)
     try:
         # Create a temporary file with delete=False to control its lifecycle.
         with tempfile.NamedTemporaryFile(
                 mode='w',
                 delete=False,
-                suffix=LOCALIZATION_FORMAT.file_extension,
+                suffix=effective_format.file_extension,
                 encoding='utf-8'
         ) as temp_f:
             temp_file_path = temp_f.name
@@ -907,7 +919,8 @@ async def translate_text_async(
         glossary: Dict[str, Dict[str, str]],
         semaphore: asyncio.Semaphore,
         rate_limiter: AsyncLimiter,
-        index: int
+        index: int,
+        localization_format: Optional[LocalizationFormat] = None,
 ) -> Tuple[int, str]:
     """
     Asynchronously translate a single text with context.
@@ -965,7 +978,7 @@ async def translate_text_async(
             target_language=target_language,
             style_rules_text=style_rules_text,
             project_context=PROJECT_CONTEXT,
-            localization_format=LOCALIZATION_FORMAT,
+            localization_format=localization_format or LOCALIZATION_FORMAT,
         )
 
         brand_glossary_text = '\n'.join(f"- {term}" for term in dict.fromkeys(BRAND_GLOSSARY))
@@ -1101,7 +1114,8 @@ async def holistic_review_async(
         keys_to_review: List[str],
         semaphore: asyncio.Semaphore,
         rate_limiter: AsyncLimiter,
-        style_rules_text: str
+        style_rules_text: str,
+        localization_format: Optional[LocalizationFormat] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Performs a holistic review of an entire translated file and returns corrections
@@ -1141,7 +1155,7 @@ async def holistic_review_async(
             source_content=protected_source,
             translated_content=protected_translated,
             style_rules_text=style_rules_text,
-            localization_format=LOCALIZATION_FORMAT,
+            localization_format=localization_format or LOCALIZATION_FORMAT,
         )
         max_retries = 3
         base_delay = 5  # Longer delay for a potentially larger task
@@ -1276,6 +1290,64 @@ def integrate_translations(
 
     return parsed_lines
 
+
+def _default_localization_profile() -> LocalizationProfile:
+    return LocalizationProfile(LOCALIZATION_FORMAT, LOCALIZATION_LAYOUT)
+
+
+def _iter_localization_profiles(
+        localization_profiles: Optional[Tuple[LocalizationProfile, ...]] = None,
+) -> Tuple[LocalizationProfile, ...]:
+    profiles = tuple(localization_profiles or LOCALIZATION_PROFILES or ())
+    default_profile = _default_localization_profile()
+    if not profiles:
+        return (default_profile,)
+    if default_profile not in profiles:
+        return (*profiles, default_profile)
+    return profiles
+
+
+def find_target_localization_profile(
+        relative_path: str,
+        supported_codes: Optional[List[str]] = None,
+        localization_profiles: Optional[Tuple[LocalizationProfile, ...]] = None,
+) -> Optional[LocalizationProfile]:
+    """Return the configured profile that treats ``relative_path`` as a target file."""
+    codes = supported_codes or list(LANGUAGE_CODES.keys())
+    for profile in _iter_localization_profiles(localization_profiles):
+        if profile.localization_layout.is_target_file(
+                relative_path,
+                codes,
+                profile.localization_format,
+        ):
+            return profile
+    return None
+
+
+def find_source_localization_profile(
+        relative_path: str,
+        supported_codes: Optional[List[str]] = None,
+        localization_profiles: Optional[Tuple[LocalizationProfile, ...]] = None,
+) -> Optional[LocalizationProfile]:
+    """Return the configured profile that treats ``relative_path`` as a source file."""
+    codes = supported_codes or list(LANGUAGE_CODES.keys())
+    for profile in _iter_localization_profiles(localization_profiles):
+        if profile.localization_layout.is_source_file(
+                relative_path,
+                codes,
+                profile.localization_format,
+        ):
+            return profile
+    return None
+
+
+def _profile_for_target_or_default(
+        relative_path: str,
+        supported_codes: Optional[List[str]] = None,
+) -> LocalizationProfile:
+    return find_target_localization_profile(relative_path, supported_codes) or _default_localization_profile()
+
+
 def extract_language_from_filename(filename: str, supported_codes: List[str]) -> Optional[str]:
     """
     Extract the language code from a filename by checking against a list of supported codes.
@@ -1287,7 +1359,12 @@ def extract_language_from_filename(filename: str, supported_codes: List[str]) ->
     Returns:
         Optional[str]: The language code if found, else None.
     """
-    return LOCALIZATION_LAYOUT.extract_locale(filename, supported_codes, LOCALIZATION_FORMAT)
+    profile = _profile_for_target_or_default(filename, supported_codes)
+    return profile.localization_layout.extract_locale(
+        filename,
+        supported_codes,
+        profile.localization_format,
+    )
 
 def get_source_filename(translation_file: str, supported_codes: List[str]) -> str:
     """
@@ -1314,7 +1391,12 @@ def get_source_filename(translation_file: str, supported_codes: List[str]) -> st
         >>> get_source_filename('app.properties', ['es', 'de'])
         'app.properties'
     """
-    return LOCALIZATION_LAYOUT.source_path_for_target(translation_file, supported_codes, LOCALIZATION_FORMAT)
+    profile = _profile_for_target_or_default(translation_file, supported_codes)
+    return profile.localization_layout.source_path_for_target(
+        translation_file,
+        supported_codes,
+        profile.localization_format,
+    )
 
 
 def is_target_localization_file(
@@ -1324,6 +1406,8 @@ def is_target_localization_file(
         localization_layout: Optional[LocalizationLayout] = None,
 ) -> bool:
     """Return true when ``relative_path`` is a configured target locale file."""
+    if localization_format is None and localization_layout is None:
+        return find_target_localization_profile(relative_path, supported_codes) is not None
     return (localization_layout or LOCALIZATION_LAYOUT).is_target_file(
         relative_path,
         supported_codes or list(LANGUAGE_CODES.keys()),
@@ -1338,6 +1422,8 @@ def is_source_localization_file(
         localization_layout: Optional[LocalizationLayout] = None,
 ) -> bool:
     """Return true when ``relative_path`` is a configured source locale file."""
+    if localization_format is None and localization_layout is None:
+        return find_source_localization_profile(relative_path, supported_codes) is not None
     return (localization_layout or LOCALIZATION_LAYOUT).is_source_file(
         relative_path,
         supported_codes or list(LANGUAGE_CODES.keys()),
@@ -1448,14 +1534,29 @@ def get_changed_translation_files(
 
     def is_discoverable_target_file(relative_path: str) -> bool:
         """Return true for target files that should be queued for locale extraction."""
-        if is_target_localization_file(relative_path):
-            return True
-        if LOCALIZATION_LAYOUT.id == "suffix":
-            return (
-                LOCALIZATION_FORMAT.is_supported_file(relative_path)
-                and LOCALIZATION_FORMAT.is_locale_file(os.path.basename(relative_path))
-            )
-        return False
+        return find_discoverable_target_profile(relative_path) is not None
+
+    def find_discoverable_target_profile(relative_path: str) -> Optional[LocalizationProfile]:
+        """Return the profile for a target file, including unsupported suffix locales."""
+        target_profile = find_target_localization_profile(relative_path)
+        if target_profile:
+            return target_profile
+        for profile in _iter_localization_profiles():
+            if profile.localization_layout.id != "suffix":
+                continue
+            if (
+                    profile.localization_format.is_supported_file(relative_path)
+                    and profile.localization_format.is_locale_file(os.path.basename(relative_path))
+            ):
+                return profile
+        return None
+
+    def supports_configured_format(relative_path: str) -> bool:
+        """Return true if any configured profile owns this file extension."""
+        return any(
+            profile.localization_format.is_supported_file(relative_path)
+            for profile in _iter_localization_profiles()
+        )
 
     def apply_filter_glob(files: List[str]) -> List[str]:
         """Apply optional TRANSLATION_FILTER_GLOB filtering to discovered files."""
@@ -1546,13 +1647,13 @@ def get_changed_translation_files(
             entries = _entries_from_status_output(result.stdout)
 
         changed_translation_files: Set[str] = set()
-        changed_source_files: Set[str] = set()
+        changed_source_files: Set[Tuple[LocalizationProfile, str]] = set()
         # Accepted change statuses for both formats; deletions (D) are intentionally excluded.
         accepted_status = {'M', 'A', 'AM', 'MM', 'RM', 'R', 'C', '??'}
         for cleaned_status, filepath in entries:
             if cleaned_status not in accepted_status:
                 continue
-            if not LOCALIZATION_FORMAT.is_supported_file(filepath):
+            if not supports_configured_format(filepath):
                 continue
             # Extract the filename relative to input_folder
             rel_path = os.path.relpath(filepath, rel_input_folder)
@@ -1563,15 +1664,24 @@ def get_changed_translation_files(
             # hyphenated locale codes like zh-Hans, zh-Hant.
             if is_discoverable_target_file(rel_path):
                 changed_translation_files.add(rel_path)
-            elif is_source_localization_file(rel_path):
-                changed_source_files.add(rel_path)
+            else:
+                source_profile = find_source_localization_profile(rel_path)
+                if source_profile:
+                    changed_source_files.add((source_profile, rel_path))
 
         # Resilience to delayed Transifex propagation:
         # if source files changed, also enqueue all related locale files even if unchanged in git status.
         if changed_source_files:
             for translation_rel_path in discover_translation_files():
-                source_rel_path = get_source_filename(translation_rel_path, list(LANGUAGE_CODES.keys()))
-                if source_rel_path.replace('\\', '/') in changed_source_files:
+                target_profile = find_target_localization_profile(translation_rel_path)
+                if not target_profile:
+                    continue
+                source_rel_path = target_profile.localization_layout.source_path_for_target(
+                    translation_rel_path,
+                    list(LANGUAGE_CODES.keys()),
+                    target_profile.localization_format,
+                )
+                if (target_profile, source_rel_path.replace('\\', '/')) in changed_source_files:
                     changed_translation_files.add(translation_rel_path)
 
         return apply_filter_glob(sorted(changed_translation_files))
@@ -1639,14 +1749,18 @@ async def process_translation_queue(
         - A dictionary of skipped files, mapping filename to a list of error strings.
         - Total number of keys translated across all files.
     """
-    adapter = get_localization_adapter(LOCALIZATION_FORMAT)
-
-    localization_files = []
-    for root, _, files in os.walk(translation_queue_folder):
+    localization_files: List[Tuple[str, LocalizationProfile]] = []
+    for root, dirs, files in os.walk(translation_queue_folder):
+        dirs.sort()
         for name in files:
+            if name.startswith("."):
+                continue
             relative_path = os.path.relpath(os.path.join(root, name), translation_queue_folder)
-            if is_target_localization_file(relative_path):
-                localization_files.append(relative_path)
+            relative_path = relative_path.replace('\\', '/')
+            profile = find_target_localization_profile(relative_path)
+            if profile:
+                localization_files.append((relative_path, profile))
+    localization_files.sort(key=lambda item: item[0])
 
     # Load the glossary from the JSON file
     glossary = load_glossary(glossary_file_path)
@@ -1666,9 +1780,16 @@ async def process_translation_queue(
     total_keys_translated = 0
     skipped_files: Dict[str, List[str]] = {}
 
-    for translation_file in localization_files:
+    for translation_file, localization_profile in localization_files:
+        localization_format = localization_profile.localization_format
+        localization_layout = localization_profile.localization_layout
+        adapter = get_localization_adapter(localization_format)
         # Extract the language code from the filename
-        language_code = extract_language_from_filename(translation_file, list(LANGUAGE_CODES.keys()))
+        language_code = localization_layout.extract_locale(
+            translation_file,
+            list(LANGUAGE_CODES.keys()),
+            localization_format,
+        )
         if not language_code:
             logger.warning(f"Skipping file {translation_file}: unable to extract language code.")
             continue
@@ -1680,7 +1801,11 @@ async def process_translation_queue(
 
         # Define full paths
         translation_file_path = os.path.join(translation_queue_folder, translation_file)
-        source_file_name = get_source_filename(translation_file, list(LANGUAGE_CODES.keys()))
+        source_file_name = localization_layout.source_path_for_target(
+            translation_file,
+            list(LANGUAGE_CODES.keys()),
+            localization_format,
+        )
         source_file_path = os.path.join(INPUT_FOLDER, source_file_name)
 
         if not os.path.exists(source_file_path):
@@ -1690,7 +1815,11 @@ async def process_translation_queue(
         logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
 
         # --- Pre-flight Validator ---
-        validation_errors, newly_added_keys = run_pre_translation_validation(translation_file_path, source_file_path)
+        validation_errors, newly_added_keys = run_pre_translation_validation(
+            translation_file_path,
+            source_file_path,
+            localization_format,
+        )
         if validation_errors:
             logger.error(f"Skipping translation for '{translation_file}' due to pre-translation validation errors.")
             for error in validation_errors:
@@ -1717,7 +1846,11 @@ async def process_translation_queue(
         # Extract texts to translate
         file_ledger_entries = key_ledger.get(translation_file, {})
         original_input_file_path = os.path.join(INPUT_FOLDER, translation_file)
-        git_changed_keys = get_working_tree_changed_keys(original_input_file_path, REPO_ROOT)
+        git_changed_keys = get_working_tree_changed_keys(
+            original_input_file_path,
+            REPO_ROOT,
+            localization_format,
+        )
         # Only re-translate git-dirty keys if their English source actually changed.
         # This prevents an infinite cycle where Transifex community translations
         # are overwritten by AI, then Transifex re-serves the community version.
@@ -1772,7 +1905,8 @@ async def process_translation_queue(
                 glossary,
                 semaphore,
                 rate_limiter,  # Pass the rate limiter
-                idx
+                idx,
+                localization_format,
             )
             for idx, (text, key) in enumerate(zip(texts_to_translate, keys_to_translate))
         ]
@@ -1801,7 +1935,7 @@ async def process_translation_queue(
             indices,
             keys_to_translate,
             source_translations,
-            LOCALIZATION_FORMAT,
+            localization_format,
         )
         draft_content = adapter.reassemble_file(draft_lines)
 
@@ -1820,7 +1954,7 @@ async def process_translation_queue(
         with tempfile.NamedTemporaryFile(
                 mode='w',
                 delete=False,
-                suffix=LOCALIZATION_FORMAT.file_extension,
+                suffix=localization_format.file_extension,
                 encoding='utf-8'
         ) as temp_f:
             temp_f.write(draft_content)
@@ -1839,7 +1973,8 @@ async def process_translation_queue(
                 keys_to_review=key_chunk,
                 semaphore=semaphore,
                 rate_limiter=rate_limiter,
-                style_rules_text=style_rules_text_for_review
+                style_rules_text=style_rules_text_for_review,
+                localization_format=localization_format,
             ) for key_chunk in key_chunks]
         )
 
@@ -2011,12 +2146,24 @@ def generate_translation_summary(
     locales: set[str] = set()
 
     for filename in processed_files:
-        code = extract_language_from_filename(filename, sorted_codes)
+        profile = find_target_localization_profile(filename, sorted_codes)
+        if not profile:
+            continue
+        code = profile.localization_layout.extract_locale(
+            filename,
+            sorted_codes,
+            profile.localization_format,
+        )
         if code:
             locales.add(code)
-            source_basename = os.path.basename(get_source_filename(filename, sorted_codes))
-            if source_basename.endswith(LOCALIZATION_FORMAT.file_extension):
-                module = source_basename[:-len(LOCALIZATION_FORMAT.file_extension)]
+            source_filename = profile.localization_layout.source_path_for_target(
+                filename,
+                sorted_codes,
+                profile.localization_format,
+            )
+            source_basename = os.path.basename(source_filename)
+            if source_basename.endswith(profile.localization_format.file_extension):
+                module = source_basename[:-len(profile.localization_format.file_extension)]
             else:
                 module = os.path.splitext(source_basename)[0]
             if module and module != os.path.basename(filename):

@@ -42,9 +42,11 @@ def test_format_public_api_exports_localization_format_metadata():
         SUFFIX_LAYOUT,
         LocalizationFormat,
         LocalizationLayout,
+        LocalizationProfile,
         get_localization_adapter,
         load_localization_format,
         load_localization_layout,
+        load_localization_profiles,
     )
 
     assert JAVA_PROPERTIES_FORMAT.id == "java_properties"
@@ -53,6 +55,8 @@ def test_format_public_api_exports_localization_format_metadata():
     assert LOCALE_DIRECTORY_LAYOUT.id == "locale_directory"
     assert LocalizationFormat.__name__ == "LocalizationFormat"
     assert LocalizationLayout.__name__ == "LocalizationLayout"
+    assert LocalizationProfile.__name__ == "LocalizationProfile"
     assert load_localization_format("java_properties") == JAVA_PROPERTIES_FORMAT
     assert load_localization_layout("suffix") == SUFFIX_LAYOUT
+    assert load_localization_profiles({"localization_format": "json"})[0].localization_format == JSON_FORMAT
     assert get_localization_adapter(JSON_FORMAT).localization_format == JSON_FORMAT

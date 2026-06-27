@@ -61,6 +61,46 @@ That keeps orchestration stable while the internals remain modular:
   testing helpers.
 - `src.providers` exposes the model-provider abstraction and capabilities.
 
+## JSON Projects
+
+For JSON locale files, select the JSON adapter and the layout used by your
+repository:
+
+```yaml
+localization_format: "json"
+localization_layout:
+  id: "locale_directory"
+  source_locale: "en"
+```
+
+That maps `locales/de/messages.json` back to
+`locales/en/messages.json`. Suffix files such as `messages_de.json` and locale
+filenames such as `locales/de.json` are supported by changing
+`localization_layout.id` to `suffix` or `locale_filename`.
+
+The JSON adapter translates string leaves. Nested keys and array entries are
+addressed internally with JSON Pointer keys such as `/dialog/title` or
+`/steps/0/label`; non-string values are kept as non-translatable structure.
+
+## Mixed-Format Projects
+
+Projects can configure several format/layout profiles in one run:
+
+```yaml
+localization_formats:
+  - id: "java_properties"
+    layout: "suffix"
+  - id: "json"
+    layout:
+      id: "locale_directory"
+      source_locale: "en"
+```
+
+The runtime resolves each queued file to its matching profile, then uses that
+profile for source-file lookup, parsing, linting, review prompts, validation,
+and serialization. Existing single-format configs using `localization_format`
+and `localization_layout` keep working.
+
 ## Adding A Custom Format
 
 Custom formats register one `LocalizationFileAdapter` at process startup. The

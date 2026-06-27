@@ -153,8 +153,116 @@ def test_json_adapter_synchronizes_source_and_target_string_keys(tmp_path):
         "hello": "Hallo",
         "nested": {
             "title": "Title",
+            "non_string": 1,
         },
     }
+
+
+def test_json_adapter_synchronizes_target_to_source_key_order(tmp_path):
+    source_path = tmp_path / "messages.json"
+    target_path = tmp_path / "messages_de.json"
+    write_json(
+        source_path,
+        {
+            "alpha": "Alpha",
+            "bravo": "Bravo",
+            "nested": {
+                "title": "Title",
+            },
+        },
+    )
+    write_json(
+        target_path,
+        {
+            "bravo": "Bravo DE",
+            "legacy": "Remove me",
+            "alpha": "Alpha DE",
+        },
+    )
+
+    adapter = get_localization_adapter(JSON_FORMAT)
+    missing_keys, extra_keys = adapter.synchronize_keys(str(target_path), str(source_path))
+
+    assert missing_keys == {"/nested/title"}
+    assert extra_keys == {"/legacy"}
+    assert target_path.read_text(encoding="utf-8").splitlines() == [
+        "{",
+        '  "alpha": "Alpha DE",',
+        '  "bravo": "Bravo DE",',
+        '  "nested": {',
+        '    "title": "Title"',
+        "  }",
+        "}",
+    ]
+
+
+def test_json_adapter_synchronizes_non_string_metadata_without_string_key_changes(tmp_path):
+    source_path = tmp_path / "messages.json"
+    target_path = tmp_path / "messages_de.json"
+    write_json(
+        source_path,
+        {
+            "hello": "Hello",
+            "metadata": {
+                "version": 2,
+                "flags": [2, True],
+            },
+        },
+    )
+    write_json(
+        target_path,
+        {
+            "hello": "Hallo",
+            "metadata": {
+                "version": 1,
+                "flags": [1, False],
+            },
+        },
+    )
+
+    adapter = get_localization_adapter(JSON_FORMAT)
+    missing_keys, extra_keys = adapter.synchronize_keys(str(target_path), str(source_path))
+
+    assert missing_keys == set()
+    assert extra_keys == set()
+    assert json.loads(target_path.read_text(encoding="utf-8")) == {
+        "hello": "Hallo",
+        "metadata": {
+            "version": 2,
+            "flags": [2, True],
+        },
+    }
+
+
+def test_json_adapter_synchronizes_order_without_string_key_changes(tmp_path):
+    source_path = tmp_path / "messages.json"
+    target_path = tmp_path / "messages_de.json"
+    write_json(
+        source_path,
+        {
+            "alpha": "Alpha",
+            "bravo": "Bravo",
+        },
+    )
+    write_json(
+        target_path,
+        {
+            "bravo": "Bravo DE",
+            "alpha": "Alpha DE",
+        },
+    )
+
+    adapter = get_localization_adapter(JSON_FORMAT)
+    missing_keys, extra_keys = adapter.synchronize_keys(str(target_path), str(source_path))
+
+    assert missing_keys == set()
+    assert extra_keys == set()
+    assert target_path.read_text(encoding="utf-8").splitlines() == [
+        "{",
+        '  "alpha": "Alpha DE",',
+        '  "bravo": "Bravo DE"',
+        "}",
+    ]
 
 
 def test_json_adapter_synchronizes_array_string_keys(tmp_path):

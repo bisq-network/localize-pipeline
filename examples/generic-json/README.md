@@ -11,7 +11,9 @@ Files in this example:
 
 The JSON adapter translates string leaves only. Nested string leaves are tracked
 internally with JSON Pointer keys, so object keys containing dots remain
-unambiguous.
+unambiguous. Arrays are supported with numeric JSON Pointer segments such as
+`/steps/0/title`. Non-string values are treated as non-translatable structure
+and synchronized from the source shape.
 
 Try it from the repository root:
 

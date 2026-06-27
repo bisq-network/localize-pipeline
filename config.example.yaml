@@ -26,6 +26,18 @@ localization_layout:
   id: "suffix"
   source_locale: "en"
 
+# Optional: projects with more than one localization convention can replace the
+# singular `localization_format` and `localization_layout` settings above with a
+# list. Each profile routes matching files through its own parser/serializer and
+# source-path mapping.
+# localization_formats:
+#   - id: "java_properties"
+#     layout: "suffix"
+#   - id: "json"
+#     layout:
+#       id: "locale_directory"
+#       source_locale: "en"
+
 # Optional product/domain context injected into translation prompts.
 # Keep this generic for reusable configs; project-specific configs can be more precise.
 project_context: "Translate concise UI text for a software product."

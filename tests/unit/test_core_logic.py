@@ -898,6 +898,122 @@ class TestFileDetectionLogic(unittest.TestCase):
 
         self.assertEqual(files, ["de/common.json", "fr/common.json"])
 
+    @patch('subprocess.run')
+    def test_get_changed_files_supports_mixed_format_profiles(self, mock_subprocess_run):
+        """Projects can discover changed locale files across configured format profiles."""
+        from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+        from src.localization_layouts import LocalizationLayout
+        from src.localization_profiles import LocalizationProfile
+        from src.translate_localization_files import get_changed_translation_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = temp_dir
+            input_folder = os.path.join(temp_dir, "i18n")
+            for rel_path in [
+                "messages.properties",
+                "messages_de.properties",
+                "locales/en/common.json",
+                "locales/de/common.json",
+                "notes.txt",
+            ]:
+                path = os.path.join(input_folder, rel_path)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as temp_file:
+                    temp_file.write("k=v\n")
+
+            git_output = (
+                " M i18n/messages_de.properties\n"
+                " M i18n/locales/de/common.json\n"
+                " M i18n/notes.txt\n"
+            )
+            mock_subprocess_run.return_value = MagicMock(stdout=git_output, stderr="", check_returncode=MagicMock())
+
+            profiles = (
+                LocalizationProfile(
+                    JAVA_PROPERTIES_FORMAT,
+                    LocalizationLayout(id="suffix", source_locale="en"),
+                ),
+                LocalizationProfile(
+                    JSON_FORMAT,
+                    LocalizationLayout(id="locale_directory", source_locale="en"),
+                ),
+            )
+            with patch("src.translate_localization_files.LOCALIZATION_PROFILES", profiles):
+                files = get_changed_translation_files(input_folder, repo_root)
+
+        self.assertEqual(files, ["locales/de/common.json", "messages_de.properties"])
+
+    @patch('subprocess.run')
+    def test_process_all_files_supports_mixed_format_profiles(self, mock_subprocess_run):
+        """Full scans should include target files from every configured format profile."""
+        from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+        from src.localization_layouts import LocalizationLayout
+        from src.localization_profiles import LocalizationProfile
+        from src.translate_localization_files import get_changed_translation_files
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = temp_dir
+            input_folder = os.path.join(temp_dir, "i18n")
+            for rel_path in [
+                "messages.properties",
+                "messages_de.properties",
+                "locales/en/common.json",
+                "locales/de/common.json",
+                "locales/fr/common.json",
+                "archive/messages_es.properties",
+            ]:
+                path = os.path.join(input_folder, rel_path)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as temp_file:
+                    temp_file.write("k=v\n")
+
+            profiles = (
+                LocalizationProfile(
+                    JAVA_PROPERTIES_FORMAT,
+                    LocalizationLayout(id="suffix", source_locale="en"),
+                ),
+                LocalizationProfile(
+                    JSON_FORMAT,
+                    LocalizationLayout(id="locale_directory", source_locale="en"),
+                ),
+            )
+            with patch("src.translate_localization_files.LOCALIZATION_PROFILES", profiles):
+                files = get_changed_translation_files(input_folder, repo_root, process_all_files=True)
+
+        mock_subprocess_run.assert_not_called()
+        self.assertEqual(files, [
+            "locales/de/common.json",
+            "locales/fr/common.json",
+            "messages_de.properties",
+        ])
+
+    def test_explicit_profiles_take_precedence_over_implicit_default(self):
+        """Compatibility default must not shadow explicitly configured profiles."""
+        from src.localization_formats import JSON_FORMAT
+        from src.localization_layouts import LocalizationLayout
+        from src.localization_profiles import LocalizationProfile
+        from src.translate_localization_files import get_source_filename
+
+        explicit_profiles = (
+            LocalizationProfile(
+                JSON_FORMAT,
+                LocalizationLayout(id="locale_directory", source_locale="en"),
+            ),
+        )
+        with patch(
+                "src.translate_localization_files.LOCALIZATION_PROFILES",
+                explicit_profiles,
+        ), patch(
+                "src.translate_localization_files.LOCALIZATION_FORMAT",
+                JSON_FORMAT,
+        ), patch(
+                "src.translate_localization_files.LOCALIZATION_LAYOUT",
+                LocalizationLayout(id="suffix", source_locale="en"),
+        ):
+            source_path = get_source_filename("locales/de/messages_fr.json", ["de", "fr"])
+
+        self.assertEqual(source_path, "locales/en/messages_fr.json")
+
 
 class TestFilterGitChangedKeys(unittest.TestCase):
     """Tests for filter_git_changed_keys_by_source, which prevents the

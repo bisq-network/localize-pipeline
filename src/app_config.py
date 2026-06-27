@@ -20,6 +20,7 @@ from src.localization_layouts import (
     LocalizationLayout,
     load_localization_layout,
 )
+from src.localization_profiles import LocalizationProfile, load_localization_profiles
 from src.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
@@ -95,6 +96,9 @@ class AppConfig:
     project_context: str = ""
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT
+    localization_profiles: Tuple[LocalizationProfile, ...] = field(default_factory=lambda: (
+        LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+    ))
 
 
 @dataclass(frozen=True)
@@ -172,14 +176,7 @@ def validate_config(
         ))
 
     try:
-        load_localization_format(config.get("localization_format"))
-    except ValueError as exc:
-        issues.append(ConfigIssue("error", str(exc)))
-    try:
-        load_localization_layout(
-            config.get("localization_layout"),
-            source_locale=str(config.get("source_locale") or "en"),
-        )
+        load_localization_profiles(config)
     except ValueError as exc:
         issues.append(ConfigIssue("error", str(exc)))
 
@@ -500,19 +497,27 @@ def load_app_config() -> AppConfig:
 
     project_context = str(config.get('project_context') or '').strip()
     try:
-        localization_format = load_localization_format(config.get('localization_format'))
+        localization_profiles = load_localization_profiles(config)
     except ValueError:
-        localization_format = JAVA_PROPERTIES_FORMAT
-    try:
-        localization_layout = load_localization_layout(
-            config.get('localization_layout'),
-            source_locale=str(config.get('source_locale') or 'en'),
-        )
-    except ValueError:
-        localization_layout = load_localization_layout(
-            None,
-            source_locale=str(config.get('source_locale') or 'en'),
-        )
+        if config.get('localization_formats') is not None:
+            raise
+        try:
+            localization_format = load_localization_format(config.get('localization_format'))
+        except ValueError:
+            localization_format = JAVA_PROPERTIES_FORMAT
+        try:
+            localization_layout = load_localization_layout(
+                config.get('localization_layout'),
+                source_locale=str(config.get('source_locale') or 'en'),
+            )
+        except ValueError:
+            localization_layout = load_localization_layout(
+                None,
+                source_locale=str(config.get('source_locale') or 'en'),
+            )
+        localization_profiles = (LocalizationProfile(localization_format, localization_layout),)
+    localization_format = localization_profiles[0].localization_format
+    localization_layout = localization_profiles[0].localization_layout
 
     # Create the provider against the endpoint resolved earlier.
     model_provider = _create_model_provider(
@@ -555,4 +560,5 @@ def load_app_config() -> AppConfig:
         project_context=project_context,
         localization_format=localization_format,
         localization_layout=localization_layout,
+        localization_profiles=localization_profiles,
     )

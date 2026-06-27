@@ -45,6 +45,32 @@ def test_cli_validate_reports_valid_config(tmp_path, capsys):
     assert "Configuration OK" in captured.out
 
 
+def test_cli_validate_accepts_mixed_format_profiles(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": str(i18n),
+            "localization_formats": [
+                {"id": "java_properties", "layout": "suffix"},
+                {"id": "json", "layout": {"id": "locale_directory", "source_locale": "en"}},
+            ],
+            "dry_run": True,
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["validate", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Configuration OK" in captured.out
+
+
 def test_cli_validate_returns_nonzero_for_config_errors(tmp_path, capsys):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("target_project_root: /missing\ninput_folder: /missing/i18n\n", encoding="utf-8")
