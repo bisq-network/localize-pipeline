@@ -1,13 +1,13 @@
 import unittest
 import os
 import tempfile
-from src.translation_validator import (
+from localize.translation_validator import (
     check_key_coverage,
     check_placeholder_parity,
     check_encoding_and_mojibake,
     synchronize_keys
 )
-from src.properties_parser import parse_properties_file
+from localize.properties_parser import parse_properties_file
 
 class TestTranslationValidator(unittest.TestCase):
     def test_check_key_coverage(self):

@@ -8,13 +8,13 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT, LocalizationFormat
-from src.localization_formats import (
+from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT, LocalizationFormat
+from localize.localization_formats import (
     register_localization_format,
     unregister_localization_format,
 )
-from src.properties_parser import parse_properties_file, reassemble_file as reassemble_properties_file
-from src.translation_validator import (
+from localize.properties_parser import parse_properties_file, reassemble_file as reassemble_properties_file
+from localize.translation_validator import (
     check_encoding_and_mojibake,
     find_disallowed_control_characters,
     synchronize_keys as synchronize_properties_keys,

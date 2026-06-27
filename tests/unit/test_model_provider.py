@@ -6,7 +6,7 @@ import httpx
 import pytest
 from openai import APIStatusError, OpenAIError
 
-from src.model_provider import (
+from localize.model_provider import (
     AiSuiteProvider,
     ModelProviderConfigurationError,
     OpenAICompatibleProvider,
@@ -15,7 +15,7 @@ from src.model_provider import (
     create_openai_compatible_provider,
     normalize_model_provider_name,
 )
-from src.usage_tracker import UsageTracker
+from localize.usage_tracker import UsageTracker
 
 
 def _response(content="{}", prompt_tokens=11, completion_tokens=7):
@@ -43,7 +43,7 @@ async def test_provider_delegates_chat_completion_and_records_usage():
     response = _response(prompt_tokens=123, completion_tokens=45)
 
     with patch(
-        "src.model_provider.create_chat_completion",
+        "localize.model_provider.create_chat_completion",
         AsyncMock(return_value=response),
     ) as create_completion:
         result = await provider.create_chat_completion(
@@ -72,8 +72,8 @@ def test_provider_count_tokens_uses_tiktoken_fallback():
     fake_encoding.encode.side_effect = lambda text: text.split()
 
     with (
-        patch("src.model_provider.tiktoken.encoding_for_model", side_effect=Exception),
-        patch("src.model_provider.tiktoken.get_encoding", return_value=fake_encoding),
+        patch("localize.model_provider.tiktoken.encoding_for_model", side_effect=Exception),
+        patch("localize.model_provider.tiktoken.get_encoding", return_value=fake_encoding),
     ):
         assert provider.count_tokens("one two three", "unknown-model") == 3
 
@@ -84,7 +84,7 @@ def test_provider_count_tokens_strips_provider_prefix_for_tiktoken():
     fake_encoding.encode.return_value = [1, 2, 3]
 
     with patch(
-        "src.model_provider.tiktoken.encoding_for_model",
+        "localize.model_provider.tiktoken.encoding_for_model",
         return_value=fake_encoding,
     ) as encoding_for_model:
         assert provider.count_tokens("one two three", "openai:gpt-4o") == 3
@@ -137,7 +137,7 @@ def test_provider_usage_summary_is_written_by_provider(tmp_path):
 def test_factory_builds_default_openai_client():
     logger = logging.getLogger("test")
 
-    with patch("src.model_provider.AsyncOpenAI", return_value=object()) as openai:
+    with patch("localize.model_provider.AsyncOpenAI", return_value=object()) as openai:
         provider = create_openai_compatible_provider(
             api_key="sk-test",
             api_base_url=None,
@@ -151,7 +151,7 @@ def test_factory_builds_default_openai_client():
 def test_factory_builds_custom_endpoint_with_placeholder_key():
     logger = logging.getLogger("test")
 
-    with patch("src.model_provider.AsyncOpenAI", return_value=object()) as openai:
+    with patch("localize.model_provider.AsyncOpenAI", return_value=object()) as openai:
         provider = create_openai_compatible_provider(
             api_key=None,
             api_base_url="http://localhost:11434/v1",
@@ -272,7 +272,7 @@ def test_aisuite_factory_imports_aisuite_lazily():
     logger = logging.getLogger("test")
     fake_client = object()
 
-    with patch("src.model_provider.importlib.import_module") as import_module:
+    with patch("localize.model_provider.importlib.import_module") as import_module:
         import_module.return_value = SimpleNamespace(
             Client=MagicMock(return_value=fake_client)
         )
@@ -292,7 +292,7 @@ def test_aisuite_factory_imports_aisuite_lazily():
 def test_provider_factory_can_select_aisuite_backend():
     logger = logging.getLogger("test")
 
-    with patch("src.model_provider.create_aisuite_provider") as create_aisuite:
+    with patch("localize.model_provider.create_aisuite_provider") as create_aisuite:
         create_aisuite.return_value = object()
         provider = create_model_provider(
             provider_name="aisuite",
@@ -309,7 +309,7 @@ def test_provider_factory_can_select_aisuite_backend():
 def test_provider_factory_defaults_to_aisuite_backend():
     logger = logging.getLogger("test")
 
-    with patch("src.model_provider.create_aisuite_provider") as create_aisuite:
+    with patch("localize.model_provider.create_aisuite_provider") as create_aisuite:
         create_aisuite.return_value = object()
         provider = create_model_provider(
             provider_name="",
@@ -325,7 +325,7 @@ def test_provider_factory_defaults_to_aisuite_backend():
 def test_aisuite_factory_adds_openai_placeholder_for_custom_endpoint_without_key():
     logger = logging.getLogger("test")
 
-    with patch("src.model_provider.create_aisuite_provider") as create_aisuite:
+    with patch("localize.model_provider.create_aisuite_provider") as create_aisuite:
         create_aisuite.return_value = object()
         create_model_provider(
             provider_name="aisuite",
@@ -358,7 +358,7 @@ def test_aisuite_factory_allows_non_openai_models_without_openai_key():
     logger = logging.getLogger("test")
     provider_configs = {"anthropic": {"api_key": "secret-from-provider-config"}}
 
-    with patch("src.model_provider.create_aisuite_provider") as create_aisuite:
+    with patch("localize.model_provider.create_aisuite_provider") as create_aisuite:
         create_aisuite.return_value = object()
         provider = create_model_provider(
             provider_name="aisuite",

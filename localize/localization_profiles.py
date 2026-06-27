@@ -10,8 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Tuple
 
-from src.localization_formats import LocalizationFormat, load_localization_format
-from src.localization_layouts import LocalizationLayout, load_localization_layout
+from localize.localization_formats import LocalizationFormat, load_localization_format
+from localize.localization_layouts import LocalizationLayout, load_localization_layout
 
 
 @dataclass(frozen=True)

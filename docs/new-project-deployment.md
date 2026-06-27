@@ -1,162 +1,203 @@
-# New Project Deployment Guide
+# Server Deployment
 
-This guide provides a complete walkthrough for deploying a new, isolated instance of the translator tool on a Linux server.
+Use this guide when you need a scheduled Docker job instead of the GitHub Action.
+This path is intended for production services that pull from Transifex, push
+signed commits, and open translation PRs from a dedicated bot identity.
+
+For most repositories, start with the GitHub Action instead:
+[docs/github-action.md](github-action.md).
+
+## Architecture
+
+The server deployment is Docker Compose plus cron:
+
+1. The host runs `docker compose run -T --rm translator` on a schedule.
+2. The container prepares the target repository in `/target_repo`.
+3. `update-translations.sh` prepares the configured translation source
+   (`git` or `transifex`).
+4. The container runs `python -m localize.cli run --config /app/config.yaml`.
+5. If translations changed, the script commits, signs, pushes, and opens a PR.
+
+There is no supported `translator.service` systemd unit in this repository.
 
 ## Prerequisites
 
-1.  **A Linux Server**: A fresh VPS instance (e.g., Ubuntu 22.04) is recommended.
-2.  **Docker and Docker Compose**: Ensure they are installed and that **BuildKit is enabled**.
-    -   [Install Docker Engine](https://docs.docker.com/engine/install/ubuntu/)
-    -   [Install Docker Compose](https://docs.docker.com/compose/install/)
-    -   Enable BuildKit by setting these environment variables in your `~/.bashrc` or `~/.profile`:
-        ```bash
-        export DOCKER_BUILDKIT=1
-        export COMPOSE_DOCKER_CLI_BUILD=1
-        ```
-3.  **Git**: `sudo apt-get update && sudo apt-get install -y git`
-4.  **GitHub Deploy Key**: A dedicated SSH key for the service.
-    -   Generate one: `ssh-keygen -t ed25519 -C "translator-bot-deploy-key"`
-    -   Add the **public key** (`id_ed25519.pub`) as a "Deploy Key" with "Allow write access" in the **forked** GitHub repository's settings (`Settings -> Deploy Keys`).
-5.  **GPG Key**: A GPG key for signing commits, in ASCII-armored format.
-6.  **API Tokens**:
-    -   `OPENAI_API_KEY`: From your OpenAI account.
-    -   `TX_TOKEN`: From your Transifex account.
-    -   `GITHUB_TOKEN`: A GitHub Personal Access Token with `repo` and `workflow` scopes.
+- Linux server with Docker Engine and the Docker Compose plugin.
+- Git.
+- Dedicated GitHub bot account or deploy key flow.
+- GPG key for signing commits if signed commits are required.
+- Model-provider credentials, unless using a keyless local endpoint.
+- Transifex token if `translation_source: transifex`.
 
-## Step 1: Clone the Project
-
-Clone this repository onto your server.
+Enable BuildKit for the shell that builds the image:
 
 ```bash
-git clone <your-repository-url> /opt/translator-service
-cd /opt/translator-service
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
 ```
 
-## Step 2: Add Secrets
-
-> **Important:** The `secrets/` directory and `docker/.env` file contain sensitive credentials. Ensure they are listed in your `.gitignore` file and are never committed to your repository.
-
-This is a security-critical step. You must place the deploy key, GPG key, and API tokens in the correct locations.
-
-1.  **SSH Deploy Key**:
-    -   Copy your **private** SSH key (`id_ed25519`).
-    -   Place it into the file at `secrets/deploy_key/id_ed25519`. The filename must match the key type.
-
-2.  **GPG Private Key**:
-    -   Copy your ASCII-armored GPG private key.
-    -   Paste it into the file at `secrets/gpg_bot_key/bot_secret_key.asc`.
-
-3.  **Create the `.env` File**:
-    -   Create a new file at `docker/.env`.
-    -   Add the following content, replacing the placeholder values. **Do not use quotes**.
-
-    ```bash
-    # === Service Instance Identity ===
-    # These names ensure this instance's container and volume don't conflict with others.
-    CONTAINER_NAME=translator-my-project
-    VOLUME_NAME=target-repo-data-my-project
-    TRANSLATOR_PROFILE=my-project
-
-    # === API Keys and Tokens ===
-    GITHUB_TOKEN=ghp_YourGitHubPersonalAccessToken
-    OPENAI_API_KEY=sk-YourOpenAI_API_Key
-    TX_TOKEN=YourTransifexToken
-
-    # === Git Author Identity ===
-    # This name and email will be used for the commit author and committer.
-    # The email MUST be a verified email on the GitHub account associated with the GPG key.
-    # Do not use quotes around the values.
-    GIT_AUTHOR_NAME=Translation Bot
-    GIT_AUTHOR_EMAIL=your-email@example.com
-
-    # === Git Repository Names ===
-    # The 'owner/repo' name of your FORK.
-    FORK_REPO_NAME=your-username/your-fork
-    # The 'owner/repo' name of the MAIN repository.
-    UPSTREAM_REPO_NAME=original-org/original-repo
-    ```
-
-4.  **Harden File Permissions**:
-    -   Restrict access to all secret files. Directories need execute permissions to be accessible, while files should be read-only for the owner.
-    ```bash
-    # Set correct permissions for the secrets directory and the files within it
-    find secrets -type d -exec chmod 700 {} +
-    find secrets -type f -exec chmod 600 {} +
-    chmod 600 docker/.env
-    ```
-
-## Step 3: Configure the Service
-
-Create and edit the project profile mounted by Docker.
+## 1. Install The Pipeline
 
 ```bash
-# Create an instance-specific profile mounted as /app/config.yaml and /app/glossary.json.
+git clone <repository-url> /opt/localize-pipeline
+cd /opt/localize-pipeline
+```
+
+The examples below use `/opt/localize-pipeline`; adjust the path for your
+installation.
+
+## 2. Create A Profile
+
+Profiles are mounted into the container as `/app/config.yaml` and
+`/app/glossary.json`.
+
+```bash
 mkdir -p profiles/my-project
 cp config.example.yaml profiles/my-project/config.yaml
 cp glossary.example.json profiles/my-project/glossary.json
-
-# Now, edit the profile config to set the correct paths and repository details.
-# At a minimum, you must set:
-# - target_project_root: /target_repo
-# - input_folder: i18n/src/main/resources
-# input_folder is resolved relative to target_project_root when it is not absolute.
-nano profiles/my-project/config.yaml
 ```
 
-The `TRANSLATOR_PROFILE=my-project` value in `docker/.env` selects
-`profiles/my-project/` for Docker runs. The included Bisq production profile is
-available under `profiles/bisq/` as a complete real-world example.
+Edit `profiles/my-project/config.yaml`:
 
-The default profile uses `model_provider: aisuite`, which is packaged with the
-Docker image. Bare model names are treated as OpenAI models. Set
-`model_provider: openai_compatible` only if you intentionally want the direct
-OpenAI SDK fallback path.
+```yaml
+target_project_root: "/target_repo"
+input_folder: "i18n/src/main/resources"
+translation_source: "transifex"
+localization_format: "java_properties"
+localization_layout:
+  id: "suffix"
+  source_locale: "en"
+```
 
-## Step 4: Build the Docker Image
+`input_folder` is resolved relative to `target_project_root` when it is not
+absolute. In other words, input_folder is resolved relative to target_project_root
+for the common Docker profile shape. For mixed projects, use
+`localization_formats`:
 
-From the project root, run the build command. This will create a self-contained image with all dependencies.
+```yaml
+localization_formats:
+  - id: "java_properties"
+    layout: "suffix"
+  - id: "json"
+    layout:
+      id: "locale_directory"
+      source_locale: "en"
+```
 
-> **Note on Security:** The build process uses Docker BuildKit's secret mounting feature. This means your keys are securely accessed only during the build and are **never** stored in the final Docker image layers.
+The included `profiles/bisq/` directory is a full production example with style
+rules, semantic QA rules, and a project glossary.
+
+## 3. Configure Secrets
+
+Create `docker/.env` from the example:
 
 ```bash
-# Ensure you are in the project root first
-cd /opt/translator-service
+cp docker/.env.example docker/.env
+chmod 600 docker/.env
+```
+
+Set at least:
+
+```bash
+TRANSLATOR_PROFILE=my-project
+GITHUB_TOKEN=...
+OPENAI_API_KEY=...
+TX_TOKEN=...
+GIT_AUTHOR_NAME=Translation Bot
+GIT_AUTHOR_EMAIL=bot@example.com
+FORK_REPO_NAME=your-org/target-fork
+UPSTREAM_REPO_NAME=upstream-org/target-repo
+```
+
+For local/OpenAI-compatible endpoints, set `api_base_url` in the profile or
+`OPENAI_BASE_URL` in `docker/.env`.
+
+Never commit `docker/.env` or files under `secrets/`.
+
+## 4. Add Deploy And Signing Keys
+
+For the Docker production image, place secrets in the expected paths:
+
+```bash
+mkdir -p secrets/deploy_key secrets/gpg_bot_key
+install -m 600 /path/to/id_ed25519 secrets/deploy_key/id_ed25519
+install -m 600 /path/to/bot_secret_key.asc secrets/gpg_bot_key/bot_secret_key.asc
+```
+
+Add the deploy key public half to the target fork with write access. Make sure
+the GPG key identity matches `GIT_AUTHOR_EMAIL`.
+
+## 5. Build
+
+```bash
 docker compose --env-file docker/.env -f docker/docker-compose.yml build
 ```
 
-## Step 5: Perform a Manual Test Run
+BuildKit mounts the deploy and GPG keys as build secrets. They are used during
+the build and are not copied into image layers.
 
-Before setting up the cron job, it's crucial to test that everything is working correctly.
+## 6. Validate The Container
+
+Run a low-risk format/config check:
 
 ```bash
-# This command will start the service, clone the repo, and run the translation script.
-# Monitor the output for any errors.
-docker compose --env-file docker/.env -f docker/docker-compose.yml run --rm translator
+docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator \
+  python -m localize.cli formats
 ```
 
-If the run succeeds, you should see a new pull request created in the upstream repository.
+Then run the full pipeline manually:
 
-## Step 6: Schedule the Cron Job
+```bash
+docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator
+```
 
-Once the manual run is successful, schedule the service to run automatically.
+Use `-T` for SSH/cron contexts so Docker Compose does not consume stdin from the
+parent shell.
 
-1.  Open the root user's crontab for editing:
-    ```bash
-    sudo crontab -e
-    ```
-2.  Paste the following line at the bottom of the file. This is a robust example that sets the required environment and uses absolute paths. It will run the translator every day at 3:00 AM.
+Expected no-op output includes:
 
-    ```cron
-    # Set a sane environment for the cron job
-    SHELL=/bin/bash
-    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    DOCKER_BUILDKIT=1
-    COMPOSE_DOCKER_CLI_BUILD=1
+```text
+Transifex pull completed successfully, but no translation files were modified.
+No further processing needed. Exiting gracefully.
+```
 
-    # Run the translator service daily at 3:00 AM server time.
-    # This command ensures the log directory exists and passes the environment file to Compose.
-    0 3 * * * cd /opt/translator-service/ && mkdir -p logs && /usr/bin/docker compose --env-file docker/.env -f docker/docker-compose.yml run --rm translator >> /opt/translator-service/logs/cron_job.log 2>&1
-    ```
-3.  Save and close the file.
+If translations changed, expect a branch and PR in the configured upstream repo.
 
-**Deployment is now complete.** The service will run automatically on the schedule you've set. You can check the log file at `/opt/translator-service/logs/cron_job.log` to monitor its execution.
+## 7. Schedule Cron
+
+Edit root's crontab:
+
+```bash
+sudo crontab -e
+```
+
+Add:
+
+```cron
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+DOCKER_BUILDKIT=1
+COMPOSE_DOCKER_CLI_BUILD=1
+
+0 3 * * * cd /opt/localize-pipeline && mkdir -p logs && /usr/bin/docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator >> /opt/localize-pipeline/logs/cron_job.log 2>&1
+```
+
+## 8. Maintain The Host
+
+Docker builds and run containers consume disk over time. Install the cleanup
+script or schedule an equivalent cleanup:
+
+```bash
+sudo ./scripts/setup-cron-cleanup.sh /opt/localize-pipeline
+```
+
+More detail: [docs/maintenance/disk-space-management.md](maintenance/disk-space-management.md).
+
+## Operational Checks
+
+- `git status` in the pipeline repo should be clean before deploys.
+- Rebuild after changes to `localize/`, `requirements.txt`, Docker files, or
+  profile files.
+- Run a manual `docker compose ... run -T --rm translator` after rebuilds.
+- Keep deploy keys and tokens scoped to the target repository.
+- Rotate keys periodically.

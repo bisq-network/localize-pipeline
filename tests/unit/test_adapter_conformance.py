@@ -1,5 +1,5 @@
-from src.formats import JSON_ADAPTER, JAVA_PROPERTIES_ADAPTER
-from src.formats.testing import (
+from localize.formats import JSON_ADAPTER, JAVA_PROPERTIES_ADAPTER
+from localize.formats.testing import (
     LocalizationAdapterConformanceCase,
     assert_localization_adapter_conformance,
 )

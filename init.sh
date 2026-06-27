@@ -8,7 +8,7 @@ set -euo pipefail
 #   ./init.sh --input-folder path/to/i18n [--localization-format java_properties|json] [--localization-layout suffix|locale_directory|locale_filename] [--target-project-root .] [--overwrite]
 #   ./init.sh --input-folder path/to/i18n --api-base-url http://localhost:11434/v1   # Ollama
 #
-# All arguments are forwarded to `python -m src.init_config`.
+# All arguments are forwarded to `python -m localize.init_config`.
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "$PROJECT_ROOT"
@@ -25,4 +25,4 @@ if [ -z "${PYTHON:-}" ]; then
     exit 1
 fi
 
-exec "$PYTHON" -m src.init_config "$@"
+exec "$PYTHON" -m localize.init_config "$@"

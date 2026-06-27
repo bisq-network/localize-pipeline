@@ -1,15 +1,19 @@
 import logging
+import json
 from dataclasses import dataclass, field
 from typing import List
 
 import pytest
 
-from src.connectors import (
+from localize.connectors import (
+    FileReporterConnector,
+    FilesystemSourceConnector,
+    FunctionProcessorConnector,
     PipelineConnectorSet,
     PipelinePublisher,
     PipelinePublishRequest,
 )
-from src.pipeline_core import TranslationPipelineOptions, TranslationPipelinePaths
+from localize.pipeline_core import TranslationPipelineOptions, TranslationPipelinePaths
 
 
 @dataclass
@@ -137,3 +141,130 @@ async def test_connector_set_builds_pipeline_steps_and_publisher_boundary():
     assert publisher.requests == [
         PipelinePublishRequest(paths=paths, result=result)
     ]
+
+
+def test_filesystem_source_connector_copies_archives_and_cleans_relative_files(tmp_path):
+    input_folder = tmp_path / "i18n"
+    input_folder.mkdir()
+    (input_folder / "nested").mkdir()
+    (input_folder / "nested" / "messages_de.json").write_text('{"hello":"Hallo"}\n', encoding="utf-8")
+    queue = tmp_path / "queue"
+    translated = tmp_path / "translated"
+    archive = input_folder / "archive"
+    detected: List[bool] = []
+    connector = FilesystemSourceConnector(
+        detect_changed_translation_files=lambda input_folder, repo_root, *, process_all_files: detected.append(process_all_files)
+        or ["nested/messages_de.json"],
+    )
+
+    connector.validate_paths(str(input_folder), str(queue), str(translated), str(tmp_path))
+    changed = connector.get_changed_translation_files(str(input_folder), str(tmp_path), process_all_files=True)
+    connector.archive_original_files(changed, str(input_folder), str(archive))
+    connector.copy_files_to_translation_queue(changed, str(input_folder), str(queue))
+    assert (queue / "nested" / "messages_de.json").read_text(encoding="utf-8") == '{"hello":"Hallo"}\n'
+    connector.cleanup_queue_folders(str(queue), str(translated))
+
+    assert detected == [True]
+    assert changed == ["nested/messages_de.json"]
+    assert (archive / "nested" / "messages_de.json").read_text(encoding="utf-8") == '{"hello":"Hallo"}\n'
+    assert not queue.exists()
+
+
+@pytest.mark.parametrize(
+    ("translation_queue", "translated_queue", "expected_message"),
+    [
+        ("input", "translated", "separate from repo_root and input_folder"),
+        ("queue", "input", "separate from repo_root and input_folder"),
+        ("queue", "queue", "must be different"),
+    ],
+)
+def test_filesystem_source_connector_rejects_queue_path_collisions(
+    tmp_path,
+    translation_queue,
+    translated_queue,
+    expected_message,
+):
+    input_folder = tmp_path / "input"
+    input_folder.mkdir()
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    with pytest.raises(ValueError, match=expected_message):
+        connector.validate_paths(
+            str(input_folder),
+            str(tmp_path / translation_queue),
+            str(tmp_path / translated_queue),
+            str(tmp_path),
+        )
+
+
+def test_filesystem_source_connector_requires_validated_paths_before_cleanup(tmp_path):
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    with pytest.raises(ValueError, match="validated before cleanup"):
+        connector.cleanup_queue_folders(str(tmp_path / "queue"), str(tmp_path / "translated"))
+
+
+@pytest.mark.parametrize("unsafe_path", ["/tmp/secret.properties", "../secret.properties"])
+def test_filesystem_source_connector_rejects_unsafe_changed_file_paths(tmp_path, unsafe_path):
+    input_folder = tmp_path / "input"
+    archive = tmp_path / "archive"
+    input_folder.mkdir()
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    with pytest.raises(ValueError):
+        connector.archive_original_files([unsafe_path], str(input_folder), str(archive))
+
+
+def test_file_reporter_connector_writes_machine_and_human_reports(tmp_path):
+    reporter = FileReporterConnector()
+    skipped_report = tmp_path / "skipped.log"
+    summary_path = tmp_path / "translation_summary.json"
+    validation_path = tmp_path / "validation.json"
+
+    reporter.write_skipped_files_report(str(skipped_report), {"messages_de.json": ["placeholder mismatch"]})
+    reporter.generate_translation_summary(
+        str(summary_path),
+        processed_files=["messages_de.json"],
+        new_keys_count=2,
+        updated_keys_count=1,
+    )
+    reporter.write_translation_validation_summary(
+        str(validation_path),
+        validation_files={"messages_de.json": {"failed_keys": []}},
+        skipped_files={},
+    )
+
+    assert "placeholder mismatch" in skipped_report.read_text(encoding="utf-8")
+    assert json.loads(summary_path.read_text(encoding="utf-8"))["new_keys_count"] == 2
+    assert json.loads(validation_path.read_text(encoding="utf-8"))["files"]["messages_de.json"] == {
+        "failed_keys": []
+    }
+
+
+@pytest.mark.asyncio
+async def test_function_processor_connector_adapts_runtime_functions(tmp_path):
+    calls: List[str] = []
+
+    async def process(**kwargs):
+        calls.append(kwargs["translation_queue_folder"])
+        kwargs["validation_summary"]["messages_de.json"] = {}
+        return 1, ["messages_de.json"], {}, 1
+
+    def write_usage(summary_path):
+        calls.append(summary_path)
+
+    connector = FunctionProcessorConnector(
+        process_translation_queue_fn=process,
+        write_token_usage_summary_fn=write_usage,
+    )
+
+    result = await connector.process_translation_queue(
+        translation_queue_folder="queue",
+        translated_queue_folder="translated",
+        glossary_file_path="glossary.json",
+        validation_summary={},
+    )
+    connector.write_token_usage_summary(str(tmp_path / "usage.json"))
+
+    assert result[0] == 1
+    assert calls == ["queue", str(tmp_path / "usage.json")]

@@ -1,45 +1,76 @@
-# Translate Localization Files
+# Localize Pipeline
 
-AI translation for your Java `.properties` or JSON localization files that runs entirely in **your**
-CI, with **your** model — OpenAI, or a local Ollama for **zero data egress** — and
-opens a **reviewable pull request**. No account, no quota, no per-word bill.
+AI localization for projects that want translations as normal pull requests.
 
-> Data flow: with a local/self-hosted `api_base_url` (e.g. Ollama) your strings
-> never leave your infrastructure. With the default OpenAI provider, strings are
-> sent to OpenAI's API like any other OpenAI call — choose the provider that fits
-> your privacy needs.
+Localize Pipeline detects changed source strings, translates the matching target
+locale entries, runs deterministic and AI review checks, and opens a PR that your
+team can inspect before merge. It runs in your CI or on your own server with your
+model provider and your credentials.
 
-It detects changed strings, translates new/changed keys with a two-pass
-translate→review process, enforces a glossary and quality gates, and proposes the
-result as a PR you review and merge.
+## Why Use It
 
----
+- **Runs in your infrastructure.** Use GitHub Actions, local CLI runs, or a Docker
+  Compose cron job.
+- **Bring your own model.** AISuite is the default provider abstraction. Bare
+  OpenAI model names and explicit AISuite names such as `openai:gpt-4o-mini`
+  are supported.
+- **Zero data egress option.** Point `api_base_url` at a local OpenAI-compatible
+  endpoint such as Ollama and keep strings inside your infrastructure.
+- **Reviewable output.** Translations are committed to a branch and opened as a
+  pull request.
+- **Format-aware.** Java `.properties` and JSON files are built in. Mixed-format
+  projects use a profile list.
+- **Reusable by other projects.** The stable surfaces are the `localize` CLI,
+  `localize.core`, `localize.formats`, and `localize.providers`.
 
-## 🚀 Add AI translation to your project in 5 minutes
+## Quickstart
 
-**1. Scaffold a config** (auto-detects your locales from existing localization files):
+Generate a config from an existing localization folder:
 
 ```bash
-./init.sh --input-folder path/to/your/i18n
-# or, for JSON locale files:
-./init.sh --input-folder path/to/your/i18n --localization-format json
-# or, for JSON files stored as locales/en/*.json and locales/de/*.json:
-./init.sh --input-folder path/to/your/i18n --localization-format json --localization-layout locale_directory
+./init.sh --input-folder path/to/i18n
 ```
 
-Commit the generated `config.yaml`.
+For JSON:
 
-You can also use the reusable CLI directly:
+```bash
+./init.sh --input-folder path/to/i18n --localization-format json
+```
+
+For JSON stored as `locales/en/messages.json` and
+`locales/de/messages.json`:
+
+```bash
+./init.sh \
+  --input-folder locales \
+  --localization-format json \
+  --localization-layout locale_directory
+```
+
+For a mixed project:
+
+```bash
+./init.sh \
+  --input-folder path/to/i18n \
+  --localization-profile java_properties:suffix \
+  --localization-profile json:locale_directory
+```
+
+Then validate and run:
 
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -e .
-localize init --input-folder path/to/your/i18n
 localize validate --config config.yaml
 localize run --config config.yaml
 ```
 
-**2. Add a GitHub workflow** — `.github/workflows/translate.yml`:
+Set `OPENAI_API_KEY` for OpenAI-backed runs, or set `api_base_url` in
+`config.yaml` for a local/OpenAI-compatible endpoint.
+
+## GitHub Action
+
+Add `.github/workflows/translate.yml`:
 
 ```yaml
 name: Translate
@@ -65,192 +96,145 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-On the next push, the action translates keys changed since the base ref using the
-workflow's own `GITHUB_TOKEN` and opens a PR. Full reference:
-**[GitHub Action guide](./docs/github-action.md)**.
+The action translates only files changed since the configured diff base. Use
+`process-all-files: true` once for an initial backfill, then return to
+incremental runs.
 
-### Translate with a local model (zero data egress)
+Full guide: [docs/github-action.md](docs/github-action.md).
 
-Point the pipeline at a local [Ollama](https://ollama.com) server (or any
-OpenAI-compatible endpoint). No API key leaves your machine — your strings never
-leave your infrastructure:
+## Configuration Model
 
-```bash
-# In config.yaml (or via the OPENAI_BASE_URL env var):
-#   api_base_url: "http://localhost:11434/v1"
-#   model_name: "llama3.1"
-#   review_model_name: "llama3.1"
-./init.sh --input-folder path/to/your/i18n --api-base-url http://localhost:11434/v1
+Single-format projects use:
+
+```yaml
+localization_format: "json"
+localization_layout:
+  id: "locale_directory"
+  source_locale: "en"
 ```
 
-Completion-token caps are normalized internally, so newer OpenAI models that
-require `max_completion_tokens` and compatible endpoints that only accept
-`max_tokens` can share the same config shape.
+Mixed-format projects use profiles:
 
-### Run it locally (no Docker, no CI)
-
-```bash
-python3 -m venv venv                         # first time only
-./venv/bin/pip install pip-tools && ./venv/bin/pip-sync requirements-dev.txt
-./venv/bin/pip install -e .
-export OPENAI_API_KEY=sk-...                  # or use a local api_base_url
-localize validate --config config.yaml
-localize run --config config.yaml
+```yaml
+localization_formats:
+  - id: "java_properties"
+    layout: "suffix"
+  - id: "json"
+    layout:
+      id: "locale_directory"
+      source_locale: "en"
 ```
 
-The pipeline prints a **per-run cost estimate** before spending and a token/cost
-summary afterward, so you always know what a run costs on your key.
-
----
-
-## Features
-
-* **Your provider, your cost** — AISuite is the default packaged provider
-  abstraction for multi-provider model names, with OpenAI-compatible endpoints
-  (Ollama, Groq, Together, …) supported through `api_base_url` /
-  `OPENAI_BASE_URL`. No markup, no quota.
-* **Two-step quality process** — a fast initial translation followed by a chunked
-  holistic AI review for consistency and quality.
-* **Glossary & style rules** — enforce brand terms, required translations, and
-  per-locale tone; all version-controlled in your repo.
-* **Quality gates** — placeholder/encoding validation plus deterministic, learned
-  semantic rules; problems are reported in the PR, not silently shipped.
-* **Git-PR-native** — changes arrive as a reviewable pull request.
-* **Cost transparency** — estimated cost before a run, actual token/cost summary
-  after (and in the PR description for the server pipeline).
-* **Built-in file formats** — Java `.properties` and JSON locale files.
-* **Built-in file layouts** — suffix files (`messages_de.properties` /
-  `messages.de.json`), locale directories (`locales/de/messages.json`), and
-  locale filenames (`locales/de.json`).
-* **Two translation sources** — `git` (use the localization files already in your repo)
-  or `transifex` (pull via the `tx` CLI first).
-* **Reusable CLI** — `localize init`, `localize validate`, `localize formats`, and
-  `localize run` are the stable command surface for non-Bisq projects.
-
----
-
-## 🛠️ Configuration
-
-* **`config.example.yaml`** — a minimal, generic starting point. Copy to
-  `config.yaml` and edit (or generate it with `./init.sh`).
-* **`examples/generic-java-properties/`** and **`examples/generic-json/`** —
-  small copyable profiles for the built-in file formats.
-* **`profiles/bisq/`** — a comprehensive real-world profile (the Bisq production
-  config and glossary) with per-locale style rules and learned semantic rules.
-* **`glossary.example.json`** — the glossary format (per-language term mappings).
-* **`docker/.env`** — secrets (API keys, tokens, repo URLs); not committed.
+Each profile owns matching files for source lookup, parsing, validation, prompt
+construction, serialization, quality gates, semantic review, and publishing.
+Singular `localization_format` configs remain supported for existing projects.
 
 Key settings:
 
 | Setting | Purpose |
-|---|---|
-| `target_project_root`, `input_folder` | Where your repo and localization files live. |
-| `localization_format` | Built-in format id: `java_properties` or `json` for single-format projects. |
-| `localization_layout` | File layout id: `suffix`, `locale_directory`, or `locale_filename`. |
-| `localization_formats` | Optional list of format/layout profiles for mixed projects. |
-| `project_context` | Product/domain guidance injected into translation prompts. |
-| `translation_source` | `git` (default for new projects) or `transifex`. |
-| `model_provider` | `aisuite` by default; use `openai_compatible` only for the direct OpenAI SDK fallback path. |
-| `model_name`, `review_model_name` | Translate and review models. |
-| `api_base_url` | OpenAI-compatible endpoint, e.g. a local Ollama server. |
-| `supported_locales` | Target languages. |
-| `style_rules`, `brand_technical_glossary` | Per-locale tone and do-not-translate terms. |
+| --- | --- |
+| `target_project_root` | Repository that contains the localization files. |
+| `input_folder` | Localization folder, absolute or relative to `target_project_root`. |
+| `localization_format` | Built-in format id for single-format projects. |
+| `localization_layout` | `suffix`, `locale_directory`, or `locale_filename`. |
+| `localization_formats` | Profile list for mixed-format projects. |
+| `translation_source` | `git` or `transifex`. New projects usually start with `git`. |
+| `model_provider` | `aisuite` by default; `openai_compatible` is the direct SDK fallback. |
+| `model_name`, `review_model_name` | Translation and review models. |
+| `api_base_url` | OpenAI-compatible endpoint, for example Ollama. |
+| `supported_locales` | Target locales. |
+| `project_context` | Product/domain context injected into prompts. |
+| `brand_technical_glossary` | Terms that must not be translated. |
+| `style_rules` | Locale-specific writing rules. |
 
-AISuite is the default packaged provider. Bare model names such as
-`gpt-4o-mini` are treated as OpenAI models for compatibility, and explicit
-AISuite names such as `openai:gpt-4o-mini` remain supported. The pipeline still
-owns token counting, cost estimates, retry behavior, and completion-token
-compatibility at its provider boundary, so direct OpenAI SDK fallback runs can
-use the same higher-level config shape.
+Examples:
 
-### Public API boundaries
+- [config.example.yaml](config.example.yaml) is the minimal generic starter.
+- [examples/generic-java-properties](examples/generic-java-properties) shows Java
+  `.properties`.
+- [examples/generic-json](examples/generic-json) shows JSON.
+- [profiles/bisq](profiles/bisq) is the production Bisq profile with richer
+  style and semantic QA rules.
 
-Reusable modules should import from the stable public packages instead of
-internal implementation files:
+## CLI
 
-* `src.core` — format-agnostic pipeline orchestration contracts.
-* `src.providers` — chat-model provider contracts and provider factories.
-* `src.formats` — localization format/layout metadata, runtime adapters, adapter
-  registration, configured format profiles, and conformance-test helpers.
+```bash
+localize formats
+localize init --input-folder path/to/i18n
+localize validate --config config.yaml
+localize run --config config.yaml
+```
 
-CLI details: **[Localization CLI guide](./docs/localization-cli.md)**.
+Custom adapter modules can be loaded before any command:
 
-### Adding new languages
+```bash
+localize --plugin my_project.localize_adapter formats
+```
 
-➡️ **[Adding New Locales Guide](./docs/adding-new-locales.md)**
+Installed packages can also expose the `localize.format_adapters` entry point
+group, or users can set `LOCALIZE_PLUGIN_MODULES=module_a,module_b`.
 
----
+Full guide: [docs/localization-cli.md](docs/localization-cli.md).
 
-## Advanced: Docker & server deployment
+## Public Python API
 
-The original deployment model runs the pipeline as a scheduled Docker job that
-pulls from Transifex and pushes signed commits via a baked-in SSH deploy key.
-This is how the Bisq translation service runs in production; most adopters should
-prefer the GitHub Action above.
+Use these packages for reusable code:
 
-<details>
-<summary>Docker / production deployment details</summary>
+- `localize.core`: pipeline contracts plus reusable filesystem/reporter/processor
+  connectors.
+- `localize.formats`: format metadata, adapters, plugin registration, and
+  conformance tests.
+- `localize.providers`: AISuite/OpenAI-compatible provider factories and
+  capabilities.
 
-Before building locally, enable BuildKit:
+Avoid importing implementation modules directly unless you are contributing to
+this repository.
+
+## Docker Server Deployment
+
+Most projects should use the GitHub Action. The Docker path is for scheduled
+server jobs that pull from Transifex and push signed translation PRs.
 
 ```bash
 export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
+docker compose --env-file docker/.env -f docker/docker-compose.yml build
+docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator
 ```
 
-**Deploy key setup:** generate a dedicated `ed25519` key (no passphrase), add the
-public key as a deploy key on the target repo **with write access** (it must push
-the translation branch), and place the private key at
-`secrets/deploy_key/id_ed25519` (override the name with `DEPLOY_KEY_NAME` in
-`docker/.env`).
+Docker mounts `profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml` and
+`glossary.json` into the container. Keep deploy keys, GPG keys, and tokens in
+`secrets/` and `docker/.env`; never commit them.
 
-**Run the full pipeline (Transifex pull → AI translate → PR):**
+Server guide: [docs/new-project-deployment.md](docs/new-project-deployment.md).
 
-```bash
-docker compose run --rm translator
-```
+## Maintenance
 
-By default Docker mounts `profiles/bisq/`. Set `TRANSLATOR_PROFILE` in
-`docker/.env` to mount a different `profiles/<name>/` directory.
-
-> The baked-in deploy key must be scoped to the single target repo (with write
-> access, since it pushes the translation branch), rotated regularly, and used
-> only in non-public images.
-
-For production server setup (cron, etc.):
-➡️ **[New Project Deployment Guide](./docs/new-project-deployment.md)**
-
-</details>
-
----
-
-## 🔧 Maintenance
-
-Docker deployments accumulate disk usage over time. See:
-➡️ **[Disk Space Management Guide](./docs/maintenance/disk-space-management.md)**
-and the ready-to-deploy **[Docker Cleanup Script](./scripts/docker-cleanup.sh)**.
-
-```bash
-df -h /
-docker system df -v
-journalctl --disk-usage
-```
+- [docs/maintenance/disk-space-management.md](docs/maintenance/disk-space-management.md)
+  covers Docker cleanup and log retention.
+- [scripts/docker-cleanup.sh](scripts/docker-cleanup.sh) is the ready-to-run
+  cleanup script for Docker deployments.
 
 ## Troubleshooting
 
-* **`Permission denied (publickey)` on `git push`** — the deploy key in
-  `secrets/deploy_key/` is not added to the target repo's Deploy Keys with write access.
-* **Validation errors in the PR** — the PR description lists files skipped due to
-  validation/linter errors; fix them in the source repo. See
-  `docs/llm/debug-docker-service.md`.
-* **No locales detected by `./init.sh`** — your files may not use a supported
-  locale filename convention such as `name_<locale>.properties`, `name_<locale>.json`,
-  `name.<locale>.json`, `locales/<locale>/name.json`, or `locales/<locale>.json`.
-  If your repository uses locale-directory or locale-filename paths, rerun
-  `./init.sh` with the matching `--localization-layout` before adding
-  `supported_locales` manually.
-* **Disk space** — see [Maintenance](#-maintenance) above.
+- **No locale files detected:** choose the layout that matches your repository:
+  `suffix`, `locale_directory`, or `locale_filename`.
+- **`Permission denied (publickey)` on push:** the deploy key is missing or does
+  not have write access to the fork repository.
+- **Quality gate failed:** inspect the PR report. The pipeline reports skipped
+  files, placeholder errors, semantic findings, and suspicious source-identical
+  values.
+- **Model parameter errors:** completion-token caps are normalized at the provider
+  boundary. Use `model_provider: aisuite` unless you need the direct
+  `openai_compatible` fallback.
 
 ## Contributing
 
-Contributions are welcome! Please fork the repository, create a branch, commit
-your changes, and open a pull request.
+Use TDD for behavior changes:
+
+```bash
+OPENAI_API_KEY=sk-test-key venv/bin/ruff check .
+OPENAI_API_KEY=sk-test-key venv/bin/pytest -q
+```
+
+Keep public docs, examples, and tests aligned with any API or configuration
+changes.

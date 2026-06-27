@@ -9,7 +9,7 @@ import os
 
 os.environ.setdefault("OPENAI_API_KEY", "DUMMY_KEY_FOR_TESTING")
 
-from src.translate_localization_files import (
+from localize.translate_localization_files import (
     run_per_key_validation,
     run_per_key_validation_with_summary,
 )

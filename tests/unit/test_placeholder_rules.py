@@ -2,8 +2,8 @@
 
 from collections import Counter
 
-from src.placeholder_rules import extract_placeholder_tokens, protect_placeholders, restore_placeholders
-from src.translation_validator import check_placeholder_parity
+from localize.placeholder_rules import extract_placeholder_tokens, protect_placeholders, restore_placeholders
+from localize.translation_validator import check_placeholder_parity
 
 
 def test_extract_placeholder_tokens_supports_common_localization_syntaxes():

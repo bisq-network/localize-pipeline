@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence, Set
 
-from src.localization_adapters import LocalizationFileAdapter
+from localize.localization_adapters import LocalizationFileAdapter
 
 
 @dataclass(frozen=True)

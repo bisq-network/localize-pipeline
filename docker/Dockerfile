@@ -162,4 +162,4 @@ COPY docker/ssh_known_hosts /etc/ssh/ssh_known_hosts
 RUN chmod 644 /etc/ssh/ssh_known_hosts
 
 # Default command is now the main python script (can be overridden in docker-compose.yml)
-CMD ["python3", "-m", "src.translate_localization_files"] 
+CMD ["python3", "-m", "localize.translate_localization_files"]

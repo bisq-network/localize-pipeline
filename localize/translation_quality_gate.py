@@ -13,20 +13,22 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
-from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat, load_localization_format
-from src.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout, load_localization_layout
-from src.semantic_quality import (
+from localize.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat, load_localization_format
+from localize.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout, load_localization_layout
+from localize.localization_profiles import LocalizationProfile, load_localization_profiles
+from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
     SemanticRule,
-    analyze_all_translation_entries,
+    TranslationChange,
     analyze_translation_changes,
+    iter_all_translation_entries,
     iter_translation_changes_from_diff,
     load_semantic_rules,
     normalize_value,
     normalize_retained_source_word_allowlist,
 )
-from src.translation_validator import find_disallowed_control_characters
+from localize.translation_validator import find_disallowed_control_characters
 
 
 @dataclass
@@ -107,8 +109,6 @@ def analyze_source_identical_changes(
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
-    stats = SourceIdenticalStats()
-
     changes = iter_translation_changes_from_diff(
         diff_text=diff_text,
         repo_root=repo_root,
@@ -118,6 +118,20 @@ def analyze_source_identical_changes(
         localization_layout=localization_layout,
         hydrate_source=True,
     )
+    return _analyze_source_identical_translation_changes(
+        changes=changes,
+        brand_glossary=brand_glossary,
+        examples_limit=examples_limit,
+    )
+
+
+def _analyze_source_identical_translation_changes(
+    changes: Iterable[TranslationChange],
+    brand_glossary: Iterable[str],
+    examples_limit: int,
+) -> SourceIdenticalStats:
+    stats = SourceIdenticalStats()
+
     for change in changes:
         if change.source_value is None:
             continue
@@ -164,6 +178,77 @@ def analyze_source_identical_changes(
     return stats
 
 
+def _deduplicate_translation_changes(changes: Iterable[TranslationChange]) -> List[TranslationChange]:
+    unique_changes: List[TranslationChange] = []
+    seen: set[tuple[str, str, str]] = set()
+    for change in changes:
+        identity = (change.file, change.locale_code, change.key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique_changes.append(change)
+    return unique_changes
+
+
+def _iter_profile_translation_changes(
+    diff_text: str,
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    localization_profiles: Sequence[LocalizationProfile],
+) -> Iterable[TranslationChange]:
+    for profile in localization_profiles:
+        yield from iter_translation_changes_from_diff(
+            diff_text=diff_text,
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_format=profile.localization_format,
+            localization_layout=profile.localization_layout,
+        )
+
+
+def _iter_profile_translation_entries(
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    localization_profiles: Sequence[LocalizationProfile],
+) -> Iterable[TranslationChange]:
+    for profile in localization_profiles:
+        yield from iter_all_translation_entries(
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_format=profile.localization_format,
+            localization_layout=profile.localization_layout,
+        )
+
+
+def analyze_source_identical_changes_for_profiles(
+    diff_text: str,
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    brand_glossary: Iterable[str],
+    localization_profiles: Sequence[LocalizationProfile],
+    examples_limit: int = 10,
+) -> SourceIdenticalStats:
+    """Analyze suspicious source-identical changes across configured profiles."""
+    return _analyze_source_identical_translation_changes(
+        changes=_deduplicate_translation_changes(
+            _iter_profile_translation_changes(
+                diff_text=diff_text,
+                repo_root=repo_root,
+                input_folder=input_folder,
+                locale_codes=locale_codes,
+                localization_profiles=localization_profiles,
+            )
+        ),
+        brand_glossary=brand_glossary,
+        examples_limit=examples_limit,
+    )
+
+
 def analyze_semantic_qa_changes(
     diff_text: str,
     repo_root: str,
@@ -185,6 +270,64 @@ def analyze_semantic_qa_changes(
             locale_codes=locale_codes,
             localization_format=localization_format,
             localization_layout=localization_layout,
+        )
+    )
+    return analyze_translation_changes(
+        changes=changes,
+        semantic_rules=semantic_rules,
+        brand_glossary=brand_glossary,
+        retained_source_word_allowlist=retained_source_word_allowlist,
+        examples_limit=examples_limit,
+    )
+
+
+def analyze_semantic_qa_changes_for_profiles(
+    diff_text: str,
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    brand_glossary: Iterable[str] = (),
+    semantic_rules: Sequence[SemanticRule] = (),
+    retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
+    localization_profiles: Sequence[LocalizationProfile] = (),
+    examples_limit: int = 10,
+) -> SemanticQAStats:
+    """Scan changed translations across all configured format/layout profiles."""
+    changes = _deduplicate_translation_changes(
+        _iter_profile_translation_changes(
+            diff_text=diff_text,
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_profiles=localization_profiles,
+        )
+    )
+    return analyze_translation_changes(
+        changes=changes,
+        semantic_rules=semantic_rules,
+        brand_glossary=brand_glossary,
+        retained_source_word_allowlist=retained_source_word_allowlist,
+        examples_limit=examples_limit,
+    )
+
+
+def analyze_all_translation_entries_for_profiles(
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    brand_glossary: Iterable[str],
+    semantic_rules: Sequence[SemanticRule],
+    retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
+    localization_profiles: Sequence[LocalizationProfile] = (),
+    examples_limit: int = 10,
+) -> SemanticQAStats:
+    """Scan all translations across all configured format/layout profiles."""
+    changes = _deduplicate_translation_changes(
+        _iter_profile_translation_entries(
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_profiles=localization_profiles,
         )
     )
     return analyze_translation_changes(
@@ -250,6 +393,13 @@ def load_quality_gate_localization_metadata(
     )
 
     return localization_format, localization_layout
+
+
+def load_quality_gate_localization_profiles(config_path: str) -> Tuple[LocalizationProfile, ...]:
+    """Load localization profiles used by quality gate sidecars."""
+    with open(config_path, "r", encoding="utf-8") as file:
+        raw_config = yaml.safe_load(file) or {}
+    return load_localization_profiles(raw_config)
 
 
 def load_validation_summary(path: str) -> Dict[str, Any]:
@@ -567,31 +717,29 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(args.config)
-    localization_format, localization_layout = load_quality_gate_localization_metadata(args.config)
+    localization_profiles = load_quality_gate_localization_profiles(args.config)
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
-    source_stats = analyze_source_identical_changes(
+    source_stats = analyze_source_identical_changes_for_profiles(
         diff_text=diff_text,
         repo_root=args.repo_root,
         input_folder=args.input_folder,
         locale_codes=locale_codes,
         brand_glossary=brand_glossary,
-        localization_format=localization_format,
-        localization_layout=localization_layout,
+        localization_profiles=localization_profiles,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
-        semantic_stats = analyze_all_translation_entries(
+        semantic_stats = analyze_all_translation_entries_for_profiles(
             repo_root=args.repo_root,
             input_folder=args.input_folder,
             locale_codes=locale_codes,
             brand_glossary=brand_glossary,
             semantic_rules=semantic_rules,
             retained_source_word_allowlist=config.retained_source_word_allowlist,
-            localization_format=localization_format,
-            localization_layout=localization_layout,
+            localization_profiles=localization_profiles,
         )
     else:
-        semantic_stats = analyze_semantic_qa_changes(
+        semantic_stats = analyze_semantic_qa_changes_for_profiles(
             diff_text=diff_text,
             repo_root=args.repo_root,
             input_folder=args.input_folder,
@@ -599,8 +747,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             brand_glossary=brand_glossary,
             semantic_rules=semantic_rules,
             retained_source_word_allowlist=config.retained_source_word_allowlist,
-            localization_format=localization_format,
-            localization_layout=localization_layout,
+            localization_profiles=localization_profiles,
         )
     report = build_quality_gate_report(
         source_stats=source_stats,

@@ -11,7 +11,7 @@ os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY_FOR_TESTING'
 
 # It's good practice to be able to import the functions to be tested.
 # This might require adjusting the Python path if the test runner doesn't handle it.
-from src.translate_localization_files import (
+from localize.translate_localization_files import (
     build_context,
     normalize_value,
     compute_ledger_hash,
@@ -21,7 +21,7 @@ from src.translate_localization_files import (
     extract_language_from_filename,
     run_post_translation_validation
 )
-from src.properties_parser import parse_properties_file, reassemble_file
+from localize.properties_parser import parse_properties_file, reassemble_file
 
 
 class TestCoreLogic(unittest.TestCase):
@@ -88,7 +88,7 @@ class TestCoreLogic(unittest.TestCase):
         source_translations = {"key.one": "source value", "key.new": "new source value"}
 
         # 3. Integrate the translations
-        from src.translate_localization_files import integrate_translations
+        from localize.translate_localization_files import integrate_translations
         updated_lines = integrate_translations(initial_parsed_lines, translations, indices, keys, source_translations)
 
         # 4. Reassemble the file content from the updated structure
@@ -116,7 +116,7 @@ class TestCoreLogic(unittest.TestCase):
         keys = ['key.one']
         source_translations = {'key.one': 'old\\nvalue'}
 
-        from src.translate_localization_files import integrate_translations
+        from localize.translate_localization_files import integrate_translations
         updated_lines = integrate_translations(initial_parsed_lines, translations, indices, keys, source_translations)
         final_content = reassemble_file(updated_lines)
         self.assertEqual(final_content, 'key.one=new value\n')
@@ -131,7 +131,7 @@ class TestCoreLogic(unittest.TestCase):
         keys = ['multi.key']
         source_translations = {'multi.key': 'old line1\\nold line2'}
 
-        from src.translate_localization_files import integrate_translations
+        from localize.translate_localization_files import integrate_translations
         updated = integrate_translations(initial_lines, translations, indices, keys, source_translations)
         self.assertEqual(updated[0]['value'], translations[0])
         # This assertion needs to be smarter if reassemble logic changes original_value
@@ -147,7 +147,7 @@ class TestCoreLogic(unittest.TestCase):
         def mock_count_tokens(text: str, model_name: str) -> int:
             return len(text)
 
-        with patch('src.translate_localization_files.count_tokens', side_effect=mock_count_tokens):
+        with patch('localize.translate_localization_files.count_tokens', side_effect=mock_count_tokens):
             existing_translations = {"key1": "translation1", "key2": "translation2", "key3": "translation3"}
             source_translations = {"key1": "source1", "key2": "source2", "key3": "source3"}
             language_glossary = {"term": "gloss"}
@@ -361,7 +361,7 @@ class TestCoreLogic(unittest.TestCase):
             "+this is not a properties assignment\n"
         )
         mocked_result = MagicMock(returncode=0, stdout=git_diff_output, stderr="")
-        with patch("src.translate_localization_files.subprocess.run", return_value=mocked_result):
+        with patch("localize.translate_localization_files.subprocess.run", return_value=mocked_result):
             keys = get_working_tree_changed_keys(
                 "/repo/mobile/mobile_pt_BR.properties",
                 "/repo"
@@ -378,7 +378,7 @@ class TestCoreLogic(unittest.TestCase):
 
     def test_get_working_tree_changed_keys_returns_empty_on_command_failure(self):
         """git diff inspection failures should fail open and return no changed keys."""
-        with patch("src.translate_localization_files.subprocess.run", side_effect=OSError("git missing")):
+        with patch("localize.translate_localization_files.subprocess.run", side_effect=OSError("git missing")):
             keys = get_working_tree_changed_keys(
                 "/repo/mobile/mobile_pt_BR.properties",
                 "/repo"
@@ -445,7 +445,7 @@ class TestSourceFilenameExtraction(unittest.TestCase):
 
     def test_get_source_filename_simple_language_code(self):
         """Test extraction with simple 2-letter language codes."""
-        from src.translate_localization_files import get_source_filename
+        from localize.translate_localization_files import get_source_filename
 
         supported_codes = ['es', 'de', 'fr', 'pt_PT', 'pt_BR']
 
@@ -459,7 +459,7 @@ class TestSourceFilenameExtraction(unittest.TestCase):
 
     def test_get_source_filename_with_underscores_in_base_name(self):
         """Test extraction when base filename contains underscores (mu_sig bug)."""
-        from src.translate_localization_files import get_source_filename
+        from localize.translate_localization_files import get_source_filename
 
         supported_codes = ['es', 'de', 'fr', 'pt_PT', 'pt_BR']
 
@@ -478,7 +478,7 @@ class TestSourceFilenameExtraction(unittest.TestCase):
 
     def test_get_source_filename_with_complex_language_codes(self):
         """Test extraction with complex language codes like pt_PT."""
-        from src.translate_localization_files import get_source_filename
+        from localize.translate_localization_files import get_source_filename
 
         supported_codes = ['es', 'pt_PT', 'pt_BR', 'zh-Hans', 'zh-Hant']
 
@@ -496,7 +496,7 @@ class TestSourceFilenameExtraction(unittest.TestCase):
 
     def test_get_source_filename_no_language_code_match(self):
         """Test when filename doesn't match any supported language code."""
-        from src.translate_localization_files import get_source_filename
+        from localize.translate_localization_files import get_source_filename
 
         supported_codes = ['es', 'de', 'fr']
 
@@ -510,7 +510,7 @@ class TestSourceFilenameExtraction(unittest.TestCase):
 
     def test_get_source_filename_edge_cases(self):
         """Test edge cases and unusual filenames."""
-        from src.translate_localization_files import get_source_filename
+        from localize.translate_localization_files import get_source_filename
 
         supported_codes = ['es', 'de', 'pt_PT']
 
@@ -534,7 +534,7 @@ class TestValidationLogic(unittest.TestCase):
         """
         # Import inside the test to avoid circular dependency issues at the module level
         # if other tests also need to patch or modify its behavior.
-        from src.translate_localization_files import lint_properties_file
+        from localize.translate_localization_files import lint_properties_file
 
         content = textwrap.dedent("""
             # Correct line
@@ -573,7 +573,7 @@ class TestValidationLogic(unittest.TestCase):
         Tests that the linter correctly ignores common but tricky escape sequences
         that were previously flagged as errors.
         """
-        from src.translate_localization_files import lint_properties_file
+        from localize.translate_localization_files import lint_properties_file
         content = textwrap.dedent(r'''
             # Permitted escaped quote
             key.one=This is a value with an escaped quote \"here\".
@@ -606,7 +606,7 @@ class TestFileDetectionLogic(unittest.TestCase):
         Tests that get_changed_translation_files returns all changed files
         when no environment variable filter is set.
         """
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         # Simulate git status output
         git_output = textwrap.dedent("""
@@ -635,7 +635,7 @@ class TestFileDetectionLogic(unittest.TestCase):
         Tests that get_changed_translation_files correctly filters files
         based on the TRANSLATION_FILTER_GLOB environment variable.
         """
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         # Simulate git status output
         git_output = textwrap.dedent("""
@@ -661,7 +661,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_handles_copy_entries(self, mock_subprocess_run):
         """Copy entries (C) use the same 'old -> new' format as renames; use the new path."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         git_output = "C  i18n/resources/mobile_en.properties -> i18n/resources/mobile_fr.properties\n"
         mock_subprocess_run.return_value = MagicMock(stdout=git_output, stderr="", check_returncode=MagicMock())
@@ -676,7 +676,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_uses_diff_base_when_env_set(self, mock_subprocess_run):
         """With TRANSLATION_DIFF_BASE set, detection uses `git diff --name-status` against the base."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         # git diff --name-status output (tab-separated status<TAB>path)
         diff_output = "M\ti18n/resources/mobile_de.properties\nA\ti18n/resources/mobile_es.properties\n"
@@ -696,7 +696,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_diff_base_ignores_deletions(self, mock_subprocess_run):
         """Deleted files (status D) in the base diff are not enqueued for translation."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         diff_output = "D\ti18n/resources/mobile_de.properties\nM\ti18n/resources/mobile_es.properties\n"
         mock_subprocess_run.return_value = MagicMock(stdout=diff_output, stderr="", check_returncode=MagicMock())
@@ -714,7 +714,7 @@ class TestFileDetectionLogic(unittest.TestCase):
         Tests that get_changed_translation_files correctly detects files with
         hyphenated locale codes like zh-Hans and zh-Hant, as well as untracked files.
         """
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         # Simulate git status output with both modified and untracked files
         # Including hyphenated locale codes (zh-Hans, zh-Hant) and standard ones (pl, pt_BR)
@@ -750,7 +750,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_process_all_files_mode(self, mock_subprocess_run):
         """Tests process_all_files mode scans input folder directly without git."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = temp_dir
@@ -787,7 +787,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_process_all_files_mode_with_glob_filter(self, mock_subprocess_run):
         """Tests process_all_files mode also honors TRANSLATION_FILTER_GLOB."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = temp_dir
@@ -811,7 +811,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_excludes_archive_paths(self, mock_subprocess_run):
         """Tests file detection excludes archive directories in both discovery modes."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         git_output = textwrap.dedent("""
              M i18n/resources/archive/mobile_de.properties
@@ -842,7 +842,7 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_includes_locale_files_when_source_file_changed(self, mock_subprocess_run):
         """When a source file changes, all related locale files should be queued."""
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.translate_localization_files import get_changed_translation_files
 
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = temp_dir
@@ -869,9 +869,9 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_supports_json_locale_directory_layout(self, mock_subprocess_run):
         """Directory-based locale projects should not need locale suffix filenames."""
-        from src.localization_formats import JSON_FORMAT
-        from src.localization_layouts import LocalizationLayout
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.localization_formats import JSON_FORMAT
+        from localize.localization_layouts import LocalizationLayout
+        from localize.translate_localization_files import get_changed_translation_files
 
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = temp_dir
@@ -889,9 +889,9 @@ class TestFileDetectionLogic(unittest.TestCase):
             git_output = " M locales/en/common.json\n"
             mock_subprocess_run.return_value = MagicMock(stdout=git_output, stderr="", check_returncode=MagicMock())
 
-            with patch("src.translate_localization_files.LOCALIZATION_FORMAT", JSON_FORMAT), \
+            with patch("localize.translate_localization_files.LOCALIZATION_FORMAT", JSON_FORMAT), \
                  patch(
-                     "src.translate_localization_files.LOCALIZATION_LAYOUT",
+                     "localize.translate_localization_files.LOCALIZATION_LAYOUT",
                      LocalizationLayout(id="locale_directory", source_locale="en"),
                  ):
                 files = get_changed_translation_files(input_folder, repo_root)
@@ -901,10 +901,10 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_get_changed_files_supports_mixed_format_profiles(self, mock_subprocess_run):
         """Projects can discover changed locale files across configured format profiles."""
-        from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
-        from src.localization_layouts import LocalizationLayout
-        from src.localization_profiles import LocalizationProfile
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+        from localize.localization_layouts import LocalizationLayout
+        from localize.localization_profiles import LocalizationProfile
+        from localize.translate_localization_files import get_changed_translation_files
 
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = temp_dir
@@ -938,7 +938,7 @@ class TestFileDetectionLogic(unittest.TestCase):
                     LocalizationLayout(id="locale_directory", source_locale="en"),
                 ),
             )
-            with patch("src.translate_localization_files.LOCALIZATION_PROFILES", profiles):
+            with patch("localize.translate_localization_files.LOCALIZATION_PROFILES", profiles):
                 files = get_changed_translation_files(input_folder, repo_root)
 
         self.assertEqual(files, ["locales/de/common.json", "messages_de.properties"])
@@ -946,10 +946,10 @@ class TestFileDetectionLogic(unittest.TestCase):
     @patch('subprocess.run')
     def test_process_all_files_supports_mixed_format_profiles(self, mock_subprocess_run):
         """Full scans should include target files from every configured format profile."""
-        from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
-        from src.localization_layouts import LocalizationLayout
-        from src.localization_profiles import LocalizationProfile
-        from src.translate_localization_files import get_changed_translation_files
+        from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+        from localize.localization_layouts import LocalizationLayout
+        from localize.localization_profiles import LocalizationProfile
+        from localize.translate_localization_files import get_changed_translation_files
 
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = temp_dir
@@ -977,7 +977,7 @@ class TestFileDetectionLogic(unittest.TestCase):
                     LocalizationLayout(id="locale_directory", source_locale="en"),
                 ),
             )
-            with patch("src.translate_localization_files.LOCALIZATION_PROFILES", profiles):
+            with patch("localize.translate_localization_files.LOCALIZATION_PROFILES", profiles):
                 files = get_changed_translation_files(input_folder, repo_root, process_all_files=True)
 
         mock_subprocess_run.assert_not_called()
@@ -989,10 +989,10 @@ class TestFileDetectionLogic(unittest.TestCase):
 
     def test_explicit_profiles_take_precedence_over_implicit_default(self):
         """Compatibility default must not shadow explicitly configured profiles."""
-        from src.localization_formats import JSON_FORMAT
-        from src.localization_layouts import LocalizationLayout
-        from src.localization_profiles import LocalizationProfile
-        from src.translate_localization_files import get_source_filename
+        from localize.localization_formats import JSON_FORMAT
+        from localize.localization_layouts import LocalizationLayout
+        from localize.localization_profiles import LocalizationProfile
+        from localize.translate_localization_files import get_source_filename
 
         explicit_profiles = (
             LocalizationProfile(
@@ -1001,13 +1001,13 @@ class TestFileDetectionLogic(unittest.TestCase):
             ),
         )
         with patch(
-                "src.translate_localization_files.LOCALIZATION_PROFILES",
+                "localize.translate_localization_files.LOCALIZATION_PROFILES",
                 explicit_profiles,
         ), patch(
-                "src.translate_localization_files.LOCALIZATION_FORMAT",
+                "localize.translate_localization_files.LOCALIZATION_FORMAT",
                 JSON_FORMAT,
         ), patch(
-                "src.translate_localization_files.LOCALIZATION_LAYOUT",
+                "localize.translate_localization_files.LOCALIZATION_LAYOUT",
                 LocalizationLayout(id="suffix", source_locale="en"),
         ):
             source_path = get_source_filename("locales/de/messages_fr.json", ["de", "fr"])

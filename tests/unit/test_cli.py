@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
-from src import cli
+from localize import cli
+from localize.formats import unregister_localization_adapter
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +20,100 @@ def test_cli_formats_lists_registered_formats(capsys):
     assert exit_code == 0
     assert "java_properties" in captured.out
     assert "json" in captured.out
+
+
+def test_cli_loads_plugin_module_before_listing_formats(tmp_path, monkeypatch, capsys):
+    plugin_path = tmp_path / "demo_plugin.py"
+    plugin_path.write_text(
+        """
+from localize.formats import LocalizationFileAdapter, LocalizationFormat, register_localization_adapter
+
+fmt = LocalizationFormat(
+    id="demo_plugin_format",
+    display_name="Demo Plugin",
+    file_extension=".demo",
+    code_fence="text",
+    locale_suffix_regex=r"_(?P<locale>[A-Za-z]{2})",
+)
+
+adapter = LocalizationFileAdapter(
+    localization_format=fmt,
+    parse_file=lambda path: ([], {}),
+    reassemble_file=lambda lines: "",
+    synchronize_keys=lambda target, source: (set(), set()),
+    lint_file=lambda path: [],
+    extract_changed_key_from_diff_line=lambda line: None,
+    build_review_content=lambda translations, keys: "",
+    escape_translation=lambda source, value: value,
+)
+
+register_localization_adapter(adapter)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        exit_code = cli.main(["--plugin", "demo_plugin", "formats"])
+        captured = capsys.readouterr()
+    finally:
+        unregister_localization_adapter("demo_plugin_format")
+
+    assert exit_code == 0
+    assert "demo_plugin_format" in captured.out
+
+
+def test_cli_loads_plugin_module_after_subcommand(tmp_path, monkeypatch, capsys):
+    plugin_path = tmp_path / "demo_plugin_late.py"
+    plugin_path.write_text(
+        """
+from localize.formats import LocalizationFileAdapter, LocalizationFormat, register_localization_adapter
+
+fmt = LocalizationFormat(
+    id="demo_plugin_format",
+    display_name="Demo Plugin",
+    file_extension=".demo",
+    code_fence="text",
+    locale_suffix_regex=r"_(?P<locale>[A-Za-z]{2})",
+)
+
+adapter = LocalizationFileAdapter(
+    localization_format=fmt,
+    parse_file=lambda path: ([], {}),
+    reassemble_file=lambda lines: "",
+    synchronize_keys=lambda target, source: (set(), set()),
+    lint_file=lambda path: [],
+    extract_changed_key_from_diff_line=lambda line: None,
+    build_review_content=lambda translations, keys: "",
+    escape_translation=lambda source, value: value,
+)
+
+register_localization_adapter(adapter)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        exit_code = cli.main(["formats", "--plugin", "demo_plugin_late"])
+        captured = capsys.readouterr()
+    finally:
+        unregister_localization_adapter("demo_plugin_format")
+
+    assert exit_code == 0
+    assert "demo_plugin_format" in captured.out
+
+
+def test_cli_init_loads_plugin_after_subcommand_without_forwarding_it():
+    with (
+        patch("localize.cli.load_plugins") as load_plugins,
+        patch("localize.cli.init_config_main", return_value=0) as init_main,
+    ):
+        exit_code = cli.main(["init", "--plugin=demo_plugin", "--input-folder", "i18n"])
+
+    assert exit_code == 0
+    load_plugins.assert_called_once_with(["demo_plugin"])
+    init_main.assert_called_once_with(["--input-folder", "i18n"])
 
 
 def test_cli_validate_reports_valid_config(tmp_path, capsys):
@@ -87,17 +182,17 @@ def test_cli_run_sets_config_env_and_delegates_to_runtime(tmp_path, monkeypatch)
     config_path.write_text("dry_run: true\n", encoding="utf-8")
     runtime = SimpleNamespace(main=AsyncMock())
 
-    with patch("src.cli.importlib.import_module", return_value=runtime) as import_module:
+    with patch("localize.cli.importlib.import_module", return_value=runtime) as import_module:
         exit_code = cli.main(["run", "--config", str(config_path)])
 
     assert exit_code == 0
     assert os.environ["TRANSLATOR_CONFIG_FILE"] == str(config_path)
-    import_module.assert_called_once_with("src.translate_localization_files")
+    import_module.assert_called_once_with("localize.translate_localization_files")
     runtime.main.assert_awaited_once()
 
 
 def test_cli_init_delegates_to_existing_init_config():
-    with patch("src.cli.init_config_main", return_value=0) as init_main:
+    with patch("localize.cli.init_config_main", return_value=0) as init_main:
         exit_code = cli.main(["init", "--input-folder", "i18n"])
 
     assert exit_code == 0
@@ -107,7 +202,9 @@ def test_cli_init_delegates_to_existing_init_config():
 def test_pyproject_exposes_localize_console_script():
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert pyproject["project"]["scripts"]["localize"] == "src.cli:main"
+    assert pyproject["project"]["name"] == "localize-pipeline"
+    assert pyproject["project"]["scripts"]["localize"] == "localize.cli:main"
+    assert pyproject["tool"]["setuptools"]["packages"]["find"]["include"] == ["localize*"]
 
 
 def test_readme_documents_cli_quickstart():

@@ -1,7 +1,7 @@
 """Unit tests for reusable translation prompt construction."""
 
-from src.localization_formats import JAVA_PROPERTIES_FORMAT
-from src.translation_prompts import build_translation_system_prompt
+from localize.localization_formats import JAVA_PROPERTIES_FORMAT
+from localize.translation_prompts import build_translation_system_prompt
 
 
 def test_translation_system_prompt_is_generic_without_project_context():

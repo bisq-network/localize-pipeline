@@ -30,28 +30,28 @@ from openai.types.chat import (
 )
 from tqdm.asyncio import tqdm
 
-from src.app_config import load_app_config
-from src.localization_adapters import (
+from localize.app_config import load_app_config
+from localize.localization_adapters import (
     get_localization_adapter,
     lint_properties_file as lint_properties_file,
 )
-from src.localization_formats import LocalizationFormat
-from src.localization_layouts import LocalizationLayout
-from src.localization_profiles import LocalizationProfile
-from src.model_provider import OpenAICompatibleProvider
-from src.placeholder_rules import (
+from localize.localization_formats import LocalizationFormat
+from localize.localization_layouts import LocalizationLayout
+from localize.localization_profiles import LocalizationProfile
+from localize.model_provider import OpenAICompatibleProvider
+from localize.placeholder_rules import (
     extract_placeholder_tokens,
     protect_placeholders,
     restore_placeholders as restore_protected_placeholders,
 )
-from src.pipeline_core import (
+from localize.pipeline_core import (
     TranslationPipelineOptions,
     TranslationPipelinePaths,
     TranslationPipelineSteps,
     run_translation_pipeline,
 )
-from src.translation_prompts import build_translation_system_prompt
-from src.translation_validator import (
+from localize.translation_prompts import build_translation_system_prompt
+from localize.translation_validator import (
     check_placeholder_parity,
     check_encoding_and_mojibake,
     find_disallowed_control_characters,

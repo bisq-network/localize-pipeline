@@ -2,16 +2,23 @@ from pathlib import Path
 import json
 
 import pytest
+import yaml
 
-from src.localization_formats import JSON_FORMAT
-from src.localization_layouts import LocalizationLayout
-from src.translation_quality_gate import (
+from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+from localize.localization_layouts import LocalizationLayout, SUFFIX_LAYOUT
+from localize.localization_profiles import LocalizationProfile
+from localize.semantic_quality import SemanticRule
+from localize.translation_quality_gate import (
     QualityGateConfig,
+    analyze_all_translation_entries_for_profiles,
     analyze_semantic_qa_changes,
+    analyze_semantic_qa_changes_for_profiles,
+    analyze_source_identical_changes_for_profiles,
     analyze_source_identical_changes,
     build_quality_gate_report,
     load_quality_gate_config,
     load_quality_gate_localization_metadata,
+    load_quality_gate_localization_profiles,
     load_validation_summary,
     render_quality_gate_markdown,
 )
@@ -127,6 +134,191 @@ def test_quality_gate_localization_metadata_rejects_invalid_layout(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported localization_layout"):
         load_quality_gate_localization_metadata(str(config_path))
+
+
+def test_quality_gate_loads_mixed_localization_profiles(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "localization_formats": [
+                {"id": "java_properties", "layout": "suffix"},
+                {"id": "json", "layout": {"id": "locale_directory", "source_locale": "en"}},
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    profiles = load_quality_gate_localization_profiles(str(config_path))
+
+    assert [profile.localization_format.id for profile in profiles] == ["java_properties", "json"]
+    assert profiles[1].localization_layout.id == "locale_directory"
+
+
+def test_quality_gate_analyzes_changed_entries_across_profiles(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    _write_json(input_folder / "en" / "common.json", {"cta": "Continue"})
+    _write_json(input_folder / "de" / "common.json", {"cta": "Continue"})
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
++++ b/resources/messages_de.properties
++title=Open trades
+diff --git a/resources/de/common.json b/resources/de/common.json
++++ b/resources/de/common.json
++  "cta": "Continue",
+"""
+
+    stats = analyze_source_identical_changes_for_profiles(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JSON_FORMAT, layout),
+        ),
+    )
+
+    assert stats.changed_entries_count == 2
+    assert stats.unexpected_source_identical_count == 2
+    assert {example["file"] for example in stats.examples} == {
+        "messages_de.properties",
+        "de/common.json",
+    }
+
+
+def test_quality_gate_deduplicates_overlapping_profile_source_checks(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
++++ b/resources/messages_de.properties
++title=Open trades
+"""
+
+    stats = analyze_source_identical_changes_for_profiles(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+        ),
+    )
+
+    assert stats.changed_entries_count == 1
+    assert stats.unexpected_source_identical_count == 1
+
+
+def test_semantic_qa_analyzes_changed_entries_across_profiles(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    _write_json(input_folder / "en" / "common.json", {"cta": "Continue"})
+    _write_json(input_folder / "de" / "common.json", {"cta": "Continue"})
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
++++ b/resources/messages_de.properties
++title=Open trades
+diff --git a/resources/de/common.json b/resources/de/common.json
++++ b/resources/de/common.json
++  "cta": "Continue",
+"""
+
+    stats = analyze_semantic_qa_changes_for_profiles(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        semantic_rules=[
+            SemanticRule(
+                id="no-english",
+                message="German translation still contains source text.",
+                locales=("de",),
+                severity="warning",
+                forbidden_target_regex=r"Open trades|Continue",
+            )
+        ],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JSON_FORMAT, layout),
+        ),
+    )
+
+    assert stats.warnings_count == 2
+    assert {example["file"] for example in stats.examples} == {
+        "messages_de.properties",
+        "de/common.json",
+    }
+
+
+def test_semantic_qa_deduplicates_overlapping_profile_changed_entries(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
++++ b/resources/messages_de.properties
++title=Open trades
+"""
+
+    stats = analyze_semantic_qa_changes_for_profiles(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        semantic_rules=[
+            SemanticRule(
+                id="no-english",
+                message="German translation still contains source text.",
+                locales=("de",),
+                severity="warning",
+                forbidden_target_regex=r"Open trades",
+            )
+        ],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+        ),
+    )
+
+    assert stats.warnings_count == 1
+    assert len(stats.examples) == 1
+
+
+def test_semantic_qa_deduplicates_overlapping_profile_full_audit_entries(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "messages.properties", {"title": "Open trades"})
+    _write_properties(input_folder / "messages_de.properties", {"title": "Open trades"})
+
+    stats = analyze_all_translation_entries_for_profiles(
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        semantic_rules=[
+            SemanticRule(
+                id="no-english",
+                message="German translation still contains source text.",
+                locales=("de",),
+                severity="warning",
+                forbidden_target_regex=r"Open trades",
+            )
+        ],
+        localization_profiles=(
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+            LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
+        ),
+    )
+
+    assert stats.warnings_count == 1
+    assert len(stats.examples) == 1
 
 
 def test_quality_gate_blocks_many_unexpected_source_identical_changes(tmp_path):

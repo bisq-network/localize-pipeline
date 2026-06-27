@@ -1,32 +1,70 @@
-# Add AI translation to your project with GitHub Actions
+# GitHub Action
 
-This repository ships a drop-in composite action. It translates your changed
-Java `.properties` or JSON localization files and opens a pull request — entirely inside your CI, using the
-workflow's `GITHUB_TOKEN`. No account, no quota, no SSH deploy key.
+Use the composite action when you want translation PRs from normal CI. The action
+installs the pipeline, runs `localize run`, commits changed localization files,
+and opens a pull request with the workflow token.
 
-## 1. Scaffold a config (once)
+## Minimal Workflow
 
-From a checkout of your repo:
+```yaml
+name: Translate
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
 
-```bash
-./init.sh --input-folder path/to/your/i18n
-# or, for JSON locale files:
-./init.sh --input-folder path/to/your/i18n --localization-format json
-# or, for JSON files stored as locales/en/*.json and locales/de/*.json:
-./init.sh --input-folder path/to/your/i18n --localization-format json --localization-layout locale_directory
-# or, to translate locally with Ollama (zero data egress, no API key):
-./init.sh --input-folder path/to/your/i18n --api-base-url http://localhost:11434/v1
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bisq-network/translate-java-property-files@main
+        with:
+          config-file: config.yaml
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-Commit the generated `config.yaml`.
+The default run is incremental. It compares the working tree against
+`${{ github.event.before }}` and translates only the affected locale files.
 
-If your JSON files use native locale directories such as
-`locales/en/messages.json` and `locales/de/messages.json`, set
-`localization_layout.id: locale_directory` and
-`localization_layout.source_locale: en` in that config.
+## First Run
 
-If a project contains multiple localization conventions, replace the singular
-`localization_format` setting with profile entries:
+For a one-time backfill, run the workflow manually with:
+
+```yaml
+process-all-files: true
+```
+
+After the first PR is merged, return to the default `false` value so future runs
+only translate changed strings.
+
+## Config Examples
+
+Single-format Java `.properties`:
+
+```yaml
+localization_format: "java_properties"
+localization_layout:
+  id: "suffix"
+  source_locale: "en"
+```
+
+JSON locale directories:
+
+```yaml
+localization_format: "json"
+localization_layout:
+  id: "locale_directory"
+  source_locale: "en"
+```
+
+Mixed Java and JSON:
 
 ```yaml
 localization_formats:
@@ -38,20 +76,35 @@ localization_formats:
       source_locale: "en"
 ```
 
-## 2. Add the workflow
+The action, quality gate, semantic reviewer, and PR publisher all read the same
+profile list.
 
-Create `.github/workflows/translate.yml` in your repo:
+## Local Or Self-Hosted Models
+
+Use `api-base-url` for any OpenAI-compatible endpoint:
 
 ```yaml
-name: Translate
-on:
-  push:
-    branches: [main]          # translate when source strings change
-  workflow_dispatch: {}
+      - uses: bisq-network/translate-java-property-files@main
+        with:
+          config-file: config.yaml
+          api-base-url: http://localhost:11434/v1
+```
 
-permissions:
-  contents: write             # push the translation branch
-  pull-requests: write        # open the PR
+For keyless local endpoints such as Ollama, omit `openai-api-key`. With local
+endpoints, strings stay inside your runner/network.
+
+AISuite is the default provider abstraction. Bare names such as `gpt-4o-mini`
+are treated as OpenAI models. Explicit names such as `openai:gpt-4o-mini` are
+also accepted.
+
+## Pull Request Events
+
+For `pull_request` workflows, set `diff-base` to the PR base SHA:
+
+```yaml
+on:
+  pull_request:
+    branches: [main]
 
 jobs:
   translate:
@@ -59,84 +112,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # needed to diff against the push/PR base
+          fetch-depth: 0
       - uses: bisq-network/translate-java-property-files@main
         with:
           config-file: config.yaml
+          diff-base: ${{ github.event.pull_request.base.sha }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-```
-
-That's it. On the next push the action translates the keys whose source strings
-changed since the base (`diff-base`, default `${{ github.event.before }}`) and
-opens a PR you can review and merge.
-
-> **First run / backfill:** to translate everything currently untranslated, run
-> the workflow once via *Run workflow* with `process-all-files: true`, then leave
-> it `false` for incremental runs.
-
-## Using your own model / a local endpoint
-
-The action uses the packaged AISuite provider abstraction by default. Bare model
-names are treated as OpenAI models for compatibility; explicit AISuite names
-such as `openai:gpt-4o-mini` can be set in `config.yaml`.
-
-To translate against any OpenAI-compatible endpoint (a self-hosted Ollama, Groq,
-Together, …) set `api-base-url`. When the endpoint needs no key (Ollama) omit
-`openai-api-key` entirely — your strings never leave your infrastructure:
-
-```yaml
-      - uses: bisq-network/translate-java-property-files@main
-        with:
-          api-base-url: http://localhost:11434/v1
-```
-
-Completion-token caps are normalized internally. Newer OpenAI models that
-require `max_completion_tokens` and compatible endpoints that only accept
-`max_tokens` can use the same action inputs.
-
-Internally the action runs the same reusable CLI that local installs use:
-
-```bash
-python -m src.cli run --config "$TRANSLATOR_CONFIG_FILE"
 ```
 
 ## Inputs
 
 | Input | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `config-file` | `config.yaml` | Translation config committed to your repo. |
-| `openai-api-key` | _(empty)_ | OpenAI key; omit for keyless local endpoints. |
-| `api-base-url` | _(empty)_ | OpenAI-compatible endpoint (e.g. Ollama). Overrides config. |
-| `review-model` | _(empty)_ | Override the holistic-review model. |
-| `diff-base` | `${{ github.event.before }}` | Ref to detect changed strings against. |
-| `process-all-files` | `false` | Translate all locale files (use `true` for a one-time backfill). |
-| `open-pr` | `true` | Open a PR, or just leave the changes in the workspace. |
-| `pr-branch` | `ai-translations` | Branch to push translations to. |
-| `pr-title` | `Update AI translations` | Title of the opened pull request. |
-| `commit-message` | `Update AI translations` | Commit message for the translation changes. |
-| `github-token` | `${{ github.token }}` | Token used to push and open the PR. |
-| `python-version` | `3.11` | Python version to run the pipeline with. |
+| `openai-api-key` | empty | OpenAI key. Omit for keyless local endpoints. |
+| `api-base-url` | empty | OpenAI-compatible endpoint. Overrides config. |
+| `review-model` | empty | Override the holistic-review model. |
+| `diff-base` | `${{ github.event.before }}` | Ref used for changed-string detection. |
+| `process-all-files` | `false` | Translate all target files. Use for backfills. |
+| `open-pr` | `true` | Open a PR or leave changes in the workspace. |
+| `pr-branch` | `ai-translations` | Branch for translation changes. |
+| `pr-title` | `Update AI translations` | PR title. |
+| `commit-message` | `Update AI translations` | Commit message. |
+| `github-token` | `${{ github.token }}` | Token for pushing and opening the PR. |
+| `python-version` | `3.11` | Python version used by the action. |
 
-### Triggering on pull requests instead of pushes
+## What The Action Runs
 
-The default `diff-base` (`${{ github.event.before }}`) is set for **push** events.
-To run on pull requests, set `diff-base` to the PR base SHA so the diff is computed
-correctly:
+The translate step runs:
 
-```yaml
-on: { pull_request: { branches: [main] } }
-# ...
-      - uses: bisq-network/translate-java-property-files@main
-        with:
-          diff-base: ${{ github.event.pull_request.base.sha }}
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```bash
+python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"
 ```
 
-## How this differs from a hosted service
+The PR step commits only when localization files changed. User-provided action
+inputs are passed through environment variables, not interpolated directly into
+shell scripts.
 
-- **Your key, your cost.** You pay your model provider directly, at cost — no
-  per-word billing or quota tier.
-- **Zero egress option.** With `api-base-url` pointed at a local model, strings
-  never leave your CI runner.
-- **Everything in your repo.** Glossary, style rules, prompts, and the resulting
-  translations are all version-controlled and reviewable in the PR.
+## Custom Formats
+
+The action includes built-in Java `.properties` and JSON adapters. For custom
+adapters, publish a small wrapper action or install step that places your adapter
+package on `PYTHONPATH` and exposes a `localize.format_adapters` entry point.
+Then reference that adapter id in `config.yaml`.

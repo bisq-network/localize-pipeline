@@ -1,6 +1,6 @@
 """Public core orchestration API."""
 
-from src.pipeline_core import (
+from localize.pipeline_core import (
     ProcessQueueResult,
     TranslationPipelineOptions,
     TranslationPipelinePaths,
@@ -8,7 +8,10 @@ from src.pipeline_core import (
     TranslationPipelineSteps,
     run_translation_pipeline,
 )
-from src.connectors import (
+from localize.connectors import (
+    FileReporterConnector,
+    FilesystemSourceConnector,
+    FunctionProcessorConnector,
     NoopPipelinePublisher,
     PipelineConnectorSet,
     PipelineProcessorConnector,
@@ -19,6 +22,9 @@ from src.connectors import (
 )
 
 __all__ = [
+    "FileReporterConnector",
+    "FilesystemSourceConnector",
+    "FunctionProcessorConnector",
     "NoopPipelinePublisher",
     "PipelineConnectorSet",
     "PipelineProcessorConnector",

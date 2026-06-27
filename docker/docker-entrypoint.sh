@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Entrypoint script for the Translate Java Property Files service.
+# Entrypoint script for the Localize Pipeline Docker service.
 # This script handles initial setup, privilege dropping, and Git repository management.
 #
 # Configuration Environment Variables for Repository Resilience:
@@ -124,11 +124,11 @@ if [ "$(id -u)" -ne 0 ]; then
 
     if [ -n "$GPG_SIGNING_KEY" ]; then
         git config --global user.signingkey "$GPG_SIGNING_KEY"
-        git config --global commit.gpgsign true 
+        git config --global commit.gpgsign true
         log "Git user configured with GPG signing key."
     else
         git config --global --unset-all user.signingkey >/dev/null 2>&1 || true
-        git config --global commit.gpgsign false 
+        git config --global commit.gpgsign false
         log "Git user configured without a GPG signing key; commit signing disabled."
     fi
 
@@ -410,4 +410,4 @@ else
             exit 1
         fi
     fi
-fi 
+fi

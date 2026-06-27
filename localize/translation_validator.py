@@ -1,7 +1,7 @@
 from typing import Dict, Set, Tuple, List
 import re
-from src.properties_parser import parse_properties_file, reassemble_file
-from src.placeholder_rules import extract_placeholder_tokens
+from localize.properties_parser import parse_properties_file, reassemble_file
+from localize.placeholder_rules import extract_placeholder_tokens
 
 _ALLOWED_CONTROL_CODEPOINTS = {0x09, 0x0A, 0x0D}
 _UNICODE_ESCAPE_PATTERN = re.compile(r'\\u([0-9a-fA-F]{4})')

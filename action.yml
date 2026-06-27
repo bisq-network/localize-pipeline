@@ -1,8 +1,8 @@
 name: "AI localization translation"
 description: >-
-  Translate changed Java .properties or JSON localization files with OpenAI (or a local Ollama / any
-  OpenAI-compatible endpoint) and open a pull request. Runs entirely in your CI
-  using the workflow's GITHUB_TOKEN — no account, no quota, no baked SSH key.
+  Translate changed Java .properties or JSON localization files with OpenAI,
+  AISuite providers, or a local OpenAI-compatible endpoint, then open a pull
+  request from your CI workflow.
 
 branding:
   icon: globe
@@ -66,7 +66,7 @@ runs:
   using: "composite"
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
 
@@ -94,7 +94,7 @@ runs:
         else
           export TRANSLATION_DIFF_BASE="$DIFF_BASE_INPUT"
         fi
-        python -m src.cli run --config "$TRANSLATOR_CONFIG_FILE"
+        python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"
 
     - name: Open pull request
       if: ${{ inputs.open-pr == 'true' }}

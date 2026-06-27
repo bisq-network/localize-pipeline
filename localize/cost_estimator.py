@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Sequence
 
-from src.usage_tracker import cost_for_tokens
+from localize.usage_tracker import cost_for_tokens
 
 # Rough per-string token heuristics (input includes amortized prompt/glossary
 # context; output is the translated string). Override per call if you have data.
