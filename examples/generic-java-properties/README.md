@@ -1,19 +1,19 @@
-# Generic Java .properties Example
+# Java Properties Example
 
-This generic Java .properties profile is for a project that stores localization
-files as Java `.properties`.
+This example shows the smallest useful Java `.properties` setup.
 
-It demonstrates the reusable contract without project-specific terminology:
+## Files
 
-- `config.yaml` uses the default AISuite-backed provider abstraction.
-- `glossary.json` shows the per-locale glossary shape.
-- `resources/messages.properties` is the source file.
-- `resources/messages_de.properties` is the German target file.
+| File | Purpose |
+| --- | --- |
+| `config.yaml` | Selects `java_properties` with suffix layout. |
+| `glossary.json` | Minimal German glossary. |
+| `resources/messages.properties` | Source strings. |
+| `resources/messages_de.properties` | German target strings. |
 
-To adapt it, copy the directory into a test project, update `target_project_root`
-and `input_folder`, then run the pipeline with that config.
+## Try It
 
-Try it from the repository root:
+From the repository root:
 
 ```bash
 python3 -m venv venv
@@ -21,3 +21,16 @@ python3 -m venv venv
 localize validate --config examples/generic-java-properties/config.yaml
 localize formats
 ```
+
+## Adapt It
+
+Copy the directory into another project and update:
+
+- `target_project_root`
+- `input_folder`
+- `supported_locales`
+- `glossary_file_path`
+- `project_context`
+
+Keep project-specific style and glossary rules out of generic profiles. Product
+knowledge belongs in the consuming project's config and glossary.

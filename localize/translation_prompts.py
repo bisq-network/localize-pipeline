@@ -1,6 +1,6 @@
 """Prompt builders for localization API calls."""
 
-from src.localization_formats import LocalizationFormat
+from localize.localization_formats import LocalizationFormat
 
 
 def build_translation_system_prompt(

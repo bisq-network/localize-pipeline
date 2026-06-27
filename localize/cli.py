@@ -12,9 +12,10 @@ from typing import Any, Sequence
 
 import yaml
 
-from src.app_config import ConfigIssue, validate_config
-from src.formats import list_localization_adapters, list_localization_formats
-from src.init_config import main as init_config_main
+from localize.app_config import ConfigIssue, validate_config
+from localize.formats import list_localization_adapters, list_localization_formats
+from localize.init_config import main as init_config_main
+from localize.plugins import load_plugins
 
 
 def _load_config_file(config_path: Path) -> dict[str, Any]:
@@ -78,7 +79,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
     os.environ["TRANSLATOR_CONFIG_FILE"] = str(config_path)
-    runtime = importlib.import_module("src.translate_localization_files")
+    runtime = importlib.import_module("localize.translate_localization_files")
     asyncio.run(runtime.main())
     return 0
 
@@ -91,6 +92,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="localize",
         description="Validate and run the AI localization translation pipeline.",
+    )
+    parser.add_argument(
+        "--plugin",
+        action="append",
+        default=[],
+        help=(
+            "Import a plugin module before running the command. Plugins register "
+            "custom localization adapters at import time."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -132,6 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.init_args = forwarded_args
     elif forwarded_args:
         parser.error(f"unrecognized arguments: {' '.join(forwarded_args)}")
+    load_plugins(args.plugin)
     return int(args.func(args))
 
 

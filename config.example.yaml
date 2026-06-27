@@ -1,4 +1,4 @@
-# Minimal example configuration — copy to config.yaml and edit.
+# Minimal example configuration. Copy to config.yaml and edit.
 #
 # This is a small, generic starting point. For a richer, real-world example with
 # per-locale style rules, learned semantic quality rules, and a large glossary,
@@ -13,7 +13,7 @@ target_project_root: "/path/to/your/git/repo"
 # Folder containing localization files (absolute, or relative to target_project_root).
 input_folder: "/path/to/localization/files"
 
-# --- Localization format ---
+# --- Localization profiles ---
 # Built-ins: "java_properties", "json".
 # JSON string leaves are addressed internally with JSON Pointer keys, so nested
 # files can be translated without ambiguous dot-path flattening.
@@ -26,10 +26,9 @@ localization_layout:
   id: "suffix"
   source_locale: "en"
 
-# Optional: projects with more than one localization convention can replace the
-# singular `localization_format` and `localization_layout` settings above with a
-# list. Each profile routes matching files through its own parser/serializer and
-# source-path mapping.
+# Mixed projects can replace the singular settings above with a profile list.
+# Every runtime sidecar uses the same profile list: parsing, validation, semantic
+# review, quality gates, and publishing.
 # localization_formats:
 #   - id: "java_properties"
 #     layout: "suffix"
@@ -69,6 +68,10 @@ review_model_name: "gpt-4o"        # holistic review pass (set equal to model_na
 #   provider_configs:
 #     # Keep secrets in environment variables or your secret manager, not here.
 #     openai: {}
+
+# Custom localization adapters can be loaded by the CLI with:
+#   localize --plugin my_project.localize_adapter run --config config.yaml
+# or by installed packages that expose the localize.format_adapters entry point.
 
 # --- Glossary (optional but recommended) ---
 # JSON file of per-language term mappings. See glossary.example.json for the format.

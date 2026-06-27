@@ -1,9 +1,9 @@
 from pathlib import Path
 import json
 
-from src.localization_formats import JSON_FORMAT
-from src.localization_layouts import LocalizationLayout
-from src.semantic_quality import (
+from localize.localization_formats import JSON_FORMAT
+from localize.localization_layouts import LocalizationLayout
+from localize.semantic_quality import (
     SemanticRule,
     TranslationChange,
     analyze_all_translation_entries,
@@ -12,7 +12,7 @@ from src.semantic_quality import (
     iter_translation_changes_from_diff,
     load_semantic_rules,
 )
-from src.translation_quality_gate import (
+from localize.translation_quality_gate import (
     QualityGateConfig,
     analyze_semantic_qa_changes,
     analyze_source_identical_changes,

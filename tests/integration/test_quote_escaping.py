@@ -7,8 +7,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 # Set a dummy API key before importing the main script to prevent SystemExit.
 os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY_FOR_TESTING'
 
-from src.localization_formats import JAVA_PROPERTIES_FORMAT
-from src.properties_parser import reassemble_file
+from localize.localization_formats import JAVA_PROPERTIES_FORMAT
+from localize.properties_parser import reassemble_file
 
 
 class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
@@ -24,13 +24,13 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.tmpdir.cleanup()
 
-    @patch('src.translate_localization_files.run_post_translation_validation')
-    @patch('src.translate_localization_files.holistic_review_async', new_callable=AsyncMock)
-    @patch('src.translate_localization_files.run_pre_translation_validation')
-    @patch('src.translate_localization_files.load_glossary')
-    @patch('src.translate_localization_files.get_working_tree_changed_keys')
+    @patch('localize.translate_localization_files.run_post_translation_validation')
+    @patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock)
+    @patch('localize.translate_localization_files.run_pre_translation_validation')
+    @patch('localize.translate_localization_files.load_glossary')
+    @patch('localize.translate_localization_files.get_working_tree_changed_keys')
     async def test_single_quotes_are_escaped(self, mock_git_changed_keys, mock_load_glossary, mock_pre_validator, mock_holistic_review, mock_post_validator):
-        from src.translate_localization_files import process_translation_queue, LANGUAGE_CODES, NAME_TO_CODE, REPO_ROOT
+        from localize.translate_localization_files import process_translation_queue, LANGUAGE_CODES, NAME_TO_CODE, REPO_ROOT
 
         # Configure the mocks
         # The pre-validator returns (errors, newly_added_keys).
@@ -64,8 +64,8 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
         # 3. Run the process, patching globals that are still read directly
         with patch.dict(LANGUAGE_CODES, {"de": "German"}), \
              patch.dict(NAME_TO_CODE, {"german": "de"}), \
-             patch('src.translate_localization_files.INPUT_FOLDER', self.test_dir), \
-             patch('src.translate_localization_files.MODEL_PROVIDER', provider):
+             patch('localize.translate_localization_files.INPUT_FOLDER', self.test_dir), \
+             patch('localize.translate_localization_files.MODEL_PROVIDER', provider):
             await process_translation_queue(
                 translation_queue_folder=self.queue_dir,
                 translated_queue_folder=self.translated_dir,
@@ -91,11 +91,11 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
         
         self.assertEqual(output_content, "test.key=Dies ist ein ''{0}'' Beispiel.")
 
-    @patch('src.translate_localization_files.run_post_translation_validation')
-    @patch('src.translate_localization_files.holistic_review_async', new_callable=AsyncMock)
-    @patch('src.translate_localization_files.run_pre_translation_validation')
-    @patch('src.translate_localization_files.load_glossary')
-    @patch('src.translate_localization_files.get_working_tree_changed_keys')
+    @patch('localize.translate_localization_files.run_post_translation_validation')
+    @patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock)
+    @patch('localize.translate_localization_files.run_pre_translation_validation')
+    @patch('localize.translate_localization_files.load_glossary')
+    @patch('localize.translate_localization_files.get_working_tree_changed_keys')
     async def test_review_corrections_are_escaped_before_writing(
             self,
             mock_git_changed_keys,
@@ -104,7 +104,7 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
             mock_holistic_review,
             mock_post_validator,
     ):
-        from src.translate_localization_files import process_translation_queue, LANGUAGE_CODES, NAME_TO_CODE
+        from localize.translate_localization_files import process_translation_queue, LANGUAGE_CODES, NAME_TO_CODE
 
         mock_pre_validator.return_value = ([], {"test.key"})
         mock_post_validator.return_value = True
@@ -131,8 +131,8 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(LANGUAGE_CODES, {"fr": "French"}), \
              patch.dict(NAME_TO_CODE, {"french": "fr"}), \
-             patch('src.translate_localization_files.INPUT_FOLDER', self.test_dir), \
-             patch('src.translate_localization_files.MODEL_PROVIDER', provider):
+             patch('localize.translate_localization_files.INPUT_FOLDER', self.test_dir), \
+             patch('localize.translate_localization_files.MODEL_PROVIDER', provider):
             await process_translation_queue(
                 translation_queue_folder=self.queue_dir,
                 translated_queue_folder=self.translated_dir,

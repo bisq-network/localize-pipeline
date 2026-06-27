@@ -1,395 +1,101 @@
-# Adding New Locales to the Translation System
+# Adding Locales
 
-This guide provides step-by-step instructions for adding support for a new language to the translation system.
+Adding a locale is a config and glossary change. No code changes are required
+when the locale uses an existing format/layout profile.
 
-## Overview
+## 1. Choose The Locale Code
 
-Adding a new locale involves updating configuration files, adding translation glossary entries, and verifying the integration. The process typically takes 15-30 minutes and requires no code changes.
+Use the code already used by your target application or translation platform.
+Common patterns:
 
-## Prerequisites
+| Pattern | Example | Notes |
+| --- | --- | --- |
+| `de` | German | Simple language code. |
+| `pt_BR` | Brazilian Portuguese | Region-specific underscore code. |
+| `zh-Hans` | Simplified Chinese | Script-specific hyphen code. |
+| `es-419` | Latin American Spanish | Numeric region code. |
 
-- Access to the project repository
-- Basic understanding of YAML and JSON formats
-- Knowledge of the target language (or access to a native speaker for glossary translations)
-- ISO 639-1 language code for the new locale (e.g., `th` for Thai, `de` for German)
+The pipeline supports these codes in suffix filenames, locale directories, and
+locale filenames as long as the configured layout can map target files back to
+the source locale.
 
-## Step-by-Step Guide
+## 2. Add The Locale To Config
 
-### Step 1: Determine the Locale Code
-
-Choose the appropriate ISO 639-1 language code for your new locale:
-
-- **Simple codes**: 2-letter codes for most languages (e.g., `de` for German, `th` for Thai)
-- **Region-specific codes**: Use underscore or hyphen for regional variants:
-  - `pt_PT` for European Portuguese
-  - `pt_BR` for Brazilian Portuguese
-  - `zh-Hans` for Simplified Chinese
-  - `zh-Hant` for Traditional Chinese
-
-**Supported formats:**
-- `xx` - Two lowercase letters (e.g., `de`, `fr`, `es`)
-- `xx_YY` - Language with underscore and uppercase region (e.g., `pt_BR`, `af_ZA`)
-- `xx-Yyyy` - Language with hyphen and mixed-case script/region (e.g., `zh-Hans`, `zh-Hant`)
-
-### Step 2: Update Configuration Files
-
-#### 2.1. Update `profiles/bisq/config.yaml`
-
-This is the primary configuration file used by the Docker-based translation service.
-
-1. Open `profiles/bisq/config.yaml`
-
-2. Add your new locale to the `supported_locales` list. Position it logically (e.g., group Asian languages together, European languages together):
+Add one entry to `supported_locales`:
 
 ```yaml
 supported_locales:
-  # ... existing locales ...
-  - code: "ta"
-    name: "Tamil"
-  - code: "th"          # ← New locale
-    name: "Thai"        # ← Display name
-  - code: "pcm"
-    name: "Nigerian Pidgin"
-  # ... more locales ...
-```
-
-3. Add language-specific style rules in the `style_rules` section. These rules guide the AI translator to produce high-quality translations:
-
-```yaml
-style_rules:
-  # ... existing rules ...
-  th:
-    - "Use Thai script throughout."
-    - "Maintain formal and polite tone appropriate for financial applications."
-    - "Use polite particles (ครับ/ค่ะ) where appropriate for user interactions."
-    - "Technical crypto terms may be transliterated when no established Thai term exists."
-    - "Ensure consistent transliteration of technical terms across the application."
-  # ... more rules ...
-```
-
-**Style Rule Guidelines:**
-- **Script/Writing System**: Specify which script to use (e.g., "Use Devanagari script throughout" for Hindi)
-- **Formality Level**: Define appropriate tone (formal, polite, casual) based on the application context
-- **Cultural Considerations**: Include language-specific politeness markers or cultural norms
-- **Technical Terms**: Guidance on transliteration vs. translation of technical/crypto terminology
-- **Consistency**: Rules to ensure consistent terminology across the application
-
-**Examples from other languages:**
-- Hindi: "Use formal pronouns (आप) rather than informal (तुम/तू)"
-- German: "Use the formal 'Sie' form of address"
-- Spanish: "When referring to 'billetera' (wallet), use feminine pronouns"
-- Chinese: "Use Chinese punctuation marks (。，、；：？！) rather than Western punctuation"
-
-#### 2.2. Update `config.yaml` (Local Development)
-
-If you're using local development (not Docker), also update `config.yaml` with the same changes:
-
-```yaml
-supported_locales:
+  - code: "de"
+    name: "German"
   - code: "th"
     name: "Thai"
+```
 
+Add style rules if the locale needs script, tone, grammar, or domain guidance:
+
+```yaml
 style_rules:
   th:
     - "Use Thai script throughout."
-    # ... same rules as above ...
+    - "Use a clear, polite tone suitable for financial software."
+    - "Transliterate technical terms only when there is no common Thai term."
 ```
 
-**Note:** `config.yaml` is typically gitignored for security reasons. Update it manually on your local machine.
+Good style rules are short and enforceable. Prefer concrete instructions over
+general quality wishes.
 
-### Step 3: Add Glossary Translations
+## 3. Add Glossary Terms
 
-The glossary ensures consistent translation of key terminology across all translations.
-
-1. Open `profiles/bisq/glossary.json`
-
-2. Add a new section for your locale with translations for common terms. Place it in alphabetical order by language code:
+Add a locale section to the configured glossary JSON:
 
 ```json
 {
-  "ta": {
-    "account": "கணக்கு",
-    "wallet": "பணப்பை",
-    // ... Tamil translations ...
-  },
   "th": {
     "account": "บัญชี",
-    "account_age": "อายุบัญชี",
-    "arbitrator": "ผู้ชี้ขาด",
-    "backup seed words": "สำรองคำกุญแจ",
-    "backup seeds": "สำรองข้อมูลคำกุญแจ",
     "balance": "ยอดคงเหลือ",
-    "bonded_bsq": "BSQ ที่ผูกพัน",
-    "burned_bsq": "BSQ ที่เผาทำลาย",
-    "chat_leave": "ออกจากแชท",
-    "commit_hash": "แฮชคอมมิต",
-    "community": "ชุมชน",
-    "confirmations": "การยืนยัน",
-    "content": "เนื้อหา",
-    "fee": "ค่าธรรมเนียม",
-    "guide": "คู่มือ",
-    "initialize": "เริ่มต้น",
-    "learn_more": "เรียนรู้เพิ่มเติม",
-    "moderator": "ผู้ดูแล",
-    "offer_accepted": "ข้อเสนอได้รับการยอมรับ",
-    "overview": "ภาพรวม",
-    "profile": "โปรไฟล์",
-    "receive": "รับ",
-    "reputation": "ชื่อเสียง",
-    "seed phrase": "คำกุญแจ",
-    "send": "ส่ง",
     "trade": "การซื้อขาย",
-    "transaction_id": "รหัสธุรกรรม",
     "wallet": "กระเป๋าเงิน"
-  },
-  "hi": {
-    "account": "खाता",
-    // ... Hindi translations ...
   }
 }
 ```
 
-**Glossary Guidelines:**
-- Translate approximately 40-60 common terms
-- Include key domain-specific terminology (crypto, wallet, trading terms)
-- Maintain consistency with other languages (same set of English keys)
-- For technical terms without established translations, consider keeping them in English or providing transliterations
-- Validate JSON syntax after adding entries
+Use the glossary for terms where consistency matters:
 
-**Common terms to include:**
-- Financial: account, balance, fee, transaction, payment
-- Trading: trade, offer, buyer, seller, market
-- Crypto-specific: wallet, seed phrase, confirmations, blockchain terms
-- UI elements: profile, settings, overview, guide, send, receive
-- Actions: initialize, verify, confirm, cancel, delete
-- Roles: moderator, mediator, arbitrator
+- product nouns
+- domain terms
+- roles
+- recurring UI actions
+- common trading, wallet, or security terminology
 
-### Step 4: Validate Your Changes
+Keep brand and technical terms that must never be translated in
+`brand_technical_glossary` in the config, not in the per-locale glossary.
 
-#### 4.1. Validate JSON Syntax
+## 4. Create Target Files
 
-Ensure `profiles/bisq/glossary.json` is valid JSON:
+Use the layout configured for the project.
 
-```bash
-python -m json.tool profiles/bisq/glossary.json > /dev/null && echo "JSON is valid"
+Suffix layout:
+
+```text
+messages.properties
+messages_th.properties
 ```
 
-#### 4.2. Run Unit Tests
+Locale-directory layout:
 
-Verify that the configuration loads correctly:
-
-```bash
-# Activate virtual environment
-source venv/bin/activate
-
-# Run tests
-python -m pytest tests/unit/test_app_config.py -v
+```text
+locales/en/messages.json
+locales/th/messages.json
 ```
 
-All tests should pass, confirming that:
-- The new locale is recognized
-- Configuration loads without errors
-- Language mappings are created correctly
+Locale-filename layout:
 
-#### 4.3. Verify Integration
-
-Test that your new locale is properly integrated:
-
-```bash
-python -c "
-from src.app_config import load_app_config
-config = load_app_config()
-
-# Check if locale is recognized
-locale_code = 'th'  # Replace with your locale code
-print(f'Locale present: {locale_code in config.language_codes}')
-print(f'Language name: {config.language_codes.get(locale_code)}')
-print(f'Name-to-code mapping: {config.name_to_code.get(\"thai\")}')  # Replace with your language name
-print(f'Style rules present: {locale_code in config.precomputed_style_rules_text}')
-"
+```text
+locales/en.json
+locales/th.json
 ```
 
-Expected output:
-```
-Locale present: True
-Language name: Thai
-Name-to-code mapping: th
-Style rules present: True
-```
-
-### Step 5: Test Translation Pipeline
-
-#### 5.1. Create Test Files
-
-For a complete end-to-end test, create a sample locale file that matches your
-configured `localization_format` and `localization_layout`:
-
-```bash
-# In the target project's i18n folder
-cd /path/to/bisq2/i18n/src/main/resources
-
-# Suffix layout with Java .properties
-echo "test.key=Test value" > test_th.properties
-
-# Locale-directory layout with JSON
-mkdir -p th
-printf '{ "test.key": "Test value" }\n' > th/messages.json
-```
-
-#### 5.2. Run Translation (Dry Run)
-
-Test the translation pipeline in dry-run mode:
-
-```bash
-# Update profiles/bisq/config.yaml temporarily
-# Set: dry_run: true
-
-# Run the translator
-docker compose run --rm translator
-```
-
-Verify in the logs that:
-- Your new locale files are detected
-- Glossary terms are loaded
-- Style rules are applied
-- No validation errors occur
-
-### Step 6: Commit Your Changes
-
-Once verified, commit your changes:
-
-```bash
-git add profiles/bisq/config.yaml profiles/bisq/glossary.json
-git commit -m "Add [Language Name] ([code]) as a new supported locale
-
-Added [Language] language support with comprehensive configuration.
-
-Changes:
-- Added locale (code: '[code]', name: '[Language]') to supported_locales
-- Added [N] style rules for [language-specific considerations]
-- Added [N] glossary translations for common terms
-
-All tests pass and locale is fully integrated."
-```
-
-## Reference: Real-World Example
-
-Here's the complete commit that added Thai language support, which you can use as a reference:
-
-**Commit: `db38f90ce`** - "Add Thai (th) as a new supported locale"
-
-### Configuration Changes
-
-**`profiles/bisq/config.yaml`:**
-```yaml
-supported_locales:
-  - code: "th"
-    name: "Thai"
-
-style_rules:
-  th:
-    - "Use Thai script throughout."
-    - "Maintain formal and polite tone appropriate for financial applications."
-    - "Use polite particles (ครับ/ค่ะ) where appropriate for user interactions."
-    - "Technical crypto terms may be transliterated when no established Thai term exists."
-    - "Ensure consistent transliteration of technical terms across the application."
-```
-
-### Glossary Entries
-
-57 Thai translations were added to `profiles/bisq/glossary.json`, including:
-- `"wallet": "กระเป๋าเงิน"`
-- `"account": "บัญชี"`
-- `"trade": "การซื้อขาย"`
-- `"seed phrase": "คำกุญแจ"`
-- `"reputation": "ชื่อเสียง"`
-
-## Troubleshooting
-
-### Common Issues
-
-#### Issue: Configuration doesn't load
-**Symptoms:** Error when running tests or translation pipeline
-**Solution:**
-- Verify YAML indentation is correct (use spaces, not tabs)
-- Ensure locale code follows supported format
-- Check that all required fields are present (code, name)
-
-#### Issue: JSON validation fails
-**Symptoms:** `python -m json.tool profiles/bisq/glossary.json` reports errors
-**Solution:**
-- Check for missing commas between entries
-- Ensure proper quote escaping in translations
-- Verify the JSON structure matches existing entries
-- Use a JSON validator or IDE with JSON support
-
-#### Issue: Locale not detected
-**Symptoms:** Translation pipeline doesn't recognize new locale files
-**Solution:**
-- Verify `localization_layout` matches your repository convention.
-- For `suffix`, check that files are named correctly (e.g., `default_th.properties`,
-  `default_th.json`, or `default.th.json`).
-- For `locale_directory`, check that the locale is a path segment
-  (e.g., `locales/th/messages.json`).
-- For `locale_filename`, check that the locale is the filename stem
-  (e.g., `locales/th.json`).
-- Ensure the locale is in the `supported_locales` list
-
-#### Issue: Style rules not applied
-**Symptoms:** AI translations don't follow specified guidelines
-**Solution:**
-- Verify style rules are under the correct locale code in the YAML
-- Check indentation matches other locale rules
-- Ensure rules are clear and specific
-- Test with verbose logging enabled to see what's being sent to the AI
-
-### Getting Help
-
-If you encounter issues:
-
-1. Check existing locale configurations for reference
-2. Review test output for specific error messages
-3. Validate YAML and JSON syntax using online validators
-4. Consult the project's main README.md for general troubleshooting
-5. Check the `docs/` directory for additional documentation
-
-## Supported Locale Layouts
-
-The default `suffix` layout recognizes the following locale code patterns in
-filenames:
-
-| Pattern | Example | Description |
-|---------|---------|-------------|
-| `_xx` | `_de.properties`, `_de.json` | Simple 2-letter code |
-| `_xxx` | `_pcm.properties`, `_pcm.json` | 3-letter code (rare) |
-| `_xx_YY` | `_pt_BR.properties`, `_pt_BR.json` | Language + region (uppercase) |
-| `_xx-Yyyy` | `_zh-Hans.properties`, `_zh-Hans.json` | Language + script/region (mixed case) |
-| `_xx_Yyyy` | `_af_ZA.properties`, `_af_ZA.json` | Alternative underscore format |
-
-For JSON projects that use native directory conventions, set:
-
-```yaml
-localization_format: "json"
-localization_layout:
-  id: "locale_directory"
-  source_locale: "en"
-```
-
-This maps `locales/de/messages.json` back to `locales/en/messages.json`.
-
-For JSON projects that use locale filenames, set:
-
-```yaml
-localization_format: "json"
-localization_layout:
-  id: "locale_filename"
-  source_locale: "en"
-```
-
-This maps `locales/de.json` back to `locales/en.json`.
-
-Projects that contain more than one localization convention can configure
-several profiles instead of the singular `localization_format` setting:
+For mixed projects, each file is owned by the matching profile:
 
 ```yaml
 localization_formats:
@@ -401,65 +107,84 @@ localization_formats:
       source_locale: "en"
 ```
 
-When a source file changes, the pipeline queues only target files that map back
-through the same profile. A change to `messages.properties` does not enqueue
-`locales/de/messages.json`, and a change to `locales/en/messages.json` does not
-enqueue `messages_de.properties`.
+A Java source file queues Java targets. A JSON source file queues JSON targets.
+The profiles do not cross-enqueue each other.
 
-## Best Practices
+## 5. Validate
 
-### Style Rules
-- Keep rules concise and actionable (5-7 rules per language)
-- Focus on aspects the AI can control (tone, script, terminology)
-- Include cultural context that affects translation choices
-- Reference similar languages as examples when creating new rules
+Run config validation:
 
-### Glossary Translations
-- Aim for 40-60 key terms minimum
-- Prioritize domain-specific terminology over common words
-- Consult native speakers for accuracy and naturalness
-- Maintain consistency with existing translations in the target language
-- Document any non-standard transliterations or choices
+```bash
+localize validate --config config.yaml
+```
 
-### Testing
-- Always run the full test suite before committing
-- Test with actual localization files for the configured format/layout when possible
-- Verify both detection and translation of new locale files
-- Check that glossary terms are correctly substituted in translations
+Validate JSON glossary syntax:
 
-### Documentation
-- Update this guide if you discover edge cases or improvements
-- Document any language-specific quirks or considerations
-- Share learnings with the team for future locale additions
+```bash
+python -m json.tool glossary.json > /dev/null
+```
 
-## Appendix: Complete Checklist
+For this repository's Bisq production profile:
 
-Use this checklist when adding a new locale:
+```bash
+python -m json.tool profiles/bisq/glossary.json > /dev/null
+OPENAI_API_KEY=sk-test-key venv/bin/pytest -q tests/unit/test_config_quality.py
+```
 
-- [ ] Determined correct ISO 639-1 language code
-- [ ] Updated `profiles/bisq/config.yaml`:
-  - [ ] Added locale to `supported_locales`
-  - [ ] Added comprehensive style rules
-- [ ] Updated `config.yaml` (if using local development)
-- [ ] Updated `profiles/bisq/glossary.json`:
-  - [ ] Added 40-60 common terms
-  - [ ] Included domain-specific terminology
-  - [ ] Validated JSON syntax
-- [ ] Tested configuration:
-  - [ ] JSON validation passed
-  - [ ] Unit tests passed (45/45)
-  - [ ] Integration verification completed
-- [ ] Tested translation pipeline:
-  - [ ] Created test localization files
-  - [ ] Ran dry-run translation
-  - [ ] Verified locale detection
-  - [ ] Checked glossary application
-- [ ] Committed changes with descriptive message
-- [ ] Documented any language-specific considerations
+## 6. Test A Translation Run
+
+For local configs:
+
+```bash
+localize run --config config.yaml
+```
+
+For Docker/server profiles:
+
+```bash
+docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator
+```
+
+Use `dry_run: true` while checking detection and queue behavior. Turn it off for
+the real run.
+
+## Checklist
+
+- [ ] Locale code matches the application and filename convention.
+- [ ] Locale is listed in `supported_locales`.
+- [ ] Style rules exist when the language needs specific guidance.
+- [ ] Glossary has the most important recurring terms.
+- [ ] Target files follow the configured layout.
+- [ ] `localize validate --config ...` passes.
+- [ ] Glossary JSON validates.
+- [ ] A dry run or test run detects the new locale.
+
+## Troubleshooting
+
+**Locale is not detected**
+
+Check the layout. `suffix` expects names such as `messages_th.properties` or
+`messages.th.json`. `locale_directory` expects the locale as a path segment, such
+as `locales/th/messages.json`. `locale_filename` expects `locales/th.json`.
+
+**Style rules are ignored**
+
+Confirm the style rules are under the exact locale code used in
+`supported_locales`.
+
+**Glossary does not apply**
+
+Confirm `glossary_file_path` points to the glossary you edited and that the
+locale code matches `supported_locales`.
+
+**JSON validation fails**
+
+Run `python -m json.tool <file>` and fix missing commas, invalid escaping, or
+trailing comments.
 
 ## See Also
 
-- [Main README](../README.md) - Project overview and setup
-- [New Project Deployment](./new-project-deployment.md) - Server deployment guide
-- [Repository Structure](./repository-structure.md) - Project organization
-- [Configuration Reference](../profiles/bisq/config.yaml) - Full Bisq profile example
+- [README](../README.md)
+- [CLI](localization-cli.md)
+- [Server deployment](new-project-deployment.md)
+- [Repository structure](repository-structure.md)

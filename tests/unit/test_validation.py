@@ -4,7 +4,7 @@ import tempfile
 import textwrap
 
 # To be created
-from src.translate_localization_files import lint_properties_file
+from localize.translate_localization_files import lint_properties_file
 
 class TestValidationLogic(unittest.TestCase):
 

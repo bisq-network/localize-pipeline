@@ -5,7 +5,7 @@ import unittest
 
 os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY_FOR_TESTING'
 
-from src.translate_localization_files import generate_translation_summary
+from localize.translate_localization_files import generate_translation_summary
 
 # Codes used across all tests — mirrors a realistic subset of production config
 SUPPORTED_CODES = ["de", "es", "fr", "pt_BR", "af_ZA"]

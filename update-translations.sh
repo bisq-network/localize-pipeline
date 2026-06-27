@@ -7,7 +7,7 @@
 # It performs the following steps:
 # 1. Sets up the environment, including SSH and Git configurations.
 # 2. Clones or updates the target repository where translation files are stored.
-# 3. Executes the localization CLI (`localize run` / `python -m src.cli run`).
+# 3. Executes the localization CLI (`localize run` / `python -m localize.cli run`).
 # 4. Commits any changes to the translation files.
 # 5. Creates a pull request on GitHub with the new translations.
 #
@@ -84,17 +84,93 @@ translation_file_status_regex() {
 }
 
 translation_file_extension_regex() {
-    local format_id=""
-    local extension=""
-    if [ -n "${CONFIG_FILE:-}" ] && [ -f "$CONFIG_FILE" ] && command_exists yq; then
-        format_id=$(yq -r '(.localization_format.id // .localization_format // "java_properties")' "$CONFIG_FILE" 2>/dev/null || true)
-        extension=$(yq -r '(.localization_format.file_extension // "")' "$CONFIG_FILE" 2>/dev/null || true)
+    if [ -n "${CONFIG_FILE:-}" ] && [ -f "$CONFIG_FILE" ] && command_exists python3; then
+        local extensions
+        extensions=$(python3 - "$CONFIG_FILE" <<'PY' 2>/dev/null || true
+import re
+import sys
+
+import yaml
+
+
+def normalize_extension(raw_value):
+    if not raw_value:
+        return ""
+    extension = str(raw_value).strip().lstrip(".")
+    if not extension or extension == "null":
+        return ""
+    return re.sub(r"([^A-Za-z0-9_])", r"\\\1", extension)
+
+
+def extension_for_format(format_id):
+    if format_id == "json":
+        return "json"
+    if format_id in ("java_properties", "", None, "null"):
+        return "properties"
+    return ""
+
+
+def raw_format_id(profile):
+    if isinstance(profile, str):
+        return profile
+    if not isinstance(profile, dict):
+        return ""
+    raw_format = (
+        profile.get("id")
+        or profile.get("format")
+        or profile.get("localization_format")
+        or {}
+    )
+    if isinstance(raw_format, dict):
+        return raw_format.get("id") or raw_format.get("format") or ""
+    return raw_format
+
+
+with open(sys.argv[1], "r", encoding="utf-8") as file:
+    config = yaml.safe_load(file) or {}
+
+extensions = set()
+profiles = config.get("localization_formats")
+if isinstance(profiles, list) and profiles:
+    for profile in profiles:
+        if isinstance(profile, dict):
+            explicit_extension = (
+                profile.get("file_extension")
+                or profile.get("extension")
+                or (
+                    profile.get("format", {}).get("file_extension")
+                    if isinstance(profile.get("format"), dict)
+                    else ""
+                )
+            )
+            normalized = normalize_extension(explicit_extension)
+            if normalized:
+                extensions.add(normalized)
+                continue
+        format_id = raw_format_id(profile)
+        extensions.add(extension_for_format(format_id))
+else:
+    raw_format = config.get("localization_format")
+    explicit_extension = ""
+    if isinstance(raw_format, dict):
+        explicit_extension = raw_format.get("file_extension") or raw_format.get("extension") or ""
+        format_id = raw_format.get("id") or raw_format.get("format") or ""
+    else:
+        explicit_extension = config.get("localization_file_extension") or ""
+        format_id = raw_format
+    normalized = normalize_extension(explicit_extension)
+    extensions.add(normalized or extension_for_format(format_id))
+
+extensions.discard("")
+print("|".join(sorted(extensions)))
+PY
+)
+        if [ -n "$extensions" ]; then
+            printf '%s' "$extensions"
+            return
+        fi
     fi
-    extension="${extension#.}"
-    if [ -n "$extension" ] && [ "$extension" != "null" ]; then
-        printf '%s' "$extension" | sed -E 's/[^A-Za-z0-9_]/\\&/g'
-        return
-    fi
+    local format_id="java_properties"
     case "$format_id" in
         json)
             printf 'json'
@@ -466,7 +542,7 @@ git log -1 --pretty=%H
 prepare_translation_source "$TRANSLATION_SOURCE" "${DRY_RUN:-false}" "${PULL_SOURCE_FILES:-false}"
 
 # Navigate back to the application's root directory to run the Python CLI.
-# This ensures that the module path `src.cli` is resolved correctly.
+# This ensures that the module path `localize.cli` is resolved correctly.
 APP_ROOT="/app"
 if [ ! -d "$APP_ROOT" ]; then
   APP_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -491,7 +567,7 @@ mkdir -p "$APP_ROOT/logs"
 VALIDATION_SUMMARY="$APP_ROOT/logs/translation_validation_summary.json"
 printf '%s\n' '{"files":{},"pipeline_warnings":[]}' > "$VALIDATION_SUMMARY"
 set +e
-python3 -u -m src.cli run --config "$CONFIG_FILE"
+python3 -u -m localize.cli run --config "$CONFIG_FILE"
 PY_EXIT=$?
 set -e
 if [ $PY_EXIT -ne 0 ]; then
@@ -569,7 +645,7 @@ stage_and_submit_batch() {
     set +e
     (
         cd "$app_root" && \
-        python3 -m src.translation_semantic_reviewer \
+        python3 -m localize.translation_semantic_reviewer \
             --repo-root "$TARGET_PROJECT_ROOT" \
             --input-folder "$ABSOLUTE_INPUT_FOLDER" \
             --config "$CONFIG_FILE" \
@@ -586,7 +662,7 @@ stage_and_submit_batch() {
     set +e
     (
         cd "$app_root" && \
-        python3 -m src.translation_quality_gate \
+        python3 -m localize.translation_quality_gate \
             --repo-root "$TARGET_PROJECT_ROOT" \
             --input-folder "$ABSOLUTE_INPUT_FOLDER" \
             --config "$CONFIG_FILE" \

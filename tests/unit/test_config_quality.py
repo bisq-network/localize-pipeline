@@ -45,9 +45,9 @@ def test_public_docs_describe_aisuite_as_default_provider():
     assert "default" in combined_docs
     assert "openai_compatible" in combined_docs
     assert "fallback" in combined_docs
-    assert "`src.core`" in readme
-    assert "`src.providers`" in readme
-    assert "`src.formats`" in readme
+    assert "`localize.core`" in readme
+    assert "`localize.providers`" in readme
+    assert "`localize.formats`" in readme
     assert "optional AISuite" not in readme
     assert "AISuite is optional" not in readme
 
@@ -84,7 +84,7 @@ def test_neutral_example_project_is_packaged():
 
     readme_text = readme_path.read_text(encoding="utf-8")
     assert "Bisq" not in readme_text
-    assert "generic Java .properties" in readme_text
+    assert "smallest useful Java `.properties` setup" in readme_text
 
 
 def test_bisq_profile_packages_config_and_glossary_assets():
@@ -110,20 +110,17 @@ def test_docker_compose_mounts_the_selected_profile():
     assert "../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json:/app/glossary.json:ro" in compose
 
 
-def test_update_service_watches_profile_assets_for_restart():
-    script = (PROJECT_ROOT / "update-service.sh").read_text(encoding="utf-8")
-
-    assert "profiles/" in script
-    assert "profiles/bisq/config.yaml" in script
-    assert "profiles/bisq/glossary.json" in script
+def test_repository_does_not_ship_legacy_systemd_deployment_scripts():
+    assert not (PROJECT_ROOT / "deploy.sh").exists()
+    assert not (PROJECT_ROOT / "update-service.sh").exists()
 
 
 def test_deployment_guide_documents_relative_input_folder_semantics():
     guide = (PROJECT_ROOT / "docs" / "new-project-deployment.md").read_text(encoding="utf-8")
 
-    assert "# - input_folder: i18n/src/main/resources" in guide
     assert "input_folder is resolved relative to target_project_root" in guide
-    assert "model_provider: aisuite" in guide
+    assert "Docker Compose plus cron" in guide
+    assert "translator.service" in guide
     assert "The paths must be absolute paths inside the container." not in guide
 
 

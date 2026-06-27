@@ -7,9 +7,9 @@ import pytest
 
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from src.semantic_quality import TranslationChange
-from src.model_provider import ModelProviderConfigurationError
-from src.translation_semantic_reviewer import (
+from localize.semantic_quality import TranslationChange
+from localize.model_provider import ModelProviderConfigurationError
+from localize.translation_semantic_reviewer import (
     _run,
     append_semantic_review_findings,
     build_semantic_review_messages,
@@ -253,11 +253,11 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
 
     with (
         patch(
-            "src.translation_semantic_reviewer.get_staged_diff",
+            "localize.translation_semantic_reviewer.get_staged_diff",
             return_value="fake diff",
         ),
         patch(
-            "src.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
             return_value=[
                 TranslationChange(
                     file="resources/messages_de.properties",
@@ -270,7 +270,7 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
             ],
         ),
         patch(
-            "src.translation_semantic_reviewer.create_model_provider",
+            "localize.translation_semantic_reviewer.create_model_provider",
             return_value=provider,
         ) as create_provider,
     ):
@@ -298,6 +298,103 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_semantic_reviewer_collects_changes_from_all_configured_profiles(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "supported_locales:",
+                "  - code: de",
+                "    name: German",
+                "localization_formats:",
+                "  - id: java_properties",
+                "    layout: suffix",
+                "  - id: json",
+                "    layout:",
+                "      id: locale_directory",
+                "      source_locale: en",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = MagicMock()
+    provider.client = object()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"findings": []}))
+                )
+            ]
+        )
+    )
+
+    def changes_for_profile(**kwargs):
+        if kwargs["localization_format"].id == "java_properties":
+            return [
+                TranslationChange(
+                    file="resources/messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ]
+        return [
+            TranslationChange(
+                file="resources/de/common.json",
+                locale_code="de",
+                key="/hello",
+                source_value="Hello",
+                old_value=None,
+                new_value="Hallo",
+            )
+        ]
+
+    with (
+        patch(
+            "localize.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ),
+        patch(
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            side_effect=changes_for_profile,
+        ) as iter_changes,
+        patch(
+            "localize.translation_semantic_reviewer.create_model_provider",
+            return_value=provider,
+        ),
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                "resources",
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+                "resources/de/common.json",
+            ]
+        )
+
+    assert exit_code == 0
+    assert iter_changes.call_count == 2
+    review_messages = provider.create_chat_completion.await_args.kwargs["messages"]
+    combined = "\n".join(message["content"] for message in review_messages)
+    assert "resources/messages_de.properties" in combined
+    assert "resources/de/common.json" in combined
+
+
+@pytest.mark.asyncio
 async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(tmp_path, caplog):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"
@@ -318,11 +415,11 @@ async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(tm
 
     with (
         patch(
-            "src.translation_semantic_reviewer.get_staged_diff",
+            "localize.translation_semantic_reviewer.get_staged_diff",
             return_value="fake diff",
         ),
         patch(
-            "src.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
             return_value=[
                 TranslationChange(
                     file="resources/messages_de.properties",
@@ -335,7 +432,7 @@ async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(tm
             ],
         ),
         patch(
-            "src.translation_semantic_reviewer.create_model_provider",
+            "localize.translation_semantic_reviewer.create_model_provider",
             side_effect=ModelProviderConfigurationError("missing key"),
         ),
     ):

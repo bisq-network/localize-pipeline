@@ -2,9 +2,9 @@
 
 import pytest
 
-from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
-from src.localization_layouts import LocalizationLayout, SUFFIX_LAYOUT
-from src.localization_profiles import LocalizationProfile, load_localization_profiles
+from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+from localize.localization_layouts import LocalizationLayout, SUFFIX_LAYOUT
+from localize.localization_profiles import LocalizationProfile, load_localization_profiles
 
 
 def test_load_localization_profiles_defaults_to_legacy_single_format():

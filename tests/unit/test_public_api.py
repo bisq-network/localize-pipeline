@@ -1,5 +1,8 @@
 def test_core_public_api_exports_pipeline_contract():
-    from src.core import (
+    from localize.core import (
+        FileReporterConnector,
+        FilesystemSourceConnector,
+        FunctionProcessorConnector,
         TranslationPipelineOptions,
         TranslationPipelinePaths,
         TranslationPipelineResult,
@@ -12,10 +15,13 @@ def test_core_public_api_exports_pipeline_contract():
     assert TranslationPipelineOptions.__name__ == "TranslationPipelineOptions"
     assert TranslationPipelineSteps.__name__ == "TranslationPipelineSteps"
     assert TranslationPipelineResult.__name__ == "TranslationPipelineResult"
+    assert FilesystemSourceConnector.__name__ == "FilesystemSourceConnector"
+    assert FunctionProcessorConnector.__name__ == "FunctionProcessorConnector"
+    assert FileReporterConnector.__name__ == "FileReporterConnector"
 
 
 def test_provider_public_api_exports_default_backends():
-    from src.providers import (
+    from localize.providers import (
         AiSuiteProvider,
         DEFAULT_AISUITE_PROVIDER,
         DEFAULT_MODEL_PROVIDER,
@@ -35,7 +41,7 @@ def test_provider_public_api_exports_default_backends():
 
 
 def test_format_public_api_exports_localization_format_metadata():
-    from src.formats import (
+    from localize.formats import (
         JSON_FORMAT,
         JAVA_PROPERTIES_FORMAT,
         LOCALE_DIRECTORY_LAYOUT,

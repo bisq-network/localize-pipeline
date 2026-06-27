@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from src.usage_tracker import UsageTracker
+from localize.usage_tracker import UsageTracker
 
 
 PRICES = {

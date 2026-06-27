@@ -1,6 +1,6 @@
 target_project_root: '/target_repo'
 # Mounted Git repository root
-input_folder: '/target_repo/i18n/src/main/resources' # Path relative to target_project_root
+input_folder: '/target_repo/i18n/localize/main/resources' # Path relative to target_project_root
 glossary_file_path: 'glossary.json' # Mounted directly to /app/glossary.json
 localization_format: "java_properties"
 project_context: >

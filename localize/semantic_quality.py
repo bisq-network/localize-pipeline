@@ -11,9 +11,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from src.localization_adapters import get_localization_adapter
-from src.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
-from src.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout
+from localize.localization_adapters import get_localization_adapter
+from localize.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
+from localize.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout
 
 
 @dataclass(frozen=True)

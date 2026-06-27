@@ -9,26 +9,26 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 from dotenv import load_dotenv
 
-from src.logging_config import setup_logger
-from src.localization_formats import (
+from localize.logging_config import setup_logger
+from localize.localization_formats import (
     JAVA_PROPERTIES_FORMAT,
     LocalizationFormat,
     load_localization_format,
 )
-from src.localization_layouts import (
+from localize.localization_layouts import (
     SUFFIX_LAYOUT,
     LocalizationLayout,
     load_localization_layout,
 )
-from src.localization_profiles import LocalizationProfile, load_localization_profiles
-from src.model_provider import (
+from localize.localization_profiles import LocalizationProfile, load_localization_profiles
+from localize.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
     ModelProviderConfigurationError,
     create_model_provider,
     normalize_model_provider_name,
 )
-from src.semantic_quality import normalize_retained_source_word_allowlist
+from localize.semantic_quality import normalize_retained_source_word_allowlist
 
 
 @dataclass

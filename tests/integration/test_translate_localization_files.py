@@ -10,26 +10,26 @@ import json
 from unittest.mock import AsyncMock, patch, MagicMock
 from types import SimpleNamespace
 import pytest
-import src.translate_localization_files
-from src.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
-from src.localization_layouts import LocalizationLayout
-from src.localization_profiles import LocalizationProfile
+import localize.translate_localization_files
+from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
+from localize.localization_layouts import LocalizationLayout
+from localize.localization_profiles import LocalizationProfile
 
 # All fixtures are now defined in conftest.py and are auto-discovered by pytest.
 
 @pytest.mark.asyncio
-@patch('src.translate_localization_files.get_changed_translation_files')
-@patch('src.translate_localization_files.copy_files_to_translation_queue')
-@patch('src.translate_localization_files.process_translation_queue')
-@patch('src.translate_localization_files.copy_translated_files_back')
-@patch('src.translate_localization_files.move_files_to_archive')
+@patch('localize.translate_localization_files.get_changed_translation_files')
+@patch('localize.translate_localization_files.copy_files_to_translation_queue')
+@patch('localize.translate_localization_files.process_translation_queue')
+@patch('localize.translate_localization_files.copy_translated_files_back')
+@patch('localize.translate_localization_files.move_files_to_archive')
 async def test_main_flow_no_changes(mock_move, mock_copy_back, mock_process, mock_copy_to_queue, mock_get_changed, integration_test_environment):
     mock_get_changed.return_value = []
-    await src.translate_localization_files.main()
+    await localize.translate_localization_files.main()
     mock_get_changed.assert_called_once_with(
-        src.translate_localization_files.INPUT_FOLDER,
-        src.translate_localization_files.REPO_ROOT,
-        process_all_files=src.translate_localization_files.PROCESS_ALL_FILES
+        localize.translate_localization_files.INPUT_FOLDER,
+        localize.translate_localization_files.REPO_ROOT,
+        process_all_files=localize.translate_localization_files.PROCESS_ALL_FILES
     )
     mock_copy_to_queue.assert_not_called()
     mock_process.assert_not_called()
@@ -63,17 +63,17 @@ async def test_main_translates_json_from_detection_to_copyback(integration_test_
     profiles = (
         LocalizationProfile(JSON_FORMAT, LocalizationLayout(id="suffix", source_locale="en")),
     )
-    with patch('src.translate_localization_files.get_changed_translation_files',
+    with patch('localize.translate_localization_files.get_changed_translation_files',
                return_value=['app_de.json']), \
-         patch('src.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
-         patch('src.translate_localization_files.LOCALIZATION_PROFILES', profiles), \
-         patch('src.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
-         patch('src.translate_localization_files.MODEL_PROVIDER', provider), \
-         patch('src.translate_localization_files.PRESERVE_QUEUES_FOR_DEBUG', True), \
-         patch('src.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+         patch('localize.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('localize.translate_localization_files.LOCALIZATION_PROFILES', profiles), \
+         patch('localize.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.PRESERVE_QUEUES_FOR_DEBUG', True), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
                os.path.join(env['input_folder'], 'ledger.json')), \
-         patch('src.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
-        await src.translate_localization_files.main()
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await localize.translate_localization_files.main()
 
     with open(target_file_path, 'r', encoding='utf-8') as f:
         final_payload = json.load(f)
@@ -106,8 +106,8 @@ async def test_process_translation_queue_end_to_end(integration_test_environment
     provider.format_estimate.return_value = "estimate"
     provider.is_retryable_error.return_value = False
 
-    with patch('src.translate_localization_files.MODEL_PROVIDER', provider):
-        await src.translate_localization_files.process_translation_queue(
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider):
+        await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
             glossary_file_path=env['mock_glossary_path_resolved']
@@ -144,9 +144,9 @@ async def test_handles_already_escaped_quotes_correctly(integration_test_environ
     provider.format_estimate.return_value = "estimate"
     provider.is_retryable_error.return_value = False
 
-    with patch('src.translate_localization_files.lint_properties_file', return_value=[]), \
-         patch('src.translate_localization_files.MODEL_PROVIDER', provider):
-        await src.translate_localization_files.process_translation_queue(
+    with patch('localize.translate_localization_files.lint_properties_file', return_value=[]), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider):
+        await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
             glossary_file_path=env['mock_glossary_path_resolved']
@@ -193,13 +193,13 @@ async def test_process_translation_queue_translates_json_locale_file(integration
     provider.format_estimate.return_value = "estimate"
     provider.is_retryable_error.return_value = False
 
-    with patch('src.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
-         patch('src.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
-         patch('src.translate_localization_files.MODEL_PROVIDER', provider), \
-         patch('src.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+    with patch('localize.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('localize.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
                os.path.join(env['input_folder'], 'ledger.json')), \
-         patch('src.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
-        await src.translate_localization_files.process_translation_queue(
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
             glossary_file_path=env['mock_glossary_path_resolved']
@@ -254,14 +254,14 @@ async def test_process_translation_queue_translates_json_locale_directory_layout
     provider.format_estimate.return_value = "estimate"
     provider.is_retryable_error.return_value = False
 
-    with patch('src.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
-         patch('src.translate_localization_files.LOCALIZATION_LAYOUT', layout), \
-         patch('src.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
-         patch('src.translate_localization_files.MODEL_PROVIDER', provider), \
-         patch('src.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+    with patch('localize.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('localize.translate_localization_files.LOCALIZATION_LAYOUT', layout), \
+         patch('localize.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
                os.path.join(env['input_folder'], 'ledger.json')), \
-         patch('src.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
-        await src.translate_localization_files.process_translation_queue(
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
             glossary_file_path=env['mock_glossary_path_resolved']
@@ -337,13 +337,13 @@ async def test_process_translation_queue_routes_mixed_format_profiles(integratio
             LocalizationLayout(id="locale_directory", source_locale="en"),
         ),
     )
-    with patch('src.translate_localization_files.LOCALIZATION_PROFILES', profiles), \
-         patch('src.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
-         patch('src.translate_localization_files.MODEL_PROVIDER', provider), \
-         patch('src.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+    with patch('localize.translate_localization_files.LOCALIZATION_PROFILES', profiles), \
+         patch('localize.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
                os.path.join(env['input_folder'], 'ledger.json')), \
-         patch('src.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
-        await src.translate_localization_files.process_translation_queue(
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
             glossary_file_path=env['mock_glossary_path_resolved']

@@ -1,6 +1,6 @@
 """Public model-provider API."""
 
-from src.model_provider import (
+from localize.model_provider import (
     AiSuiteProvider,
     ChatModelProvider,
     DEFAULT_AISUITE_PROVIDER,

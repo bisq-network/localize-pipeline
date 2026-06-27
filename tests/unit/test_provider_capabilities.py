@@ -1,4 +1,4 @@
-from src.model_provider import (
+from localize.model_provider import (
     AiSuiteProvider,
     ModelProviderCapabilities,
     OpenAICompatibleProvider,

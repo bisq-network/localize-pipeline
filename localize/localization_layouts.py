@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from src.localization_formats import LocalizationFormat
+from localize.localization_formats import LocalizationFormat
 
 
 def _as_posix(path: str) -> str:

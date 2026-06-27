@@ -1,20 +1,17 @@
-# Localization CLI
+# CLI
 
-`localize` is the stable command-line entry point for the reusable translation
-pipeline. It wraps the same runtime used by Docker and GitHub Actions, so new
-projects do not need to import internal Python modules or call Bisq-specific
-server scripts.
+`localize` is the stable command surface for the pipeline. Docker and the
+GitHub Action call the same CLI, so behavior stays consistent across local,
+CI, and server runs.
 
 ## Install
-
-From this repository checkout:
 
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -e .
 ```
 
-For development, install the pinned dev environment instead:
+For development:
 
 ```bash
 ./venv/bin/pip install pip-tools
@@ -31,60 +28,57 @@ localize validate --config config.yaml
 localize run --config config.yaml
 ```
 
-- `formats` lists registered format metadata and whether a runtime adapter is
-  available.
-- `init` delegates to the existing config scaffold helper and detects locales
-  from the input folder.
-- `validate` checks config shape, paths, locale declarations, format/layout ids,
-  and endpoint settings without initializing a model provider.
-- `run` executes the configured translation pipeline.
+| Command | What it does |
+| --- | --- |
+| `formats` | Lists registered formats and whether each has a runtime adapter. |
+| `init` | Scaffolds a minimal config and detects locales from existing files. |
+| `validate` | Checks config shape, paths, locales, formats, layouts, and endpoint settings. |
+| `run` | Executes the translation pipeline. |
 
-The module form is equivalent and useful before editable install:
-
-```bash
-python -m src.cli validate --config config.yaml
-python -m src.cli run --config config.yaml
-```
-
-## Pipeline Usage
-
-The Docker/server script and GitHub Action call the CLI:
+The module form is equivalent:
 
 ```bash
-python -m src.cli run --config "$TRANSLATOR_CONFIG_FILE"
+python -m localize.cli validate --config config.yaml
+python -m localize.cli run --config config.yaml
 ```
 
-That keeps orchestration stable while the internals remain modular:
+## Scaffold Configs
 
-- `src.core` exposes pipeline and connector contracts.
-- `src.formats` exposes format metadata, adapter registration, and conformance
-  testing helpers.
-- `src.providers` exposes the model-provider abstraction and capabilities.
+Default Java `.properties`:
 
-## JSON Projects
-
-For JSON locale files, select the JSON adapter and the layout used by your
-repository:
-
-```yaml
-localization_format: "json"
-localization_layout:
-  id: "locale_directory"
-  source_locale: "en"
+```bash
+localize init --input-folder i18n
 ```
 
-That maps `locales/de/messages.json` back to
-`locales/en/messages.json`. Suffix files such as `messages_de.json` and locale
-filenames such as `locales/de.json` are supported by changing
-`localization_layout.id` to `suffix` or `locale_filename`.
+JSON with suffix filenames:
 
-The JSON adapter translates string leaves. Nested keys and array entries are
-addressed internally with JSON Pointer keys such as `/dialog/title` or
-`/steps/0/label`; non-string values are kept as non-translatable structure.
+```bash
+localize init --input-folder i18n --localization-format json
+```
 
-## Mixed-Format Projects
+JSON with locale directories:
 
-Projects can configure several format/layout profiles in one run:
+```bash
+localize init \
+  --input-folder locales \
+  --localization-format json \
+  --localization-layout locale_directory
+```
+
+Mixed-format project:
+
+```bash
+localize init \
+  --input-folder i18n \
+  --localization-profile java_properties:suffix \
+  --localization-profile json:locale_directory
+```
+
+`--localization-profile` is repeatable and uses `FORMAT:LAYOUT` syntax.
+
+## Mixed-Format Config
+
+Projects with several localization conventions use `localization_formats`:
 
 ```yaml
 localization_formats:
@@ -96,30 +90,107 @@ localization_formats:
       source_locale: "en"
 ```
 
-The runtime resolves each queued file to its matching profile, then uses that
-profile for source-file lookup, parsing, linting, review prompts, validation,
-and serialization. Existing single-format configs using `localization_format`
-and `localization_layout` keep working.
+Every runtime component resolves a queued file to one profile before source-file
+lookup, parsing, validation, prompt construction, semantic review, quality gate
+checks, serialization, and publishing.
 
-## Adding A Custom Format
+## JSON Behavior
 
-Custom formats register one `LocalizationFileAdapter` at process startup. The
-registration also exposes the format id to config loading:
+The JSON adapter translates string leaves only. Objects, arrays, booleans,
+numbers, and nulls are preserved as structure.
+
+Nested strings are addressed internally with JSON Pointer keys:
+
+```json
+{
+  "dialog": {
+    "title": "Confirm"
+  },
+  "steps": [
+    { "label": "Review details" }
+  ]
+}
+```
+
+The internal keys are `/dialog/title` and `/steps/0/label`.
+
+## Plugins
+
+Use plugins when a project needs a localization format that is not built in.
+
+Load a module explicitly:
+
+```bash
+localize --plugin my_project.localize_adapter formats
+localize --plugin my_project.localize_adapter validate --config config.yaml
+localize --plugin my_project.localize_adapter run --config config.yaml
+```
+
+Load modules from the environment:
+
+```bash
+export LOCALIZE_PLUGIN_MODULES=my_project.localize_adapter,another.adapter
+localize formats
+```
+
+Installed packages can expose entry points:
+
+```toml
+[project.entry-points."localize.format_adapters"]
+my_format = "my_package.localize_adapter:register"
+```
+
+The entry point can be a callable registration function or a module-level object
+whose import registers adapters.
+
+## Custom Adapter Contract
+
+Custom formats register a `LocalizationFileAdapter`:
 
 ```python
-from src.formats import register_localization_adapter
+from localize.formats import LocalizationFileAdapter, LocalizationFormat
+from localize.formats import register_localization_adapter
+
+my_format = LocalizationFormat(
+    id="android_xml",
+    display_name="Android XML",
+    file_extension=".xml",
+    code_fence="xml",
+    locale_suffix_regex=r"_(?P<locale>[A-Za-z]{2})",
+)
+
+my_adapter = LocalizationFileAdapter(
+    localization_format=my_format,
+    parse_file=parse_file,
+    reassemble_file=reassemble_file,
+    synchronize_keys=synchronize_keys,
+    lint_file=lint_file,
+    extract_changed_key_from_diff_line=extract_changed_key_from_diff_line,
+    build_review_content=build_review_content,
+    escape_translation=escape_translation,
+)
 
 register_localization_adapter(my_adapter)
 ```
 
-External adapter packages should run the shared conformance helper in their own
-tests:
+Adapter packages should run the shared conformance helper in their own tests:
 
 ```python
-from src.formats.testing import (
+from localize.formats.testing import (
     LocalizationAdapterConformanceCase,
     assert_localization_adapter_conformance,
 )
 
 assert_localization_adapter_conformance(my_adapter, my_case)
 ```
+
+## Public Python API
+
+Use public packages:
+
+- `localize.core` for pipeline contracts and reusable connectors.
+- `localize.formats` for formats, layouts, adapters, profiles, and tests.
+- `localize.providers` for model-provider factories and capabilities.
+
+Avoid reaching into implementation modules from downstream projects. Public
+packages are the compatibility boundary.

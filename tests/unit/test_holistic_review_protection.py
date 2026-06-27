@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.translate_localization_files import (
+from localize.translate_localization_files import (
     holistic_review_async,
     protect_placeholders_in_properties,
     restore_placeholders_in_properties
@@ -203,9 +203,9 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
     provider.is_retryable_error.return_value = False
 
     with (
-        patch("src.translate_localization_files.DRY_RUN", False),
-        patch("src.translate_localization_files.REVIEW_MODEL_NAME", "gpt-5.4-mini"),
-        patch("src.translate_localization_files.MODEL_PROVIDER", provider),
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.REVIEW_MODEL_NAME", "gpt-5.4-mini"),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
     ):
         result = await holistic_review_async(
             source_content="key1=Hello {0}",

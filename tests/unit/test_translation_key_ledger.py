@@ -3,7 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from src.translate_localization_files import (
+from localize.translate_localization_files import (
     build_file_key_ledger,
     compute_ledger_hash,
     load_translation_key_ledger,

@@ -6,7 +6,7 @@
 #   sudo ./setup-cron-cleanup.sh [PROJECT_PATH]
 #
 # Example:
-#   sudo ./setup-cron-cleanup.sh /opt/translate-java-property-files
+#   sudo ./setup-cron-cleanup.sh /opt/localize-pipeline
 #
 # What this script does:
 #   1. Copies docker-cleanup.sh to the project directory

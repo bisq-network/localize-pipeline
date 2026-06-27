@@ -39,7 +39,7 @@ def test_translate_step_wires_provider_and_process_all_env(action):
     env = translate["env"]
     assert env["OPENAI_BASE_URL"] == "${{ inputs.api-base-url }}"
     assert env["PROCESS_ALL_FILES"] == "${{ inputs.process-all-files }}"
-    assert 'python -m src.cli run --config "$TRANSLATOR_CONFIG_FILE"' in translate["run"]
+    assert 'python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"' in translate["run"]
 
 
 def test_incremental_by_default_via_diff_base(action):

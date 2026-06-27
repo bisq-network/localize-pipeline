@@ -1,6 +1,6 @@
 import pytest
 
-from src.localization_adapters import (
+from localize.localization_adapters import (
     JSON_ADAPTER,
     JAVA_PROPERTIES_ADAPTER,
     LocalizationFileAdapter,
@@ -9,7 +9,7 @@ from src.localization_adapters import (
     register_localization_adapter,
     unregister_localization_adapter,
 )
-from src.localization_formats import LocalizationFormat, load_localization_format
+from localize.localization_formats import LocalizationFormat, load_localization_format
 
 
 def _custom_adapter(format_id: str = "yaml_test") -> LocalizationFileAdapter:

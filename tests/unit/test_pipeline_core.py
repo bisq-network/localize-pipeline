@@ -4,7 +4,7 @@ from typing import Dict, List
 
 import pytest
 
-from src.pipeline_core import (
+from localize.pipeline_core import (
     TranslationPipelineOptions,
     TranslationPipelinePaths,
     TranslationPipelineSteps,

@@ -1,6 +1,6 @@
 """Backward-compatible helpers for Java properties locale filenames.
 
-New code should prefer ``src.localization_formats.LocalizationFormat`` directly.
+New code should prefer ``localize.localization_formats.LocalizationFormat`` directly.
 These functions preserve the old import surface for Java ``.properties`` files.
 """
 
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from src.localization_formats import JAVA_PROPERTIES_FORMAT
+from localize.localization_formats import JAVA_PROPERTIES_FORMAT
 
 LOCALE_SUFFIX_RE = JAVA_PROPERTIES_FORMAT.compiled_locale_suffix_regex
 

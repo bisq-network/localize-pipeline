@@ -5,7 +5,7 @@ from pathlib import Path
 
 # The session autouse fixture patches this module by name.
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
-_TRANSLATE_MODULE = importlib.import_module("src.translate_localization_files")
+_TRANSLATE_MODULE = importlib.import_module("localize.translate_localization_files")
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -41,8 +41,8 @@ def test_env_example_documents_max_files_per_pr_override():
 def test_generated_prs_publish_translation_quality_gate_status():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    assert "src.translation_quality_gate" in script
-    assert "src.translation_semantic_reviewer" in script
+    assert "localize.translation_quality_gate" in script
+    assert "localize.translation_semantic_reviewer" in script
     assert 'QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-changed}"' in script
     assert '--audit-scope "$QUALITY_AUDIT_SCOPE"' in script
     assert "translation-quality-gate" in script
@@ -72,7 +72,7 @@ def test_config_file_is_normalized_before_late_quality_gate_call():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     normalize_index = script.index("CONFIG_FILE=$(cd")
-    quality_gate_index = script.index("src.translation_quality_gate")
+    quality_gate_index = script.index("localize.translation_quality_gate")
 
     assert normalize_index < quality_gate_index
 
@@ -81,7 +81,7 @@ def test_validation_summary_is_reset_before_translation_script_runs():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     reset_index = script.index("translation_validation_summary.json")
-    python_index = script.index('python3 -u -m src.cli run --config "$CONFIG_FILE"')
+    python_index = script.index('python3 -u -m localize.cli run --config "$CONFIG_FILE"')
 
     assert reset_index < python_index
     assert '{"files":{},"pipeline_warnings":[]}' in script
@@ -134,7 +134,7 @@ def test_source_adapter_is_prepared_before_python_pipeline_runs():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
-    python_index = script.index('python3 -u -m src.cli run --config "$CONFIG_FILE"')
+    python_index = script.index('python3 -u -m localize.cli run --config "$CONFIG_FILE"')
 
     assert prepare_index < python_index
 
@@ -168,10 +168,23 @@ def test_publish_adapter_supports_json_translation_files():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     assert "translation_file_extension_regex()" in script
-    assert "format_id=$(yq -r '(.localization_format.id // .localization_format // \"java_properties\")'" in script
-    assert "extension=$(yq -r '(.localization_format.file_extension // \"\")'" in script
+    assert "localization_formats" in script
+    assert "file_extension" in script
     assert "json)\n            printf 'json'" in script
     assert "java_properties|\"\"|\"null\")\n            printf 'properties'" in script
+
+
+def test_publish_adapter_supports_mixed_format_profiles():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    function_body = script[
+        script.index("translation_file_extension_regex() {"):
+        script.index("collect_changed_translation_files()")
+    ]
+
+    assert "localization_formats" in function_body
+    assert "extensions.add(extension_for_format(format_id))" in function_body
+    assert "print(\"|\".join(sorted(extensions)))" in function_body
 
 
 def test_translation_file_extension_override_precedes_format_id_defaults():
@@ -182,8 +195,8 @@ def test_translation_file_extension_override_precedes_format_id_defaults():
         script.index("collect_changed_translation_files()")
     ]
 
-    extension_normalize_index = function_body.index('extension="${extension#.}"')
-    case_index = function_body.index('case "$format_id" in')
+    extension_normalize_index = function_body.index("normalize_extension")
+    case_index = function_body.index("extension_for_format")
 
     assert extension_normalize_index < case_index
     assert "return" in function_body[extension_normalize_index:case_index]

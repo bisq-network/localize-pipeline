@@ -47,13 +47,13 @@ def setup_global_test_environment(integration_test_paths):
         os.environ["OPENAI_API_KEY"] = "sk-test-key"
 
     patches = [
-        patch('src.translate_localization_files.INPUT_FOLDER', paths['input_folder']),
-        patch('src.translate_localization_files.TRANSLATION_QUEUE_FOLDER', paths['translation_queue_folder']),
-        patch('src.translate_localization_files.TRANSLATED_QUEUE_FOLDER', paths['translated_queue_folder']),
-        patch('src.translate_localization_files.DRY_RUN', False),
-        patch('src.translate_localization_files.REPO_ROOT', paths['project_root']),
-        patch('src.translate_localization_files.LANGUAGE_CODES', mock_language_codes),
-        patch('src.translate_localization_files.NAME_TO_CODE', mock_name_to_code)
+        patch('localize.translate_localization_files.INPUT_FOLDER', paths['input_folder']),
+        patch('localize.translate_localization_files.TRANSLATION_QUEUE_FOLDER', paths['translation_queue_folder']),
+        patch('localize.translate_localization_files.TRANSLATED_QUEUE_FOLDER', paths['translated_queue_folder']),
+        patch('localize.translate_localization_files.DRY_RUN', False),
+        patch('localize.translate_localization_files.REPO_ROOT', paths['project_root']),
+        patch('localize.translate_localization_files.LANGUAGE_CODES', mock_language_codes),
+        patch('localize.translate_localization_files.NAME_TO_CODE', mock_name_to_code)
     ]
     started_patches = []
     try:

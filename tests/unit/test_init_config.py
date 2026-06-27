@@ -4,10 +4,12 @@ import os
 import pytest
 import yaml
 
-from src.init_config import (
+from localize.init_config import (
     build_config,
     code_to_name,
     detect_locales,
+    detect_locales_for_profiles,
+    parse_localization_profile_spec,
     render_config,
     write_config,
 )
@@ -113,6 +115,29 @@ class TestDetectLocales:
 
         assert codes == ["es-419"]
 
+    def test_detects_locales_across_multiple_profiles(self, tmp_path):
+        _make_props(str(tmp_path), ["messages.properties", "messages_de.properties"])
+        json_en = tmp_path / "en" / "common.json"
+        json_de = tmp_path / "de" / "common.json"
+        json_en.parent.mkdir()
+        json_de.parent.mkdir()
+        json_en.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+        json_de.write_text('{"hello":"Hallo"}\n', encoding="utf-8")
+
+        codes = [
+            loc["code"]
+            for loc in detect_locales_for_profiles(
+                str(tmp_path),
+                source_locale="en",
+                localization_profiles=[
+                    ("java_properties", "suffix"),
+                    ("json", {"id": "locale_directory", "source_locale": "en"}),
+                ],
+            )
+        ]
+
+        assert codes == ["de"]
+
 
 class TestCodeToName:
     def test_known_code(self):
@@ -170,6 +195,35 @@ class TestBuildConfig:
         cfg = build_config(target_project_root="/repo", input_folder="i18n", locales=[])
         assert "api_base_url" not in cfg
 
+    def test_accepts_multiple_localization_profiles(self):
+        cfg = build_config(
+            target_project_root="/repo",
+            input_folder="i18n",
+            locales=[{"code": "de", "name": "German"}],
+            localization_profiles=[
+                ("java_properties", "suffix"),
+                ("json", {"id": "locale_directory", "source_locale": "en"}),
+            ],
+        )
+
+        assert "localization_format" not in cfg
+        assert cfg["localization_formats"] == [
+            {"id": "java_properties", "layout": {"id": "suffix", "source_locale": "en"}},
+            {"id": "json", "layout": {"id": "locale_directory", "source_locale": "en"}},
+        ]
+
+
+class TestProfileSpecParsing:
+    def test_parse_profile_spec_uses_format_and_layout(self):
+        fmt, layout = parse_localization_profile_spec("json:locale_directory", source_locale="en")
+
+        assert fmt.id == "json"
+        assert layout.id == "locale_directory"
+
+    def test_parse_profile_spec_rejects_missing_layout(self):
+        with pytest.raises(ValueError, match="FORMAT:LAYOUT"):
+            parse_localization_profile_spec("json", source_locale="en")
+
 
 class TestRenderConfig:
     def test_renders_valid_roundtrippable_yaml(self):
@@ -212,7 +266,7 @@ class TestWriteConfig:
 class TestMainErrorHandling:
     def test_main_handles_write_oserror_without_traceback(self, tmp_path, monkeypatch, capsys):
         """A write failure (e.g. PermissionError) becomes a clean error, not a traceback."""
-        import src.init_config as init_config
+        import localize.init_config as init_config
 
         folder = tmp_path / "i18n"
         folder.mkdir()
@@ -229,3 +283,35 @@ class TestMainErrorHandling:
         ])
         assert rc == 1
         assert "Error" in capsys.readouterr().err
+
+    def test_main_scaffolds_mixed_profile_config(self, tmp_path):
+        import localize.init_config as init_config
+
+        _make_props(str(tmp_path), ["messages.properties", "messages_de.properties"])
+        json_en = tmp_path / "en" / "common.json"
+        json_de = tmp_path / "de" / "common.json"
+        json_en.parent.mkdir()
+        json_de.parent.mkdir()
+        json_en.write_text('{"hello":"Hello"}\n', encoding="utf-8")
+        json_de.write_text('{"hello":"Hallo"}\n', encoding="utf-8")
+        output = tmp_path / "config.yaml"
+
+        rc = init_config.main([
+            "--input-folder",
+            str(tmp_path),
+            "--output",
+            str(output),
+            "--localization-profile",
+            "java_properties:suffix",
+            "--localization-profile",
+            "json:locale_directory",
+        ])
+
+        config = yaml.safe_load(output.read_text(encoding="utf-8"))
+        assert rc == 0
+        assert "localization_format" not in config
+        assert [profile["id"] for profile in config["localization_formats"]] == [
+            "java_properties",
+            "json",
+        ]
+        assert config["supported_locales"] == [{"code": "de", "name": "German"}]

@@ -14,18 +14,18 @@ import jsonschema
 import yaml
 from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
-from src.model_provider import (
+from localize.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
     ModelProviderConfigurationError,
     OpenAICompatibleProvider,
     create_model_provider,
 )
-from src.semantic_quality import (
+from localize.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
 )
-from src.translation_quality_gate import get_staged_diff, load_quality_gate_localization_metadata
+from localize.translation_quality_gate import get_staged_diff, load_quality_gate_localization_profiles
 
 
 SEMANTIC_REVIEW_SCHEMA = {
@@ -217,17 +217,19 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         if isinstance(locale, dict) and locale.get("code")
     }
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
-    localization_format, localization_layout = load_quality_gate_localization_metadata(args.config)
-    changes = list(
-        iter_translation_changes_from_diff(
-            diff_text=diff_text,
-            repo_root=args.repo_root,
-            input_folder=args.input_folder,
-            locale_codes=locales,
-            localization_format=localization_format,
-            localization_layout=localization_layout,
+    localization_profiles = load_quality_gate_localization_profiles(args.config)
+    changes = []
+    for profile in localization_profiles:
+        changes.extend(
+            iter_translation_changes_from_diff(
+                diff_text=diff_text,
+                repo_root=args.repo_root,
+                input_folder=args.input_folder,
+                locale_codes=locales,
+                localization_format=profile.localization_format,
+                localization_layout=profile.localization_layout,
+            )
         )
-    )
     if not changes:
         append_semantic_review_findings(args.validation_summary, [])
         return 0

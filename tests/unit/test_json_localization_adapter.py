@@ -2,8 +2,8 @@
 
 import json
 
-from src.localization_adapters import get_localization_adapter
-from src.localization_formats import JSON_FORMAT
+from localize.localization_adapters import get_localization_adapter
+from localize.localization_formats import JSON_FORMAT
 
 
 def write_json(path, payload):
