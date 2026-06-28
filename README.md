@@ -114,6 +114,12 @@ incremental runs.
 
 Full guide: [docs/github-action.md](docs/github-action.md).
 
+## Documentation Site
+
+The polished docs entry point is [docs/index.html](docs/index.html). It is a
+static page that can be served by GitHub Pages from the `docs/` directory or
+opened directly in a browser.
+
 ## Configuration Model
 
 Single-format projects use:
