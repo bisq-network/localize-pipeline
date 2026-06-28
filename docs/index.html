@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Localize Pipeline - AI localization as pull requests</title>
+    <meta
+      name="description"
+      content="Localize Pipeline translates Java .properties and JSON localization files with model-provider abstraction, review gates, translation memory, and pull-request workflows."
+    >
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="index.html" aria-label="Localize Pipeline docs homepage">
+        <span class="brand-mark" aria-hidden="true">LP</span>
+        <span>Localize Pipeline</span>
+      </a>
+      <nav class="top-nav" aria-label="Primary">
+        <a href="localization-cli.md">CLI</a>
+        <a href="github-action.md">GitHub Action</a>
+        <a href="new-project-deployment.md">Server</a>
+        <a href="repository-structure.md">Structure</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">AI localization for maintainers</p>
+          <h1>Ship translations as normal pull requests.</h1>
+          <p class="lede">
+            Localize Pipeline detects changed source strings, translates Java .properties
+            and JSON files, runs quality checks, and opens reviewable PRs from your own
+            CI or server.
+          </p>
+          <div class="hero-actions" aria-label="Quick links">
+            <a class="button primary" href="localization-cli.md">Start with the CLI</a>
+            <a class="button secondary" href="github-action.md">Use the Action</a>
+          </div>
+        </div>
+
+        <div class="workflow-visual" aria-label="Localization workflow overview">
+          <div class="workflow-row">
+            <span class="step-label">Source repo</span>
+            <span class="step-state">Changed strings</span>
+          </div>
+          <div class="workflow-line" aria-hidden="true"></div>
+          <div class="workflow-row active">
+            <span class="step-label">Localize Pipeline</span>
+            <span class="step-state">AISuite provider, glossary, review</span>
+          </div>
+          <div class="workflow-line" aria-hidden="true"></div>
+          <div class="workflow-row">
+            <span class="step-label">Translation PR</span>
+            <span class="step-state">Diff, checks, memory update</span>
+          </div>
+          <pre><code>localize bootstrap-pr --target-project-root repo
+localize check --config config.yaml
+localize run --dry-run --config config.yaml
+localize memory stats --memory-file logs/translation_memory.json</code></pre>
+        </div>
+      </section>
+
+      <section class="quick-grid" aria-label="Primary paths">
+        <a class="guide-card" href="localization-cli.md">
+          <span class="card-kicker">Local development</span>
+          <strong>CLI guide</strong>
+          <span>Scaffold config, validate setup, run dry checks, and manage memory.</span>
+        </a>
+        <a class="guide-card" href="github-action.md">
+          <span class="card-kicker">CI workflow</span>
+          <strong>GitHub Action</strong>
+          <span>Translate changed strings and open pull requests from normal CI.</span>
+        </a>
+        <a class="guide-card" href="new-project-deployment.md">
+          <span class="card-kicker">Scheduled service</span>
+          <strong>Server deployment</strong>
+          <span>Run Docker Compose plus cron for Transifex-backed production jobs.</span>
+        </a>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Adoption path</p>
+          <h2>Onboard a repository in one reviewable PR.</h2>
+        </div>
+        <div class="timeline">
+          <div>
+            <span class="number">1</span>
+            <h3>Generate</h3>
+            <p>Run <code>localize bootstrap-pr</code> to create config, glossary, workflow, and a target-repo guide.</p>
+          </div>
+          <div>
+            <span class="number">2</span>
+            <h3>Validate</h3>
+            <p>Keep <code>dry-run: true</code>, add credentials or a local endpoint, and run preflight checks.</p>
+          </div>
+          <div>
+            <span class="number">3</span>
+            <h3>Translate</h3>
+            <p>Enable writes, run an initial backfill, and review translations through normal PR review.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section split">
+        <div>
+          <p class="eyebrow">Formats and providers</p>
+          <h2>Built for extension without rewriting the pipeline.</h2>
+          <p>
+            Java .properties and JSON are built in. Custom adapters can be loaded
+            through CLI plugins, Action plugin inputs, or Python entry points.
+            AISuite is the default model-provider abstraction, with an explicit
+            OpenAI-compatible fallback for local endpoints.
+          </p>
+        </div>
+        <div class="doc-list" aria-label="Implementation references">
+          <a href="repository-structure.md">Repository structure</a>
+          <a href="localization-cli.md">CLI commands</a>
+          <a href="how-to-run-locally.md">Local runs</a>
+          <a href="adding-new-locales.md">Adding locales</a>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Operational surface</p>
+          <h2>Keep translation state visible and portable.</h2>
+        </div>
+        <div class="command-panel">
+          <code>localize memory stats --memory-file logs/translation_memory.json</code>
+          <code>localize memory export --memory-file logs/translation_memory.json --output shared-memory.json</code>
+          <code>localize memory import --memory-file logs/translation_memory.json --input shared-memory.json</code>
+          <code>localize memory suggest --source-text "Save change" --locale de --format-id json</code>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>Localize Pipeline</span>
+      <a href="repository-structure.md">Repository structure</a>
+      <a href="how-to-run-locally.md">Run locally</a>
+      <a href="maintenance/disk-space-management.md">Maintenance</a>
+    </footer>
+  </body>
+</html>
