@@ -60,8 +60,8 @@ def test_docs_homepage_links_to_primary_guides():
     assert "localization-cli.md" in links
     assert "github-action.md" in links
     assert "new-project-deployment.md" in links
-    assert "../README.md" in links
-    assert "../examples/generic-json/README.md" in links
+    assert "repository-structure.md" in links
+    assert "adding-new-locales.md" in links
 
 
 def test_docs_homepage_internal_links_exist():
@@ -71,7 +71,7 @@ def test_docs_homepage_internal_links_exist():
             continue
         target = (DOCS_ROOT / parsed.path).resolve()
         try:
-            target.relative_to(PROJECT_ROOT)
+            target.relative_to(DOCS_ROOT)
         except ValueError as exc:
-            raise AssertionError(f"docs homepage link escapes repository: {link}") from exc
+            raise AssertionError(f"docs homepage link escapes published docs root: {link}") from exc
         assert target.exists(), f"docs homepage link is broken: {link}"
