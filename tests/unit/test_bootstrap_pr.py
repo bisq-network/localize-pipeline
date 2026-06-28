@@ -89,6 +89,37 @@ def test_bootstrap_pr_refuses_to_overwrite_existing_files_without_flag(tmp_path)
         create_bootstrap_pr(BootstrapPrOptions(target_project_root=repo))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("config_path", "../config.yaml"),
+        ("workflow_path", "/tmp/translate.yml"),
+        ("input_folder", "../i18n"),
+        ("input_folder", "/tmp/i18n"),
+    ],
+)
+def test_bootstrap_pr_rejects_paths_that_escape_repo(tmp_path, field, value):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+    options = {"target_project_root": repo, field: value}
+
+    with pytest.raises(ValueError, match="inside the target repository"):
+        create_bootstrap_pr(BootstrapPrOptions(**options))
+
+
+def test_bootstrap_pr_refuses_to_reset_existing_branch_without_flag(tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+    _git(repo, "checkout", "-b", "localize/onboarding")
+    (repo / "branch-only.txt").write_text("keep me\n", encoding="utf-8")
+    _git(repo, "add", "branch-only.txt")
+    _git(repo, "commit", "-m", "Keep branch work")
+    _git(repo, "checkout", "main")
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        create_bootstrap_pr(BootstrapPrOptions(target_project_root=repo))
+
+
 def test_bootstrap_pr_uses_custom_config_path_in_workflow(tmp_path):
     repo = tmp_path / "target"
     _init_repo(repo)
@@ -103,3 +134,21 @@ def test_bootstrap_pr_uses_custom_config_path_in_workflow(tmp_path):
 
     workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
     assert "config-file: .localize/config.yaml" in workflow
+
+
+def test_bootstrap_pr_threads_base_branch_into_workflow(tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+    _git(repo, "checkout", "-b", "release")
+    _git(repo, "checkout", "main")
+
+    create_bootstrap_pr(
+        BootstrapPrOptions(
+            target_project_root=repo,
+            branch_name="localize/release-onboarding",
+            base_branch="release",
+        )
+    )
+
+    workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
+    assert "branches: [release]" in workflow

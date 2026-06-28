@@ -155,8 +155,9 @@ The PR step commits only when localization files changed. User-provided action
 inputs are passed through environment variables, not interpolated directly into
 shell scripts.
 
-Pin a tagged release for production workflows. Use `@main` only when you
-intentionally want unreleased changes.
+Pin a tagged release for production workflows. A workflow reference such as
+`bisq-network/translate-java-property-files@main` follows unreleased changes;
+use it only when that is intentional.
 
 ## Custom Formats
 

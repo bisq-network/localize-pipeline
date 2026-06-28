@@ -1968,17 +1968,6 @@ async def process_translation_queue(
             # Refresh ledger baseline even when no translation was required.
             key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
             save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
-            if translation_memory is not None and not DRY_RUN:
-                update_translation_memory(
-                    translation_memory,
-                    source_translations,
-                    target_translations,
-                    list(target_translations.keys()),
-                    locale=language_code,
-                    format_id=localization_format.id,
-                    failed_keys=set(),
-                )
-                save_translation_memory(TRANSLATION_MEMORY_FILE_PATH, translation_memory)
             logger.info(f"No texts to translate in file '{translation_file}'.")
             continue
 

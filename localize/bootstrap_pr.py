@@ -34,6 +34,7 @@ class BootstrapPrOptions:
     commit_message: str = "Add Localize Pipeline onboarding"
     pr_title: str = "Add Localize Pipeline onboarding"
     overwrite: bool = False
+    reset_branch: bool = False
     push: bool = False
     open_pr: bool = False
 
@@ -84,6 +85,45 @@ def _assert_clean_worktree(repo: Path) -> None:
         raise RuntimeError("target repository working tree is not clean.")
 
 
+def _repo_relative_path(repo: Path, raw_path: str, label: str) -> str:
+    """Return a normalized repo-relative path, rejecting escapes."""
+    path = Path(raw_path)
+    if path.is_absolute():
+        raise ValueError(f"{label} must be inside the target repository.")
+    repo_root = repo.resolve()
+    resolved = (repo_root / path).resolve()
+    try:
+        relative_path = resolved.relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be inside the target repository.") from exc
+    return relative_path.as_posix()
+
+
+def _branch_exists(repo: Path, branch_name: str) -> bool:
+    result = _git(
+        repo,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        f"refs/heads/{branch_name}",
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _checkout_onboarding_branch(repo: Path, options: BootstrapPrOptions, base_branch: str) -> None:
+    _git(repo, "checkout", base_branch)
+    if _branch_exists(repo, options.branch_name):
+        if not options.reset_branch:
+            raise RuntimeError(
+                f"Branch '{options.branch_name}' already exists. "
+                "Re-run with --reset-branch to replace it."
+            )
+        _git(repo, "checkout", "-B", options.branch_name)
+        return
+    _git(repo, "checkout", "-b", options.branch_name)
+
+
 def _assert_can_write(repo: Path, relative_paths: Iterable[str], *, overwrite: bool) -> None:
     for relative_path in relative_paths:
         path = repo / relative_path
@@ -97,11 +137,11 @@ def _copy_example_glossary(target: Path) -> None:
     shutil.copyfile(source, target)
 
 
-def _render_workflow(*, action_ref: str, config_path: str) -> str:
+def _render_workflow(*, action_ref: str, config_path: str, base_branch: str) -> str:
     return f"""name: Translate
 on:
   push:
-    branches: [main]
+    branches: [{base_branch}]
   workflow_dispatch: {{}}
 
 permissions:
@@ -123,10 +163,9 @@ jobs:
 """
 
 
-def _build_onboarding_config(options: BootstrapPrOptions, repo: Path) -> str:
-    if options.input_folder:
-        input_folder = options.input_folder
-        input_folder_abs = repo / input_folder if not Path(input_folder).is_absolute() else Path(input_folder)
+def _build_onboarding_config(options: BootstrapPrOptions, repo: Path, input_folder: str | None) -> str:
+    if input_folder:
+        input_folder_abs = repo / input_folder
         locales = detect_locales(
             str(input_folder_abs),
             source_locale=options.source_locale,
@@ -181,20 +220,31 @@ def create_bootstrap_pr(options: BootstrapPrOptions) -> BootstrapPrResult:
     repo = Path(options.target_project_root).expanduser().resolve()
     _assert_git_repo(repo)
     _assert_clean_worktree(repo)
-    created_files = (options.config_path, options.glossary_path, options.workflow_path)
+    config_path = _repo_relative_path(repo, options.config_path, "config-file")
+    glossary_path = _repo_relative_path(repo, options.glossary_path, "glossary-file")
+    workflow_path = _repo_relative_path(repo, options.workflow_path, "workflow-file")
+    input_folder = (
+        _repo_relative_path(repo, options.input_folder, "input-folder")
+        if options.input_folder
+        else None
+    )
+    created_files = (config_path, glossary_path, workflow_path)
     _assert_can_write(repo, created_files, overwrite=options.overwrite)
+    base_branch = options.base_branch or "main"
 
-    if options.base_branch:
-        _git(repo, "checkout", options.base_branch)
-    _git(repo, "checkout", "-B", options.branch_name)
+    _checkout_onboarding_branch(repo, options, base_branch)
 
-    (repo / options.config_path).parent.mkdir(parents=True, exist_ok=True)
-    (repo / options.config_path).write_text(_build_onboarding_config(options, repo), encoding="utf-8")
-    _copy_example_glossary(repo / options.glossary_path)
-    workflow_file = repo / options.workflow_path
+    (repo / config_path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / config_path).write_text(_build_onboarding_config(options, repo, input_folder), encoding="utf-8")
+    _copy_example_glossary(repo / glossary_path)
+    workflow_file = repo / workflow_path
     workflow_file.parent.mkdir(parents=True, exist_ok=True)
     workflow_file.write_text(
-        _render_workflow(action_ref=options.action_ref, config_path=options.config_path),
+        _render_workflow(
+            action_ref=options.action_ref,
+            config_path=config_path,
+            base_branch=base_branch,
+        ),
         encoding="utf-8",
     )
 
@@ -215,6 +265,8 @@ def create_bootstrap_pr(options: BootstrapPrOptions) -> BootstrapPrResult:
                 "create",
                 "--title",
                 options.pr_title,
+                "--base",
+                base_branch,
                 "--body",
                 "Adds Localize Pipeline config, glossary, and workflow in dry-run mode.",
             ),

@@ -131,6 +131,7 @@ def _cmd_bootstrap_pr(args: argparse.Namespace) -> int:
                 base_branch=args.base_branch,
                 action_ref=args.action_ref,
                 overwrite=args.overwrite,
+                reset_branch=args.reset_branch,
                 push=args.push,
                 open_pr=args.open_pr,
             )
@@ -256,6 +257,11 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--base-branch", default=None, help="Optional base branch to check out first.")
     bootstrap_parser.add_argument("--action-ref", default="v0.1.0", help="Action ref to use in the generated workflow.")
     bootstrap_parser.add_argument("--overwrite", action="store_true", help="Replace existing onboarding files.")
+    bootstrap_parser.add_argument(
+        "--reset-branch",
+        action="store_true",
+        help="Reset an existing onboarding branch instead of refusing to overwrite it.",
+    )
     bootstrap_parser.add_argument("--push", action="store_true", help="Push the onboarding branch to origin.")
     bootstrap_parser.add_argument("--open-pr", action="store_true", help="Push and open the onboarding PR with gh.")
     bootstrap_parser.set_defaults(func=_cmd_bootstrap_pr)

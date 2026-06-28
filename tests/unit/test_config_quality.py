@@ -53,11 +53,13 @@ def test_public_docs_describe_aisuite_as_default_provider():
 
 
 def test_docs_use_localize_init_as_stable_onboarding_surface():
-    docs = "\n".join([
-        (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"),
-        (PROJECT_ROOT / "config.example.yaml").read_text(encoding="utf-8"),
-        (PROJECT_ROOT / "action.yml").read_text(encoding="utf-8"),
-    ])
+    paths = [
+        PROJECT_ROOT / "README.md",
+        PROJECT_ROOT / "config.example.yaml",
+        PROJECT_ROOT / "action.yml",
+        *sorted((PROJECT_ROOT / "docs").rglob("*.md")),
+    ]
+    docs = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
     assert "localize init" in docs
     assert "./init.sh" not in docs

@@ -5,18 +5,20 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
-import re
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping
+
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_memory_source(value: str | None) -> str:
     """Normalize source text before hashing for stable exact-match reuse."""
     if value is None:
         return ""
-    value = value.replace("\\n", "<newline>").replace("\n", "<newline>")
-    return re.sub(r"\s+", " ", value.strip())
+    return value.replace("\\n", "<newline>").replace("\n", "<newline>")
 
 
 def memory_source_hash(value: str | None) -> str:
@@ -106,12 +108,19 @@ def load_translation_memory(path: str | Path) -> TranslationMemory:
 def save_translation_memory(path: str | Path, memory: TranslationMemory) -> None:
     """Persist translation memory atomically."""
     memory_path = Path(path)
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = memory.to_payload()
-    payload["updated_at"] = _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
     temp_path = memory_path.with_suffix(f"{memory_path.suffix}.tmp")
-    temp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(memory_path)
+    try:
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = memory.to_payload()
+        payload["updated_at"] = _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(memory_path)
+    except OSError as exc:
+        logger.warning("Could not save translation memory to '%s': %s", memory_path, exc)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass

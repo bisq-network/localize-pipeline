@@ -170,6 +170,40 @@ async def test_process_translation_queue_reuses_translation_memory_without_model
 
 
 @pytest.mark.asyncio
+async def test_process_translation_queue_does_not_seed_memory_for_noop_file(integration_test_environment):
+    env = integration_test_environment
+    source_file_path = os.path.join(env['input_folder'], 'app.properties')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+    memory_path = os.path.join(env['input_folder'], 'translation_memory.json')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.one=value one\n")
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.one=Wert eins\n")
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock()
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_MEMORY_ENABLED', True), \
+         patch('localize.translate_localization_files.TRANSLATION_MEMORY_FILE_PATH', memory_path), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        await localize.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved']
+        )
+
+    assert not os.path.exists(memory_path)
+    provider.create_chat_completion.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_handles_already_escaped_quotes_correctly(integration_test_environment):
     env = integration_test_environment
     source_content = "key.name=URL is ''{0}''"

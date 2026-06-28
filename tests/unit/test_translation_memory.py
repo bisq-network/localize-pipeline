@@ -33,6 +33,14 @@ def test_translation_memory_marks_conflicts_and_stops_reusing_ambiguous_segments
     assert sorted(entry["targets"]) == ["Offen", "Öffnen"]
 
 
+def test_translation_memory_preserves_spacing_in_exact_match_keys():
+    memory = TranslationMemory()
+    memory.record("Open  trades", "Offene  Trades", locale="de", format_id="json")
+
+    assert memory.lookup("Open  trades", locale="de", format_id="json") == "Offene  Trades"
+    assert memory.lookup("Open trades", locale="de", format_id="json") is None
+
+
 def test_load_translation_memory_missing_or_invalid_file_is_empty(tmp_path):
     assert load_translation_memory(tmp_path / "missing.json").to_payload()["entries"] == {}
 
@@ -40,6 +48,18 @@ def test_load_translation_memory_missing_or_invalid_file_is_empty(tmp_path):
     invalid.write_text(json.dumps({"entries": []}), encoding="utf-8")
 
     assert load_translation_memory(invalid).to_payload()["entries"] == {}
+
+
+def test_save_translation_memory_is_best_effort(monkeypatch, tmp_path):
+    memory = TranslationMemory()
+    memory.record("Save", "Speichern", locale="de", format_id="json")
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pathlib.Path.write_text", fail_write)
+
+    save_translation_memory(tmp_path / "translation_memory.json", memory)
 
 
 def test_apply_translation_memory_splits_hits_from_model_work():

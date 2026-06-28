@@ -28,7 +28,7 @@ localize check --config config.yaml
 localize validate --config config.yaml
 localize run --config config.yaml --dry-run
 localize run --config config.yaml
-localize bootstrap-pr --target-project-root path/to/repo
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.0
 ```
 
 | Command | What it does |
