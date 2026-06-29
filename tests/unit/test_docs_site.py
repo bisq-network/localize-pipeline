@@ -43,13 +43,24 @@ def test_docs_homepage_is_packaged_for_github_pages():
     css = stylesheet.read_text(encoding="utf-8")
 
     assert "<title>Localize Pipeline" in html
+    assert '<meta property="og:title"' in html
+    assert 'href="https://bisq.network/css/fonts.css"' in html
     assert 'href="assets/site.css"' in html
+    assert 'href="#content"' in html
+    assert 'id="content"' in html
+    assert "Agent entry points" in html
     assert "localize bootstrap-pr" in html
     assert "localize memory stats" in html
     assert "GitHub Action" in html
     assert "Java .properties" in html
     assert "JSON" in html
+    assert ">LP<" not in html
+    assert "served by GitHub Pages" not in html
     assert ".hero" in css
+    assert ".skip-link:focus" in css
+    assert "#25b135" in css
+    assert "IBM Plex Sans" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
     assert "@media" in css
     assert "[docs/index.html](docs/index.html)" in readme.read_text(encoding="utf-8")
 

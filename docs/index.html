@@ -6,129 +6,202 @@
     <title>Localize Pipeline - AI localization as pull requests</title>
     <meta
       name="description"
-      content="Localize Pipeline translates Java .properties and JSON localization files with model-provider abstraction, review gates, translation memory, and pull-request workflows."
+      content="Localize Pipeline translates Java .properties and JSON localization files with provider abstraction, review gates, translation memory, and pull-request workflows."
     >
+    <meta name="robots" content="index,follow">
+    <link rel="canonical" href="https://bisq-network.github.io/localize-pipeline/">
+    <meta property="og:title" content="Localize Pipeline">
+    <meta
+      property="og:description"
+      content="AI localization automation for maintainers: changed strings in, reviewable translation pull requests out."
+    >
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://bisq-network.github.io/localize-pipeline/">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Localize Pipeline">
+    <meta
+      name="twitter:description"
+      content="Translate localization files through a reviewable, provider-neutral PR pipeline."
+    >
+    <link rel="preconnect" href="https://bisq.network">
+    <link href="https://bisq.network/css/fonts.css" rel="stylesheet">
     <link rel="stylesheet" href="assets/site.css">
   </head>
   <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+
     <header class="site-header">
       <a class="brand" href="index.html" aria-label="Localize Pipeline docs homepage">
-        <span class="brand-mark" aria-hidden="true">LP</span>
-        <span>Localize Pipeline</span>
+        <span class="brand-mark" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </span>
+        <span class="brand-copy">
+          <strong>Localize Pipeline</strong>
+          <small>Bisq Network tooling</small>
+        </span>
       </a>
       <nav class="top-nav" aria-label="Primary">
         <a href="localization-cli.md">CLI</a>
         <a href="github-action.md">GitHub Action</a>
-        <a href="new-project-deployment.md">Server</a>
-        <a href="repository-structure.md">Structure</a>
+        <a href="#formats">Formats</a>
+        <a href="new-project-deployment.md">Runbook</a>
       </nav>
     </header>
 
-    <main>
-      <section class="hero">
+    <main id="content">
+      <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow">AI localization for maintainers</p>
-          <h1>Ship translations as normal pull requests.</h1>
+          <p class="eyebrow">Open-source localization automation</p>
+          <h1 id="hero-title">Review translations like code.</h1>
           <p class="lede">
-            Localize Pipeline detects changed source strings, translates Java .properties
-            and JSON files, runs quality checks, and opens reviewable PRs from your own
-            CI or server.
+            Localize Pipeline watches changed source strings, translates Java .properties
+            and JSON files, validates the result, and opens normal pull requests that
+            maintainers can review, amend, and merge.
           </p>
           <div class="hero-actions" aria-label="Quick links">
             <a class="button primary" href="localization-cli.md">Start with the CLI</a>
-            <a class="button secondary" href="github-action.md">Use the Action</a>
+            <a class="button secondary" href="github-action.md">Use the GitHub Action</a>
+            <a
+              class="text-link"
+              href="https://github.com/bisq-network/localize-pipeline/blob/main/llms.txt"
+            >Agent index</a>
           </div>
         </div>
 
-        <div class="workflow-visual" aria-label="Localization workflow overview">
-          <div class="workflow-row">
-            <span class="step-label">Source repo</span>
-            <span class="step-state">Changed strings</span>
+        <aside class="run-panel" aria-label="Production run snapshot">
+          <div class="panel-bar">
+            <span></span>
+            <span></span>
+            <span></span>
+            <strong>localize run</strong>
           </div>
-          <div class="workflow-line" aria-hidden="true"></div>
-          <div class="workflow-row active">
-            <span class="step-label">Localize Pipeline</span>
-            <span class="step-state">AISuite provider, glossary, review</span>
+          <div class="status-ledger">
+            <div>
+              <span>source keys</span>
+              <strong>changed</strong>
+            </div>
+            <div>
+              <span>formats</span>
+              <strong>.properties + JSON</strong>
+            </div>
+            <div>
+              <span>quality gate</span>
+              <strong>reviewed</strong>
+            </div>
+            <div>
+              <span>output</span>
+              <strong>pull request</strong>
+            </div>
           </div>
-          <div class="workflow-line" aria-hidden="true"></div>
-          <div class="workflow-row">
-            <span class="step-label">Translation PR</span>
-            <span class="step-state">Diff, checks, memory update</span>
-          </div>
-          <pre><code>localize bootstrap-pr --target-project-root repo
-localize check --config config.yaml
+          <pre><code>localize doctor --config config.yaml
+localize smoke --config config.yaml
 localize run --dry-run --config config.yaml
-localize memory stats --memory-file logs/translation_memory.json</code></pre>
+localize quality-gate --repo-root . --changed-files ...</code></pre>
+        </aside>
+      </section>
+
+      <section class="agent-strip" aria-labelledby="agent-title">
+        <div>
+          <p class="eyebrow">Agent entry points</p>
+          <h2 id="agent-title">Start with the map, then run checks.</h2>
+        </div>
+        <p>
+          Agents should read the repository index first, inspect the target profile,
+          then use the CLI preflight commands before changing translations.
+        </p>
+        <div class="agent-links" aria-label="Agent references">
+          <a href="https://github.com/bisq-network/localize-pipeline/blob/main/llms.txt">llms.txt</a>
+          <a href="repository-structure.md">Repository structure</a>
+          <a href="localization-cli.md">CLI commands</a>
         </div>
       </section>
 
-      <section class="quick-grid" aria-label="Primary paths">
-        <a class="guide-card" href="localization-cli.md">
-          <span class="card-kicker">Local development</span>
-          <strong>CLI guide</strong>
-          <span>Scaffold config, validate setup, run dry checks, and manage memory.</span>
-        </a>
-        <a class="guide-card" href="github-action.md">
-          <span class="card-kicker">CI workflow</span>
-          <strong>GitHub Action</strong>
-          <span>Translate changed strings and open pull requests from normal CI.</span>
-        </a>
-        <a class="guide-card" href="new-project-deployment.md">
-          <span class="card-kicker">Scheduled service</span>
-          <strong>Server deployment</strong>
-          <span>Run Docker Compose plus cron for Transifex-backed production jobs.</span>
-        </a>
-      </section>
-
-      <section class="section">
+      <section class="route-section" aria-labelledby="route-title">
         <div class="section-heading">
-          <p class="eyebrow">Adoption path</p>
-          <h2>Onboard a repository in one reviewable PR.</h2>
+          <p class="eyebrow">Choose the path</p>
+          <h2 id="route-title">Adopt it without changing how maintainers review code.</h2>
         </div>
-        <div class="timeline">
-          <div>
-            <span class="number">1</span>
-            <h3>Generate</h3>
-            <p>Run <code>localize bootstrap-pr</code> to create config, glossary, workflow, and a target-repo guide.</p>
-          </div>
-          <div>
-            <span class="number">2</span>
-            <h3>Validate</h3>
-            <p>Keep <code>dry-run: true</code>, add credentials or a local endpoint, and run preflight checks.</p>
-          </div>
-          <div>
-            <span class="number">3</span>
-            <h3>Translate</h3>
-            <p>Enable writes, run an initial backfill, and review translations through normal PR review.</p>
-          </div>
+        <div class="route-list">
+          <a class="route-item" href="localization-cli.md">
+            <span>01</span>
+            <strong>Local project setup</strong>
+            <p>Scaffold config, validate credentials, run smoke checks, and test dry runs.</p>
+          </a>
+          <a class="route-item" href="github-action.md">
+            <span>02</span>
+            <strong>GitHub Action workflow</strong>
+            <p>Translate changed strings from CI and open reviewable pull requests.</p>
+          </a>
+          <a class="route-item" href="new-project-deployment.md">
+            <span>03</span>
+            <strong>Scheduled production service</strong>
+            <p>Run Docker Compose plus cron for repositories backed by external sources.</p>
+          </a>
         </div>
       </section>
 
-      <section class="section split">
+      <section class="section process" aria-labelledby="process-title">
+        <div class="section-heading">
+          <p class="eyebrow">Adoption flow</p>
+          <h2 id="process-title">One onboarding PR, then normal translation PRs.</h2>
+        </div>
+        <ol class="process-list">
+          <li>
+            <span>1</span>
+            <div>
+              <h3>Bootstrap</h3>
+              <p>Run <code>localize bootstrap-pr</code> to add config, glossary, workflow, and target-repo notes.</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <h3>Verify</h3>
+              <p>Keep dry-run mode on while <code>localize doctor</code>, <code>localize smoke</code>, and validation pass.</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <h3>Publish</h3>
+              <p>Enable writes, review the generated PR, and let translation memory improve future runs.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section id="formats" class="section split" aria-labelledby="formats-title">
         <div>
           <p class="eyebrow">Formats and providers</p>
-          <h2>Built for extension without rewriting the pipeline.</h2>
+          <h2 id="formats-title">Modular by contract, not by convention.</h2>
           <p>
-            Java .properties and JSON are built in. Custom adapters can be loaded
-            through CLI plugins, Action plugin inputs, or Python entry points.
-            AISuite is the default model-provider abstraction, with an explicit
-            OpenAI-compatible fallback for local endpoints.
+            Java .properties and JSON are built in. Additional formats plug into the
+            same adapter contract, so parsing, changed-key detection, placeholder
+            validation, quality gates, and publishing stay reusable across projects.
           </p>
+          <div class="tag-row" aria-label="Supported surfaces">
+            <span>Java .properties</span>
+            <span>JSON</span>
+            <span>AISuite</span>
+            <span>GitHub PRs</span>
+          </div>
         </div>
         <div class="doc-list" aria-label="Implementation references">
           <a href="repository-structure.md">Repository structure</a>
-          <a href="localization-cli.md">CLI commands</a>
+          <a href="new-format-checklist.md">New format checklist</a>
           <a href="how-to-run-locally.md">Local runs</a>
           <a href="adding-new-locales.md">Adding locales</a>
         </div>
       </section>
 
-      <section class="section">
+      <section class="section operations" aria-labelledby="operations-title">
         <div class="section-heading">
           <p class="eyebrow">Operational surface</p>
-          <h2>Keep translation state visible and portable.</h2>
+          <h2 id="operations-title">Keep state visible and portable.</h2>
         </div>
-        <div class="command-panel">
+        <div class="command-panel" aria-label="Translation memory commands">
           <code>localize memory stats --memory-file logs/translation_memory.json</code>
           <code>localize memory export --memory-file logs/translation_memory.json --output shared-memory.json</code>
           <code>localize memory import --memory-file logs/translation_memory.json --input shared-memory.json</code>
@@ -139,9 +212,10 @@ localize memory stats --memory-file logs/translation_memory.json</code></pre>
 
     <footer class="site-footer">
       <span>Localize Pipeline</span>
-      <a href="repository-structure.md">Repository structure</a>
+      <a href="repository-structure.md">Structure</a>
       <a href="how-to-run-locally.md">Run locally</a>
       <a href="maintenance/disk-space-management.md">Maintenance</a>
+      <a href="https://github.com/bisq-network/localize-pipeline">GitHub</a>
     </footer>
   </body>
 </html>
