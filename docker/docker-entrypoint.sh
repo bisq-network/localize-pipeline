@@ -86,6 +86,52 @@ ensure_logs_dir() {
   chmod "$mode" /app/logs || log "Warning: Could not set permissions on /app/logs. Continuing..." "WARNING"
 }
 
+resolve_app_runtime_dir() {
+  local configured_path="${1:-}"
+  if [ -z "$configured_path" ] || [ "$configured_path" = "null" ]; then
+    return 1
+  fi
+
+  case "$configured_path" in
+    /*) printf '%s\n' "$configured_path" ;;
+    *) printf '/app/%s\n' "$configured_path" ;;
+  esac
+}
+
+ensure_configured_runtime_dirs() {
+  local config_file="${TRANSLATOR_CONFIG_FILE:-/app/config.yaml}"
+  local runtime_dirs=("/app/translation_queue" "/app/translated_queue")
+  local key configured_path runtime_dir
+
+  if command -v yq >/dev/null 2>&1 && [ -r "$config_file" ]; then
+    for key in translation_queue_folder translated_queue_folder; do
+      configured_path="$(yq -r ".$key // \"\"" "$config_file" 2>/dev/null || true)"
+      if runtime_dir="$(resolve_app_runtime_dir "$configured_path")"; then
+        runtime_dirs+=("$runtime_dir")
+      fi
+    done
+  else
+    log "Config file unavailable for runtime directory discovery; using default queue folders." "WARNING"
+  fi
+
+  for runtime_dir in "${runtime_dirs[@]}"; do
+    case "$runtime_dir" in
+      /app/*)
+        mkdir -p "$runtime_dir"
+        if [ "$(id -u)" -eq 0 ]; then
+          chown "${APPUSER_UID}:${APPUSER_GID}" "$runtime_dir" \
+            || log "Warning: unable to chown runtime directory $runtime_dir; continuing" "WARNING"
+        fi
+        chmod "${APP_RUNTIME_DIR_MODE:-0755}" "$runtime_dir" \
+          || log "Warning: unable to chmod runtime directory $runtime_dir; continuing" "WARNING"
+        ;;
+      *)
+        log "Skipping configured runtime directory outside /app: $runtime_dir" "WARNING"
+        ;;
+    esac
+  done
+}
+
 # --- Main Execution Logic ---
 # The script acts as a gate:
 # 1. If run as root, it fixes permissions and then re-executes itself as appuser.
@@ -355,6 +401,7 @@ else
 
     # Ensure log directory exists and has correct permissions.
     ensure_logs_dir
+    ensure_configured_runtime_dirs
 
     # Fix permissions on the target repository if it's a mounted volume
     if [ -d "/target_repo" ]; then
