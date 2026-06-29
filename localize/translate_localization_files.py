@@ -742,6 +742,8 @@ def run_pre_translation_validation(
         target_file_path: str,
         source_file_path: str,
         localization_format: Optional[LocalizationFormat] = None,
+        git_changed_keys: Optional[Set[str]] = None,
+        file_ledger_entries: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Tuple[List[str], Set[str]]:
     """
     Runs validation and preparation checks on a target localization file.
@@ -788,13 +790,28 @@ def run_pre_translation_validation(
         errors.append(f"Could not parse localization file after key sync: {e}")
         return errors, newly_added_keys
 
+    changed_keys_for_run: Optional[Set[str]] = None
+    if git_changed_keys is not None:
+        changed_keys_for_run = newly_added_keys.union(
+            filter_git_changed_keys_by_source(
+                git_changed_keys,
+                source_translations,
+                file_ledger_entries or {},
+                target_translations=target_translations,
+            )
+        )
+
     # 3. Check placeholder parity
     common_keys = set(source_translations.keys()).intersection(set(target_translations.keys()))
     for key in common_keys:
         source_value = source_translations.get(key, "")
         target_value = target_translations.get(key, "")
         if not check_placeholder_parity(source_value, target_value):
-            errors.append(f"Placeholder mismatch for key `{key}`.")
+            message = f"Placeholder mismatch for key `{key}`."
+            if changed_keys_for_run is None or key in changed_keys_for_run:
+                errors.append(message)
+            else:
+                logger.warning("Pre-existing validation issue ignored for unchanged key in '%s': %s", filename, message)
 
     if not errors:
         logger.info(f"Pre-translation validation passed for '{filename}'.")
@@ -1936,10 +1953,19 @@ async def process_translation_queue(
         logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
 
         # --- Pre-flight Validator ---
+        file_ledger_entries = key_ledger.get(translation_file, {})
+        original_input_file_path = os.path.join(INPUT_FOLDER, translation_file)
+        raw_git_changed_keys = get_working_tree_changed_keys(
+            original_input_file_path,
+            REPO_ROOT,
+            localization_format,
+        )
         validation_errors, newly_added_keys = run_pre_translation_validation(
             translation_file_path,
             source_file_path,
             localization_format,
+            git_changed_keys=raw_git_changed_keys,
+            file_ledger_entries=file_ledger_entries,
         )
         if validation_errors:
             logger.error(f"Skipping translation for '{translation_file}' due to pre-translation validation errors.")
@@ -1965,13 +1991,7 @@ async def process_translation_queue(
         _, source_translations = adapter.parse_file(source_file_path)
 
         # Extract texts to translate
-        file_ledger_entries = key_ledger.get(translation_file, {})
-        original_input_file_path = os.path.join(INPUT_FOLDER, translation_file)
-        git_changed_keys = get_working_tree_changed_keys(
-            original_input_file_path,
-            REPO_ROOT,
-            localization_format,
-        )
+        git_changed_keys = raw_git_changed_keys
         # Only re-translate git-dirty keys if their English source actually changed.
         # This prevents an infinite cycle where Transifex community translations
         # are overwritten by AI, then Transifex re-serves the community version.
@@ -2195,8 +2215,13 @@ async def process_translation_queue(
                         f"(has_tokens={has_protection_tokens}, has_placeholders={has_real_placeholders})")
 
         # Validate each key individually and selectively revert failures
+        changed_final_translations = {
+            key: final_translations[key]
+            for key in keys_to_translate
+            if key in final_translations
+        }
         valid_translations, per_key_summary = run_per_key_validation_with_summary(
-            final_translations,
+            changed_final_translations,
             source_translations,
             translation_file
         )

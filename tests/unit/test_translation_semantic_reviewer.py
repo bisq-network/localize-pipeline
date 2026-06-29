@@ -129,6 +129,38 @@ def test_normalize_review_response_matches_duplicate_keys_by_file_and_key():
     assert findings[0]["value"] == "Limpiar"
 
 
+def test_normalize_review_response_recovers_key_written_as_file():
+    response = json.dumps(
+        {
+            "findings": [
+                {
+                    "file": "mobile.connectivity.reconnecting.client.details.ios",
+                    "severity": "error",
+                    "reason": "Still in English.",
+                    "suggested_value": "Localized value.",
+                }
+            ]
+        }
+    )
+    changes = [
+        TranslationChange(
+            file="resources/mobile_id.properties",
+            locale_code="id",
+            key="mobile.connectivity.reconnecting.client.details.ios",
+            source_value="This may occur if the app was in the background.",
+            old_value=None,
+            new_value="This may occur if the app was in the background.",
+        )
+    ]
+
+    findings = normalize_review_response(response, changes)
+
+    assert len(findings) == 1
+    assert findings[0]["file"] == "resources/mobile_id.properties"
+    assert findings[0]["key"] == "mobile.connectivity.reconnecting.client.details.ios"
+    assert findings[0]["suggested_value"] == "Localized value."
+
+
 def test_append_semantic_review_findings_preserves_existing_summary(tmp_path):
     summary_path = tmp_path / "translation_validation_summary.json"
     summary_path.write_text(

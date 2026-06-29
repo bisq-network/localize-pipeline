@@ -103,21 +103,33 @@ def normalize_review_response(
     changes: Sequence[TranslationChange],
 ) -> List[Dict[str, str]]:
     parsed = json.loads(response_text)
-    jsonschema.validate(instance=parsed, schema=SEMANTIC_REVIEW_SCHEMA)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("findings"), list):
+        jsonschema.validate(instance=parsed, schema=SEMANTIC_REVIEW_SCHEMA)
     changes_by_identity = {(change.file, change.key): change for change in changes}
     findings: List[Dict[str, str]] = []
 
     for raw_finding in parsed.get("findings", []):
-        file = raw_finding["file"]
-        key = raw_finding["key"]
+        if not isinstance(raw_finding, dict):
+            continue
+        file = str(raw_finding.get("file") or "")
+        key = str(raw_finding.get("key") or "")
+        severity = raw_finding.get("severity")
+        reason = raw_finding.get("reason")
+        if severity not in {"error", "warning"} or not isinstance(reason, str) or not reason:
+            continue
+        if not key and file:
+            matching_changes = [change for change in changes if change.key == file]
+            if len(matching_changes) == 1:
+                file = matching_changes[0].file
+                key = matching_changes[0].key
         change = changes_by_identity.get((file, key))
         if not change:
             continue
         finding = {
             "file": change.file,
             "key": key,
-            "severity": raw_finding["severity"],
-            "reason": raw_finding["reason"],
+            "severity": severity,
+            "reason": reason,
             "value": change.new_value,
             "source": "ai-review",
             "rule_id": "ai-review",

@@ -20,6 +20,7 @@ from localize.translate_localization_files import (
     get_working_tree_changed_keys,
     extract_language_from_filename,
     run_post_translation_validation,
+    run_pre_translation_validation,
     validate_paths,
 )
 from localize.properties_parser import parse_properties_file, reassemble_file
@@ -72,6 +73,42 @@ class TestCoreLogic(unittest.TestCase):
 
             with self.assertRaises(NotADirectoryError):
                 validate_paths(input_folder, queue_file, translated_folder, repo_root)
+
+    def test_pre_validation_ignores_unchanged_placeholder_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, 'mobile.properties')
+            target_path = os.path.join(temp_dir, 'mobile_de.properties')
+            with open(source_path, 'w', encoding='utf-8') as file:
+                file.write('old.key=Old {0}\nnew.key=New {0}\n')
+            with open(target_path, 'w', encoding='utf-8') as file:
+                file.write('old.key=Alt\nnew.key=New {0}\n')
+
+            errors, _newly_added_keys = run_pre_translation_validation(
+                target_path,
+                source_path,
+                git_changed_keys={'new.key'},
+                file_ledger_entries={},
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_pre_validation_blocks_changed_placeholder_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, 'mobile.properties')
+            target_path = os.path.join(temp_dir, 'mobile_de.properties')
+            with open(source_path, 'w', encoding='utf-8') as file:
+                file.write('old.key=Old {0}\nnew.key=New {0}\n')
+            with open(target_path, 'w', encoding='utf-8') as file:
+                file.write('old.key=Alt\nnew.key=Neu\n')
+
+            errors, _newly_added_keys = run_pre_translation_validation(
+                target_path,
+                source_path,
+                git_changed_keys={'new.key'},
+                file_ledger_entries={},
+            )
+
+            self.assertEqual(errors, ['Placeholder mismatch for key `new.key`.'])
 
     def test_parse_properties_file_with_multiline_values(self):
         """
