@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import yaml
@@ -558,6 +559,8 @@ def load_app_config() -> AppConfig:
     translated_queue_name = config.get('translated_queue_folder', 'translated_queue')
     translation_queue_folder = os.path.join(temp_dir, translation_queue_name)
     translated_queue_folder = os.path.join(temp_dir, translated_queue_name)
+    Path(translation_queue_folder).mkdir(parents=True, exist_ok=True)
+    Path(translated_queue_folder).mkdir(parents=True, exist_ok=True)
     translation_key_ledger_file_path = config.get(
         'translation_key_ledger_file_path',
         os.path.join(project_root, 'logs', 'translation_key_ledger.json')

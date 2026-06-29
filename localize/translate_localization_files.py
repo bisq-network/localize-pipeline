@@ -1567,7 +1567,7 @@ def copy_translated_files_back(
 
 def validate_paths(input_folder: str, translation_queue: str, translated_queue: str, repo_root: str):
     """
-    Validate that the input and queue folders exist and are accessible.
+    Validate that the input and queue folders are usable.
 
     Args:
         input_folder (str): Path to the input folder.
@@ -1575,10 +1575,20 @@ def validate_paths(input_folder: str, translation_queue: str, translated_queue: 
         translated_queue (str): Path to the translated queue folder.
         repo_root (str): Path to the Git repository root.
     """
-    for path, name in [(input_folder, "Input Folder"),
-                       (translation_queue, "Translation Queue Folder"),
-                       (translated_queue, "Translated Queue Folder"),
-                       (repo_root, "Repository Root")]:
+    protected_paths = {
+        os.path.abspath(input_folder),
+        os.path.abspath(repo_root),
+    }
+    queue_paths = {
+        os.path.abspath(translation_queue): "Translation Queue Folder",
+        os.path.abspath(translated_queue): "Translated Queue Folder",
+    }
+    if len(queue_paths) != 2:
+        raise ValueError("translation_queue and translated_queue must be different folders.")
+    if any(path in protected_paths for path in queue_paths):
+        raise ValueError("Queue folders must be separate from repo_root and input_folder.")
+
+    for path, name in [(input_folder, "Input Folder"), (repo_root, "Repository Root")]:
         if not os.path.exists(path):
             logger.error(f"{name} '{path}' does not exist.")
             raise FileNotFoundError(f"{name} '{path}' does not exist.")
@@ -1587,6 +1597,14 @@ def validate_paths(input_folder: str, translation_queue: str, translated_queue: 
             required = os.R_OK
         if not os.access(path, required):
             logger.error("%s '%s' is not accessible (required perms: %s).", name, path, "R+W" if required & os.W_OK else "R")
+            raise PermissionError(f"{name} '{path}' lacks required permissions.")
+    for path, name in queue_paths.items():
+        os.makedirs(path, exist_ok=True)
+        if not os.path.isdir(path):
+            logger.error("%s '%s' is not a directory.", name, path)
+            raise NotADirectoryError(f"{name} '{path}' is not a directory.")
+        if not os.access(path, os.R_OK | os.W_OK):
+            logger.error("%s '%s' is not accessible (required perms: R+W).", name, path)
             raise PermissionError(f"{name} '{path}' lacks required permissions.")
     logger.info("All critical paths are valid and accessible.")
 

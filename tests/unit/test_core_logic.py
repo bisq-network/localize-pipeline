@@ -19,12 +19,34 @@ from localize.translate_localization_files import (
     filter_git_changed_keys_by_source,
     get_working_tree_changed_keys,
     extract_language_from_filename,
-    run_post_translation_validation
+    run_post_translation_validation,
+    validate_paths,
 )
 from localize.properties_parser import parse_properties_file, reassemble_file
 
 
 class TestCoreLogic(unittest.TestCase):
+
+    def test_validate_paths_creates_missing_queue_folders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_folder = os.path.join(temp_dir, 'i18n')
+            queue_folder = os.path.join(temp_dir, 'translation_queue')
+            translated_folder = os.path.join(temp_dir, 'translated_queue')
+            os.mkdir(input_folder)
+
+            validate_paths(input_folder, queue_folder, translated_folder, temp_dir)
+
+            self.assertTrue(os.path.isdir(queue_folder))
+            self.assertTrue(os.path.isdir(translated_folder))
+
+    def test_validate_paths_rejects_queue_path_collisions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_folder = os.path.join(temp_dir, 'i18n')
+            translated_folder = os.path.join(temp_dir, 'translated_queue')
+            os.mkdir(input_folder)
+
+            with self.assertRaisesRegex(ValueError, 'separate from repo_root and input_folder'):
+                validate_paths(input_folder, input_folder, translated_folder, temp_dir)
 
     def test_parse_properties_file_with_multiline_values(self):
         """

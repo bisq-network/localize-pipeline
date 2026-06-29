@@ -162,6 +162,19 @@ class TestLoadAppConfig:
         )
         assert config.translation_memory_enabled is True
 
+    def test_load_config_creates_default_queue_folders(self, tmp_path):
+        mock_config = {"dry_run": True}
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.tempfile.gettempdir", return_value=str(tmp_path)):
+                with patch("localize.app_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        config = load_app_config()
+
+        assert os.path.isdir(config.translation_queue_folder)
+        assert os.path.isdir(config.translated_queue_folder)
+
     def test_load_config_reads_project_context_and_format(self):
         mock_config = {
             "dry_run": True,
