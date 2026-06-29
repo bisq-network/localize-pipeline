@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -69,13 +70,16 @@ def test_docs_homepage_is_packaged_for_github_pages():
     assert ">LP<" not in html
     assert "brand-mark" not in html
     assert "served by GitHub Pages" not in html
-    assert 'fill="#25B135"' in logo_svg
+    assert 'fill="#25b135"' in logo_svg.lower()
     assert ".hero" in css
     assert ".brand-logo" in css
     assert ".credit-band" in css
-    assert ".run-panel {\n  min-width: 0;" in css
-    assert ".run-panel code {\n  white-space: pre-wrap;" in css
-    assert "overflow-wrap: anywhere;" in css
+    assert re.search(r"\.run-panel\s*\{[^}]*\bmin-width:\s*0;", css, re.DOTALL)
+    assert re.search(
+        r"\.run-panel code\s*\{[^}]*\bwhite-space:\s*pre-wrap;[^}]*\boverflow-wrap:\s*anywhere;",
+        css,
+        re.DOTALL,
+    )
     assert ".skip-link:focus" in css
     assert "#25b135" in css
     assert "IBM Plex Sans" in css
