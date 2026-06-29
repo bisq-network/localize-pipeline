@@ -34,6 +34,24 @@ def test_placeholder_parity_rejects_missing_i18next_token():
     assert not check_placeholder_parity("Hello {{name}}", "Hallo")
 
 
+def test_literal_percent_prose_is_not_a_placeholder():
+    source = "Trade price must be greater than -10% of market price"
+    target = "Handelspreis muss größer als -10% des Marktpreises sein"
+
+    assert extract_placeholder_tokens(source) == Counter()
+    assert extract_placeholder_tokens(target) == Counter()
+    assert check_placeholder_parity(source, target)
+
+
+def test_percent_after_brace_placeholder_is_literal_in_prose():
+    source = "Starting Tor {0}%"
+    target = "Tor {0}% başlatılıyor"
+
+    assert extract_placeholder_tokens(source) == Counter({"{0}": 1})
+    assert extract_placeholder_tokens(target) == Counter({"{0}": 1})
+    assert check_placeholder_parity(source, target)
+
+
 def test_json_structural_braces_are_not_placeholders():
     source = '{\n  "/title": "Title"\n}'
     target = '{\n  "/title": "Titel"\n}'
