@@ -52,6 +52,9 @@ def test_docs_homepage_is_packaged_for_github_pages():
     assert 'href="assets/site.css"' in html
     assert 'src="assets/bisq-logo.svg"' in html
     assert 'alt="Bisq"' in html
+    assert 'width="36" height="41"' in html
+    assert "<strong>Localize Pipeline</strong>" in html
+    assert "<small>Bisq Network tooling</small>" in html
     assert 'href="#content"' in html
     assert 'id="content"' in html
     assert "Agent entry points" in html
@@ -70,9 +73,13 @@ def test_docs_homepage_is_packaged_for_github_pages():
     assert ">LP<" not in html
     assert "brand-mark" not in html
     assert "served by GitHub Pages" not in html
+    assert "bisq_cat_logo_green" in logo_svg
+    assert "Group-3-Copy" not in logo_svg
+    assert 'viewBox="0 0 68 77"' in logo_svg
     assert 'fill="#25b135"' in logo_svg.lower()
     assert ".hero" in css
     assert ".brand-logo" in css
+    assert re.search(r"\.brand-logo\s*\{[^}]*\bwidth:\s*36px;", css, re.DOTALL)
     assert ".credit-band" in css
     assert re.search(r"\.run-panel\s*\{[^}]*\bmin-width:\s*0;", css, re.DOTALL)
     assert re.search(
