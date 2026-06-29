@@ -25,9 +25,12 @@ For development:
 localize formats
 localize init
 localize check --config config.yaml
+localize doctor --config config.yaml
+localize smoke --config config.yaml
 localize validate --config config.yaml
 localize run --config config.yaml --dry-run
 localize run --config config.yaml
+localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
 localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.0
 localize memory stats --memory-file logs/translation_memory.json
 ```
@@ -37,8 +40,11 @@ localize memory stats --memory-file logs/translation_memory.json
 | `formats` | Lists registered formats and whether each has a runtime adapter. |
 | `init` | Scaffolds a dry-run config and detects input folder, formats, layouts, and locales from existing files. |
 | `check` | Runs self-service preflight checks for config, paths, formats, endpoint, and required credentials. |
+| `doctor` | Prints redacted effective config for deploy debugging: profile, folders, provider, endpoint, and semantic review. |
+| `smoke` | Runs read-only startup checks and creates runtime scratch directories without translation or GitHub mutation. |
 | `validate` | Checks config shape, paths, locales, formats, layouts, and endpoint settings. |
 | `run` | Executes the translation pipeline. Use `--dry-run` to force a preview without editing config. |
+| `quality-gate` | Recomputes the PR quality-gate JSON/Markdown report for changed files after manual fixes. |
 | `bootstrap-pr` | Creates an onboarding branch with generated config, glossary, and GitHub workflow files. |
 | `memory` | Inspects, imports, exports, promotes, and suggests translation-memory entries. |
 
@@ -146,6 +152,22 @@ localization_formats:
 Every runtime component resolves a queued file to one profile before source-file
 lookup, parsing, validation, prompt construction, semantic review, quality gate
 checks, serialization, and publishing.
+
+## Semantic Review Remediation
+
+Profiles can let the AI semantic reviewer auto-apply concrete error-level
+suggestions before the PR quality gate runs:
+
+```yaml
+semantic_review:
+  enabled: true
+  auto_apply_error_suggestions: true
+```
+
+Only findings with `severity: error` and `suggested_value` are considered. The
+pipeline applies a suggestion only when the configured format adapter can find
+the file/key and deterministic checks confirm placeholder parity and control
+characters. Skipped suggestions stay in the quality report for manual review.
 
 ## JSON Behavior
 

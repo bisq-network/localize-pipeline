@@ -5,10 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "localize-pipeline"
 version = "0.1.0"
-description = "Reusable AI localization translation pipeline"
+description = "Agent-friendly AI localization pipeline that translates Java properties and JSON into pull requests"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
+keywords = ["ai", "agents", "i18n", "l10n", "localization", "translation", "github-actions"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -37,9 +38,9 @@ dependencies = [
 localize = "localize.cli:main"
 
 [project.urls]
-Repository = "https://github.com/bisq-network/translate-java-property-files"
-Changelog = "https://github.com/bisq-network/translate-java-property-files/blob/main/CHANGELOG.md"
-Issues = "https://github.com/bisq-network/translate-java-property-files/issues"
+Repository = "https://github.com/bisq-network/localize-pipeline"
+Changelog = "https://github.com/bisq-network/localize-pipeline/blob/main/CHANGELOG.md"
+Issues = "https://github.com/bisq-network/localize-pipeline/issues"
 
 [tool.setuptools.packages.find]
 include = ["localize*"]

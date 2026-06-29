@@ -32,6 +32,7 @@ quality_gate:
 semantic_review:
   enabled: true
   model: "gpt-5.4-mini"
+  auto_apply_error_suggestions: true
 semantic_quality_rules:
   - id: "trade-history-traders-label"
     message: "Fully localize the Trade Details traders/role label; do not retain the English term 'Traders'."

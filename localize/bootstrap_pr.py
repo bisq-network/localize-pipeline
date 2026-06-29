@@ -194,7 +194,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/translate-java-property-files@{action_ref}
+      - uses: bisq-network/localize-pipeline@{action_ref}
         with:
 {action_inputs}
 """

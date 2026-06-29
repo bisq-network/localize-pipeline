@@ -9,6 +9,8 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BISQ_PROFILE_CONFIG = PROJECT_ROOT / "profiles" / "bisq" / "config.yaml"
 BISQ_PROFILE_GLOSSARY = PROJECT_ROOT / "profiles" / "bisq" / "glossary.json"
+BISQ_MOBILE_PROFILE_CONFIG = PROJECT_ROOT / "profiles" / "bisq-mobile" / "config.yaml"
+BISQ_MOBILE_PROFILE_GLOSSARY = PROJECT_ROOT / "profiles" / "bisq-mobile" / "glossary.json"
 GENERIC_EXAMPLE_DIR = PROJECT_ROOT / "examples" / "generic-java-properties"
 
 
@@ -63,6 +65,52 @@ def test_docs_use_localize_init_as_stable_onboarding_surface():
 
     assert "localize init" in docs
     assert "./init.sh" not in docs
+
+
+def test_docs_and_metadata_use_localize_pipeline_repo_name():
+    paths = [
+        PROJECT_ROOT / "README.md",
+        PROJECT_ROOT / "pyproject.toml",
+        PROJECT_ROOT / "action.yml",
+        *sorted((PROJECT_ROOT / "docs").glob("*.md")),
+    ]
+    text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+    assert "bisq-network/localize-pipeline" in text
+    assert "bisq-network/translate-java-property-files" not in text
+
+
+def test_llms_txt_guides_agents_to_stable_surfaces():
+    llms = (PROJECT_ROOT / "llms.txt").read_text(encoding="utf-8")
+
+    assert "# Localize Pipeline" in llms
+    assert "localize init" in llms
+    assert "localize doctor" in llms
+    assert "localize smoke" in llms
+    assert "localize.core" in llms
+    assert "localize.formats" in llms
+    assert "localize.providers" in llms
+    assert "profiles/bisq/" in llms
+    assert "profiles/bisq-mobile/" in llms
+    assert "docs/new-format-checklist.md" in llms
+    assert "Java properties" in llms
+    assert "JSON" in llms
+
+
+def test_core_public_modules_do_not_import_bisq_profile_assumptions():
+    public_modules = [
+        PROJECT_ROOT / "localize" / "core" / "__init__.py",
+        PROJECT_ROOT / "localize" / "formats" / "__init__.py",
+        PROJECT_ROOT / "localize" / "providers" / "__init__.py",
+        PROJECT_ROOT / "localize" / "pipeline_core.py",
+        PROJECT_ROOT / "localize" / "connectors.py",
+    ]
+
+    for path in public_modules:
+        text = path.read_text(encoding="utf-8")
+        assert "profiles/bisq" not in text
+        assert "i18n/src/main/resources" not in text
+        assert "Bisq" not in text
 
 
 def test_release_maturity_docs_are_packaged():
@@ -124,6 +172,37 @@ def test_bisq_profile_packages_config_and_glossary_assets():
     assert config["glossary_file_path"] == "glossary.json"
     assert isinstance(glossary, dict) and glossary
     assert "de" in glossary
+
+
+def test_bisq_mobile_profile_packages_sanitized_production_shape():
+    """Bisq mobile production behavior is a tracked profile fixture, not hidden state."""
+    assert BISQ_MOBILE_PROFILE_CONFIG.exists()
+    assert BISQ_MOBILE_PROFILE_GLOSSARY.exists()
+
+    config = yaml.safe_load(BISQ_MOBILE_PROFILE_CONFIG.read_text(encoding="utf-8"))
+    glossary = yaml.safe_load(BISQ_MOBILE_PROFILE_GLOSSARY.read_text(encoding="utf-8"))
+
+    assert config["localization_format"] == "java_properties"
+    assert config["translation_source"] == "git"
+    assert config["input_folder"] == "/target_repo/shared/domain/src/commonMain/resources/mobile"
+    assert "Bisq mobile" in config["project_context"]
+    assert config["semantic_review"]["enabled"] is True
+    assert config["semantic_review"]["auto_apply_error_suggestions"] is True
+    assert config["quality_gate"]["semantic_qa_audit_scope"] == "changed"
+    assert isinstance(glossary, dict) and {"de", "es", "fr"}.issubset(glossary)
+
+    supported_locale_codes = {
+        locale["code"]
+        for locale in config["supported_locales"]
+    }
+    semantic_rule_locale_codes = {
+        locale
+        for rule in config.get("semantic_quality_rules", [])
+        for locale in rule.get("locales", [])
+        if locale != "*"
+    }
+    assert {"de", "es", "fr", "id", "it", "vi"}.issubset(supported_locale_codes)
+    assert semantic_rule_locale_codes <= supported_locale_codes
 
 
 def test_docker_compose_mounts_the_selected_profile():

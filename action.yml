@@ -1,8 +1,8 @@
-name: "AI localization translation"
+name: "Localize Pipeline"
 description: >-
-  Translate changed Java .properties or JSON localization files with OpenAI,
-  AISuite providers, or a local OpenAI-compatible endpoint, then open a pull
-  request from your CI workflow.
+  Agent-friendly AI localization pipeline that translates changed Java
+  .properties or JSON files with AISuite, OpenAI-compatible endpoints, or local
+  models, then opens a reviewable pull request.
 
 branding:
   icon: globe

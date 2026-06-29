@@ -6,7 +6,19 @@
 set -euo pipefail
 
 ALERT_FILE="/var/log/translation-service-alerts.log"
-GITHUB_TOKEN=$(sed -n 's/^GITHUB_TOKEN=//p' /opt/translate-java-property-files/docker/.env 2>/dev/null | tail -n1 || true)
+INSTALL_ROOT="${LOCALIZE_PIPELINE_ROOT:-/opt/localize-pipeline}"
+MOBILE_INSTALL_ROOT="${LOCALIZE_PIPELINE_MOBILE_ROOT:-/opt/localize-pipeline-mobile}"
+LEGACY_INSTALL_ROOT="/opt/translate-java-property-files"
+LEGACY_MOBILE_INSTALL_ROOT="/opt/translate-java-property-files-mobile-app"
+
+if [ ! -d "$INSTALL_ROOT" ] && [ -d "$LEGACY_INSTALL_ROOT" ]; then
+    INSTALL_ROOT="$LEGACY_INSTALL_ROOT"
+fi
+if [ ! -d "$MOBILE_INSTALL_ROOT" ] && [ -d "$LEGACY_MOBILE_INSTALL_ROOT" ]; then
+    MOBILE_INSTALL_ROOT="$LEGACY_MOBILE_INSTALL_ROOT"
+fi
+
+GITHUB_TOKEN=$(sed -n 's/^GITHUB_TOKEN=//p' "$INSTALL_ROOT/docker/.env" 2>/dev/null | tail -n1 || true)
 
 log_alert() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ALERT: $1" | tee -a "$ALERT_FILE"
@@ -129,8 +141,8 @@ else
 fi
 
 # Check 3: Check latest cron run result robustly
-main_log="/opt/translate-java-property-files/logs/cron_job.log"
-mobile_log="/opt/translate-java-property-files-mobile-app/logs/cron_job.log"
+main_log="$INSTALL_ROOT/logs/cron_job.log"
+mobile_log="$MOBILE_INSTALL_ROOT/logs/cron_job.log"
 check_cron_log "Main service" "$main_log"
 check_cron_log "Mobile app service" "$mobile_log"
 

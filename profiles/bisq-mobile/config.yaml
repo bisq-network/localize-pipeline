@@ -1,0 +1,127 @@
+target_project_root: "/target_repo"
+input_folder: "/target_repo/shared/domain/src/commonMain/resources/mobile"
+glossary_file_path: "glossary.json"
+localization_format: "java_properties"
+translation_source: "git"
+project_context: >
+  Translate for Bisq mobile, the Kotlin Multiplatform mobile companion for the
+  Bisq peer-to-peer bitcoin trading ecosystem. Keep navigation labels concise,
+  preserve product names, and prefer mobile UI wording over long desktop-style
+  phrases.
+model_name: "gpt-4o-mini"
+translation_queue_folder: "translation_queue"
+translated_queue_folder: "translated_queue"
+dry_run: false
+retranslate_identical_source_strings: false
+translation_key_ledger_file_path: "/app/logs/translation_key_ledger.json"
+quality_gate:
+  source_identical_min_block_count: 5
+  source_identical_max_count: 20
+  source_identical_max_ratio: 0.30
+  block_on_pipeline_warnings: true
+  block_on_semantic_qa_findings: true
+  block_on_semantic_qa_warnings: false
+  semantic_qa_audit_scope: "changed"
+  retained_source_word_allowlist:
+    es: ["personal"]
+    fr: ["information", "message", "messages"]
+    it: ["reporting"]
+semantic_review:
+  enabled: true
+  model: "gpt-5.4-mini"
+  auto_apply_error_suggestions: true
+semantic_quality_rules:
+  - id: "trade-history-traders-label"
+    message: "Fully localize the Trade Details traders/role label; do not retain the English term 'Traders'."
+    locales: ["*"]
+    excluded_locales: ["en", "pcm"]
+    keys: ["mobile.tradeHistory.details.tradersAndRole"]
+    forbidden_target_regex: "\\bTraders\\b"
+    severity: "error"
+    source: "bisq-mobile#1478 CodeRabbit"
+  - id: "af-trade-history-counts-trades"
+    message: "Afrikaans trade-count labels must count trades, not traders."
+    locales: ["af_ZA"]
+    keys: ["mobile.tradeHistory.count.many", "mobile.tradeHistory.count.filtered"]
+    forbidden_target_regex: "\\bhandelaars\\b"
+    severity: "error"
+    source: "bisq-mobile#1478 CodeRabbit"
+  - id: "vi-clearnet-clear-network-address"
+    message: "Vietnamese networkAddress.clear must describe a clearnet/open network address, not a delete action."
+    locales: ["vi"]
+    keys: ["mobile.tradeHistory.details.networkAddress.clear"]
+    forbidden_target_regex: "^xóa\\b"
+    severity: "error"
+    source: "bisq-mobile#1478 CodeRabbit"
+  - id: "analytics-cta-truncated-reporting"
+    message: "Analytics CTA labels must not contain truncated English words such as 'reportin'."
+    locales: ["*"]
+    keys: ["*"]
+    forbidden_target_regex: "\\breportin\\b"
+    severity: "error"
+    source: "bisq-mobile#1490 CodeRabbit"
+  - id: "analytics-cta-reporting-loanword"
+    message: "French and Italian analytics CTA labels must fully localize 'reporting'."
+    locales: ["fr", "it"]
+    keys: ["mobile.welcomeCarousel.analytics.action"]
+    forbidden_target_regex: "\\breporting\\b"
+    severity: "error"
+    source: "bisq-mobile#1490 CodeRabbit"
+  - id: "it-analytics-self-hosted"
+    message: "Italian analytics copy must localize 'self-hosted' instead of retaining the English term."
+    locales: ["it"]
+    keys: ["*"]
+    forbidden_target_regex: "\\bself-hosted\\b"
+    severity: "error"
+    source: "bisq-mobile#1484 CodeRabbit"
+  - id: "fr-analytics-no-pii-negation"
+    message: "French no-PII analytics copy must keep parallel negation for accounts and device identifiers."
+    locales: ["fr"]
+    keys: ["mobile.settings.analytics.info.noPii"]
+    forbidden_target_regex: "^Aucune information personnelle,\\s*comptes\\b"
+    severity: "error"
+    source: "bisq-mobile#1484 CodeRabbit"
+supported_locales:
+  - code: "af_ZA"
+    name: "Afrikaans"
+  - code: "cs"
+    name: "Czech"
+  - code: "da"
+    name: "Danish"
+  - code: "de"
+    name: "German"
+  - code: "es"
+    name: "Spanish"
+  - code: "fr"
+    name: "French"
+  - code: "id"
+    name: "Indonesian"
+  - code: "it"
+    name: "Italian"
+  - code: "pt_BR"
+    name: "Brazilian Portuguese"
+  - code: "pt_PT"
+    name: "Portuguese"
+  - code: "ru"
+    name: "Russian"
+  - code: "sv"
+    name: "Swedish"
+  - code: "th"
+    name: "Thai"
+  - code: "vi"
+    name: "Vietnamese"
+style_rules:
+  de:
+    - "Use natural mobile labels; prefer 'Haeufige Fragen' over source-identical 'FAQs' when a short native label fits."
+  es:
+    - "Keep navigation labels short and fully localized unless the term is a brand name."
+  fr:
+    - "Do not retain English analytics terms such as reporting when a natural French equivalent is available."
+brand_technical_glossary:
+  - "Bisq"
+  - "Bisq Easy"
+  - "Bitcoin"
+  - "BTC"
+  - "Lightning"
+  - "MuSig"
+  - "Tor"

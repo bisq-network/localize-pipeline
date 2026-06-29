@@ -61,8 +61,51 @@ log_cmd() {
   "$@" 2>&1 | sed 's/^/| /' | tee -a "$LOG_FILE"
 }
 
+record_pipeline_event() {
+    local event="$1"
+    shift || true
+    log "PIPELINE_EVENT event=$event $*" "INFO"
+}
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+resolve_config_file() {
+    local requested_config="${TRANSLATOR_CONFIG_FILE:-config.yaml}"
+    local resolved_config="$requested_config"
+
+    if [ ! -f "$resolved_config" ]; then
+        log "Configuration file not found at '$resolved_config'." "ERROR"
+        # Attempt to find it in the script's directory as a fallback for local runs.
+        local script_dir_real
+        script_dir_real=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        if [ -f "$script_dir_real/$resolved_config" ]; then
+            resolved_config="$script_dir_real/$resolved_config"
+            log "Found config file in script directory: $resolved_config" "INFO"
+        else
+            log "Also not found in script directory. Aborting." "ERROR"
+            return 1
+        fi
+    fi
+
+    resolved_config=$(cd "$(dirname "$resolved_config")" && pwd)/$(basename "$resolved_config")
+    CONFIG_FILE="$resolved_config"
+    export TRANSLATOR_CONFIG_FILE="$CONFIG_FILE"
+}
+
+run_smoke_only_if_requested() {
+    if [[ "${LOCALIZE_SMOKE_ONLY:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    resolve_config_file
+    log "Running smoke-only deployment verification with configuration file: $CONFIG_FILE"
+    python3 -m localize.cli doctor --config "$CONFIG_FILE"
+    python3 -m localize.cli smoke --config "$CONFIG_FILE"
+    record_pipeline_event "smoke_only_ok" "config=$CONFIG_FILE"
+    send_heartbeat_if_configured "smoke_only_ok"
+    exit 0
 }
 
 normalize_translation_source() {
@@ -208,8 +251,9 @@ collect_changed_translation_files() {
 
 # Send a heartbeat ping to the health check URL if it is configured
 send_heartbeat_if_configured() {
+    local event="${1:-heartbeat}"
     if [ -n "${HEALTHCHECK_URL:-}" ]; then
-        log "Sending heartbeat to health check URL..."
+        log "Sending heartbeat to health check URL for event '$event'..."
         # Use curl with options to fail silently and handle connection timeouts
         curl -fsS --retry 3 --max-time 10 "$HEALTHCHECK_URL" > /dev/null || log "Warning: Health check ping failed."
     else
@@ -224,8 +268,9 @@ send_heartbeat_if_configured() {
 check_and_exit_if_blocked() {
     log "BLOCKING CONDITION DETECTED: $1" "ERROR"
     log "Aborting translation run. Please resolve the blocking issue." "ERROR"
+    record_pipeline_event "pending_pr_guard" "reason=$1"
     # Send heartbeat ping before exiting to indicate successful (expected) skip
-    send_heartbeat_if_configured
+    send_heartbeat_if_configured "pending_pr_guard"
     exit 0 # Exit cleanly to prevent cron from flagging it as a failure
 }
 
@@ -278,6 +323,8 @@ RANDOM_DELAY=$((RANDOM % 6))
 log "Adding random delay of ${RANDOM_DELAY}s to desynchronize concurrent starts..." "DEBUG"
 sleep "$RANDOM_DELAY"
 
+run_smoke_only_if_requested
+
 # --- Pull Request Gate ---
 # This gate prevents the script from running if there's already a pending PR.
 # It checks for two conditions:
@@ -318,22 +365,7 @@ fi
 log "Starting Git and Transifex validation..."
 # Load configuration from YAML file
 # Use the environment variable if it's set, otherwise default to config.yaml in the CWD.
-CONFIG_FILE="${TRANSLATOR_CONFIG_FILE:-config.yaml}"
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    log "Configuration file not found at '$CONFIG_FILE'." "ERROR"
-    # Attempt to find it in the script's directory as a fallback for local runs.
-    SCRIPT_DIR_REAL=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    if [ -f "$SCRIPT_DIR_REAL/$CONFIG_FILE" ]; then
-        CONFIG_FILE="$SCRIPT_DIR_REAL/$CONFIG_FILE"
-        log "Found config file in script directory: $CONFIG_FILE" "INFO"
-    else
-        log "Also not found in script directory. Aborting." "ERROR"
-        exit 1
-    fi
-fi
-CONFIG_FILE=$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")
-export TRANSLATOR_CONFIG_FILE="$CONFIG_FILE"
+resolve_config_file
 log "Using configuration file: $CONFIG_FILE"
 
 # Helper function to parse values from config.yaml robustly using yq
@@ -424,11 +456,14 @@ prepare_translation_source() {
             # Match translation files even when staged for deletion (D prefix) or renames (-> suffix)
             if ! git status --porcelain | grep -qE "$(translation_file_change_regex)"; then
                 log "Transifex pull completed successfully, but no translation files were modified. This is normal when there are no new translation keys." "INFO"
+                record_pipeline_event "source_files_detected" "count=0 source=transifex"
                 log "No further processing needed. Exiting gracefully."
-                send_heartbeat_if_configured
+                send_heartbeat_if_configured "no_source_changes"
                 exit 0
             fi
 
+            SOURCE_CHANGE_COUNT=$(git status --porcelain | grep -E "$(translation_file_change_regex)" | wc -l | tr -d '[:space:]')
+            record_pipeline_event "source_files_detected" "count=${SOURCE_CHANGE_COUNT:-0} source=transifex"
             log "Transifex pull successfully updated translation files. Starting AI translation processing..." "INFO"
 
         else
@@ -577,6 +612,8 @@ if [ $PY_EXIT -ne 0 ]; then
   log "Error: Localization CLI exited with code $PY_EXIT"
   exit $PY_EXIT
 fi
+PROCESSED_FILE_COUNT=$(jq -r '(.files // {}) | length' "$VALIDATION_SUMMARY" 2>/dev/null || echo 0)
+record_pipeline_event "files_processed" "count=${PROCESSED_FILE_COUNT:-0}"
 
 # Change back to the target project root for the final git operations.
 cd "$TARGET_PROJECT_ROOT"
@@ -660,6 +697,14 @@ stage_and_submit_batch() {
     if [ "$SEMANTIC_REVIEW_EXIT" -ne 0 ]; then
         log "Semantic AI review failed; continuing with deterministic quality gate only." "WARNING"
     fi
+    log "Re-staging translation files after semantic review"
+    for bf in "${BATCH_FILES[@]}"; do
+        if [ -f "$bf" ]; then
+            git add -- "$bf"
+        else
+            git rm -- "$bf" 2>/dev/null || true
+        fi
+    done
 
     local QUALITY_GATE_EXIT=0
     set +e
@@ -719,6 +764,12 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
         log "Found skipped files report. Prepending to PR description."
         PR_BODY=$(printf "%s\n\n%s" "$(cat "$SKIPPED_FILES_REPORT")" "$PR_BODY")
     fi
+    if [ -s "$SKIPPED_FILES_REPORT" ]; then
+        SKIPPED_FILE_COUNT=$(grep -cve '^[[:space:]]*$' "$SKIPPED_FILES_REPORT" || true)
+        record_pipeline_event "skipped_files" "count=${SKIPPED_FILE_COUNT:-0}"
+    else
+        record_pipeline_event "skipped_files" "count=0"
+    fi
 
     # Append per-run token usage / estimated cost so reviewers see what the run cost.
     local TOKEN_USAGE_JSON="$report_dir/token_usage_summary.json"
@@ -747,6 +798,7 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
         --base "$TARGET_BRANCH_FOR_PR" \
         --head "${FORK_OWNER}:$branch"); then
         log "Successfully created pull request: $PR_URL"
+        record_pipeline_event "pull_request_created" "url=$PR_URL branch=$branch files=${#BATCH_FILES[@]}"
     else
         log "Error: Failed to create pull request. Check gh cli auth and GITHUB_TOKEN." "ERROR"
         return 1
@@ -832,6 +884,7 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
         mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")
         TOTAL_FILES=${#ALL_FILES[@]}
         log "Total translation files to commit: $TOTAL_FILES (split threshold: $MAX_FILES_PER_PR)"
+        record_pipeline_event "translation_files_detected" "count=$TOTAL_FILES input_folder=$REL_INPUT_FOLDER"
 
         # Read the descriptive PR title from the Python-generated summary.
         TRANSLATION_SUMMARY="/app/logs/translation_summary.json"

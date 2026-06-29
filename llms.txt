@@ -1,0 +1,57 @@
+# Localize Pipeline
+
+Agent-friendly AI localization pipeline for generating reviewable translation
+pull requests. The repository is `bisq-network/localize-pipeline`.
+
+## Use This Project For
+
+- Translating changed localization strings into pull requests.
+- Java properties and JSON localization files.
+- Mixed-format localization projects through configured profiles.
+- GitHub Actions, local CLI dry-runs, or Docker Compose plus cron deployments.
+- AISuite, OpenAI-compatible endpoints, or local model endpoints.
+
+## Stable Agent Entry Points
+
+- `README.md` - product overview and quickstart.
+- `docs/localization-cli.md` - full `localize` CLI reference.
+- `docs/github-action.md` - reusable GitHub Action setup.
+- `docs/new-project-deployment.md` - Docker/server deployment.
+- `docs/repository-structure.md` - module boundaries.
+- `docs/new-format-checklist.md` - required work for future formats.
+- `config.example.yaml` - minimal generic starter config.
+- `examples/generic-java-properties/` - Java properties example.
+- `examples/generic-json/` - JSON example.
+- `profiles/bisq/` and `profiles/bisq-mobile/` - production profile examples.
+
+## Commands Agents Should Prefer
+
+```bash
+localize init
+localize check --config config.yaml
+localize doctor --config config.yaml
+localize smoke --config config.yaml
+localize run --dry-run --config config.yaml
+localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
+```
+
+## Stable Python Boundaries
+
+- `localize.core` - format-agnostic orchestration.
+- `localize.formats` - localization format adapter API and conformance helpers.
+- `localize.providers` - model provider abstraction.
+- `localize.connectors` - source, reporter, publisher, and filesystem/GitHub contracts.
+- `profiles/` - project-specific configuration, glossary, paths, locales, and policy.
+
+Treat `profiles/bisq/` as one production profile, not as a product default.
+Treat `profiles/bisq-mobile/` the same way. Core modules must stay reusable and
+must not depend on Bisq paths, terms, or Transifex behavior.
+
+## Supported Built-In Formats
+
+- Java properties (`localization_format: java_properties`)
+- JSON (`localization_format: json`)
+
+Future formats should add an adapter, adapter conformance tests, a minimal
+example, dry-run integration coverage, docs, autodetection where practical, and
+placeholder/escaping notes.

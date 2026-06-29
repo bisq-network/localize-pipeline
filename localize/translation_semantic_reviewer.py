@@ -25,6 +25,10 @@ from localize.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
 )
+from localize.semantic_remediation import (
+    SemanticRemediationResult,
+    apply_semantic_review_suggestions,
+)
 from localize.translation_quality_gate import get_staged_diff, load_quality_gate_localization_profiles
 
 
@@ -144,20 +148,57 @@ def append_semantic_review_findings(
     validation_summary_path: str,
     findings: Sequence[Dict[str, str]],
 ) -> None:
-    if os.path.exists(validation_summary_path):
-        with open(validation_summary_path, "r", encoding="utf-8") as file:
-            summary = json.load(file)
-    else:
-        summary = {"files": {}, "pipeline_warnings": []}
+    summary = _load_validation_summary(validation_summary_path)
 
     summary.setdefault("files", {})
     summary.setdefault("pipeline_warnings", [])
     summary.setdefault("semantic_review_findings", [])
     summary["semantic_review_findings"].extend(findings)
 
+    _write_validation_summary(validation_summary_path, summary)
+
+
+def append_semantic_review_remediations(
+    validation_summary_path: str,
+    result: SemanticRemediationResult,
+) -> None:
+    summary = _load_validation_summary(validation_summary_path)
+    summary.setdefault("files", {})
+    summary.setdefault("pipeline_warnings", [])
+    summary.setdefault("semantic_review_findings", [])
+    summary.setdefault("semantic_review_remediations", [])
+    summary["semantic_review_remediations"].extend(result.applied)
+    if result.skipped:
+        summary.setdefault("semantic_review_remediation_skips", [])
+        summary["semantic_review_remediation_skips"].extend(result.skipped)
+    _write_validation_summary(validation_summary_path, summary)
+
+
+def _load_validation_summary(validation_summary_path: str) -> Dict[str, Any]:
+    if os.path.exists(validation_summary_path):
+        with open(validation_summary_path, "r", encoding="utf-8") as file:
+            summary = json.load(file)
+        if isinstance(summary, dict):
+            return summary
+    return {"files": {}, "pipeline_warnings": []}
+
+
+def _write_validation_summary(validation_summary_path: str, summary: Dict[str, Any]) -> None:
     Path(validation_summary_path).parent.mkdir(parents=True, exist_ok=True)
     with open(validation_summary_path, "w", encoding="utf-8") as file:
         json.dump(summary, file, ensure_ascii=False, indent=2)
+
+
+def _auto_apply_suggestions_enabled(
+    config: Dict[str, Any],
+    semantic_review_config: Dict[str, Any],
+) -> bool:
+    return bool(
+        semantic_review_config.get(
+            "auto_apply_error_suggestions",
+            config.get("auto_apply_semantic_review_suggestions", False),
+        )
+    )
 
 
 async def review_translation_changes(
@@ -285,6 +326,22 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
                 model_provider=provider,
             )
         )
+
+    if _auto_apply_suggestions_enabled(config, semantic_review_config):
+        remediation = apply_semantic_review_suggestions(
+            repo_root=args.repo_root,
+            input_folder=args.input_folder,
+            findings=findings,
+            locale_codes=locales,
+            localization_profiles=localization_profiles,
+        )
+        append_semantic_review_remediations(args.validation_summary, remediation)
+        applied = remediation.applied_identities
+        findings = [
+            finding
+            for finding in findings
+            if (finding["file"], finding["key"]) not in applied
+        ]
 
     append_semantic_review_findings(args.validation_summary, findings)
     return 0

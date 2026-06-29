@@ -2,7 +2,7 @@
 #
 # This is a small, generic starting point. For a richer, real-world example with
 # per-locale style rules, learned semantic quality rules, and a large glossary,
-# see profiles/bisq/config.yaml (the Bisq production profile).
+# see profiles/bisq/config.yaml and profiles/bisq-mobile/config.yaml.
 #
 # Tip: run `localize init --input-folder path/to/i18n` to scaffold this automatically
 # by detecting the locales from your existing localization files.
@@ -51,6 +51,14 @@ translation_source: "git"
 model_provider: "aisuite"           # Default AISuite-backed provider abstraction.
 model_name: "gpt-4o-mini"          # fast initial translation
 review_model_name: "gpt-4o"        # holistic review pass (set equal to model_name to save cost)
+
+# Optional semantic sidecar. If auto_apply_error_suggestions is true, only
+# error-level findings with concrete suggested_value are applied, and only after
+# deterministic placeholder/control-character checks pass.
+# semantic_review:
+#   enabled: true
+#   model: "gpt-4o"
+#   auto_apply_error_suggestions: false
 
 # (Optional) OpenAI-compatible endpoint. Point this at a local Ollama server to
 # translate with zero data egress and no API key (set the model names to a model

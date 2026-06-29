@@ -330,6 +330,101 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_semantic_reviewer_auto_applies_safe_error_suggestions(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    source_path = resources / "messages.properties"
+    target_path = resources / "messages_de.properties"
+    source_path.write_text("hello=Hello {0}\n", encoding="utf-8")
+    target_path.write_text("hello=Hallo\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  auto_apply_error_suggestions: true",
+                "supported_locales:",
+                "  - code: de",
+                "    name: German",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = MagicMock()
+    provider.client = object()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "findings": [
+                                    {
+                                        "file": "messages_de.properties",
+                                        "key": "hello",
+                                        "severity": "error",
+                                        "reason": "Placeholder missing.",
+                                        "suggested_value": "Hallo {0}",
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+    )
+
+    with (
+        patch(
+            "localize.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ),
+        patch(
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            return_value=[
+                TranslationChange(
+                    file="messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello {0}",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ],
+        ),
+        patch(
+            "localize.translation_semantic_reviewer.create_model_provider",
+            return_value=provider,
+        ),
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                str(resources),
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+            ]
+        )
+
+    assert exit_code == 0
+    assert "hello=Hallo {0}" in target_path.read_text(encoding="utf-8")
+    summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
+    assert summary["semantic_review_findings"] == []
+    assert summary["semantic_review_remediations"][0]["key"] == "hello"
+
+
+@pytest.mark.asyncio
 async def test_semantic_reviewer_collects_changes_from_all_configured_profiles(tmp_path):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"

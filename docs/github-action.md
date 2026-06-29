@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/translate-java-property-files@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.0
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -88,7 +88,7 @@ profile list.
 Use `api-base-url` for any OpenAI-compatible endpoint:
 
 ```yaml
-      - uses: bisq-network/translate-java-property-files@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.0
         with:
           config-file: config.yaml
           api-base-url: http://localhost:11434/v1
@@ -107,7 +107,7 @@ For custom adapters, install the package and list the adapter modules with the
 first-class plugin inputs:
 
 ```yaml
-      - uses: bisq-network/translate-java-property-files@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.0
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/translate-java-property-files@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.0
         with:
           config-file: config.yaml
           diff-base: ${{ github.event.pull_request.base.sha }}
@@ -176,7 +176,7 @@ inputs are passed through environment variables, not interpolated directly into
 shell scripts.
 
 Pin a tagged release for production workflows. A workflow reference such as
-`bisq-network/translate-java-property-files@main` follows unreleased changes;
+`bisq-network/localize-pipeline@main` follows unreleased changes;
 use it only when that is intentional.
 
 ## Custom Formats

@@ -1,0 +1,62 @@
+{
+  "de": {
+    "account": "Konto",
+    "analytics": "Analyse",
+    "backup": "Sicherung",
+    "fee": "Gebühr",
+    "mediator": "Mediator",
+    "payment account": "Zahlungskonto",
+    "trade": "Handel",
+    "wallet": "Wallet"
+  },
+  "es": {
+    "account": "cuenta",
+    "analytics": "analítica",
+    "backup": "copia de seguridad",
+    "fee": "comisión",
+    "mediator": "mediador",
+    "payment account": "cuenta de pago",
+    "trade": "operacion",
+    "wallet": "wallet"
+  },
+  "fr": {
+    "account": "compte",
+    "analytics": "analyse",
+    "backup": "sauvegarde",
+    "fee": "frais",
+    "mediator": "médiateur",
+    "payment account": "compte de paiement",
+    "trade": "transaction",
+    "wallet": "portefeuille"
+  },
+  "id": {
+    "account": "akun",
+    "analytics": "analitik",
+    "backup": "cadangan",
+    "fee": "biaya",
+    "mediator": "mediator",
+    "payment account": "akun pembayaran",
+    "trade": "perdagangan",
+    "wallet": "dompet"
+  },
+  "it": {
+    "account": "account",
+    "analytics": "analisi",
+    "backup": "backup",
+    "fee": "commissione",
+    "mediator": "mediatore",
+    "payment account": "conto di pagamento",
+    "trade": "scambio",
+    "wallet": "wallet"
+  },
+  "vi": {
+    "account": "tài khoản",
+    "analytics": "phân tích",
+    "backup": "sao lưu",
+    "fee": "phí",
+    "mediator": "hòa giải viên",
+    "payment account": "tài khoản thanh toán",
+    "trade": "giao dịch",
+    "wallet": "ví"
+  }
+}

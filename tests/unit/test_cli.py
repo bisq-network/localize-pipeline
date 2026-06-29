@@ -165,6 +165,70 @@ def test_cli_check_alias_runs_preflight_validation(tmp_path, capsys):
     assert "Preflight OK" in captured.out
 
 
+def test_cli_doctor_prints_redacted_effective_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value")
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": "i18n",
+            "translation_queue_folder": "translation_queue",
+            "translated_queue_folder": "translated_queue",
+            "model_provider": "aisuite",
+            "model_name": "gpt-4o-mini",
+            "review_model_name": "gpt-4o",
+            "semantic_review": {"enabled": True, "model": "gpt-4o"},
+            "dry_run": False,
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Localize Pipeline doctor" in captured.out
+    assert "profile: default" in captured.out
+    assert f"target_project_root: {repo}" in captured.out
+    assert f"input_folder: {i18n}" in captured.out
+    assert "model_provider: aisuite" in captured.out
+    assert "semantic_review: enabled" in captured.out
+    assert "OPENAI_API_KEY: set" in captured.out
+    assert "sk-secret-value" not in captured.out
+
+
+def test_cli_smoke_is_read_only_and_creates_missing_runtime_queue_dirs(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    queue = tmp_path / "scratch" / "translation_queue"
+    translated = tmp_path / "scratch" / "translated_queue"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": "i18n",
+            "translation_queue_folder": str(queue),
+            "translated_queue_folder": str(translated),
+            "dry_run": True,
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["smoke", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Smoke OK" in captured.out
+    assert queue.is_dir()
+    assert translated.is_dir()
+
+
 def test_cli_check_false_dry_run_env_does_not_override_config(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("LOCALIZE_DRY_RUN", "false")
@@ -332,6 +396,45 @@ def test_cli_bootstrap_pr_delegates_to_onboarding_generator(capsys):
     assert "Created onboarding commit abc123" in captured.out
 
 
+def test_cli_quality_gate_delegates_to_rerunnable_reporter(tmp_path):
+    with patch("localize.cli.translation_quality_gate_main", return_value=0) as quality_main:
+        exit_code = cli.main([
+            "quality-gate",
+            "--repo-root",
+            "/repo",
+            "--input-folder",
+            "/repo/i18n",
+            "--config",
+            "/repo/config.yaml",
+            "--validation-summary",
+            "/repo/logs/summary.json",
+            "--output-json",
+            "/tmp/report.json",
+            "--output-markdown",
+            "/tmp/report.md",
+            "--changed-files",
+            "i18n/messages_de.properties",
+        ])
+
+    assert exit_code == 0
+    quality_main.assert_called_once_with([
+        "--repo-root",
+        "/repo",
+        "--input-folder",
+        "/repo/i18n",
+        "--config",
+        "/repo/config.yaml",
+        "--validation-summary",
+        "/repo/logs/summary.json",
+        "--output-json",
+        "/tmp/report.json",
+        "--output-markdown",
+        "/tmp/report.md",
+        "--changed-files",
+        "i18n/messages_de.properties",
+    ])
+
+
 def test_cli_memory_import_export_stats_and_suggest(tmp_path, capsys):
     source = tmp_path / "source-memory.json"
     destination = tmp_path / "destination-memory.json"
@@ -437,8 +540,9 @@ def test_pyproject_exposes_localize_console_script():
 
     assert pyproject["project"]["name"] == "localize-pipeline"
     assert pyproject["project"]["version"] == "0.1.0"
-    assert pyproject["project"]["urls"]["Repository"]
+    assert pyproject["project"]["urls"]["Repository"] == "https://github.com/bisq-network/localize-pipeline"
     assert pyproject["project"]["urls"]["Changelog"]
+    assert pyproject["project"]["urls"]["Issues"] == "https://github.com/bisq-network/localize-pipeline/issues"
     assert "Programming Language :: Python :: 3 :: Only" in pyproject["project"]["classifiers"]
     assert pyproject["project"]["scripts"]["localize"] == "localize.cli:main"
     assert pyproject["tool"]["setuptools"]["packages"]["find"]["include"] == ["localize*"]

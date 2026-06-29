@@ -43,6 +43,7 @@ This project has three supported surfaces:
 | `localize/translate_localization_files.py` | Runtime translation pipeline. |
 | `localize/translation_quality_gate.py` | Deterministic PR quality gate. |
 | `localize/translation_semantic_reviewer.py` | AI semantic review sidecar. |
+| `localize/semantic_remediation.py` | Optional safe auto-application of AI review suggestions. |
 | `localize/semantic_quality.py` | Semantic QA rule evaluation. |
 
 Downstream projects should import from:
@@ -58,6 +59,7 @@ Implementation modules are for contributors to this repository.
 | Path | Purpose |
 | --- | --- |
 | `profiles/bisq/` | Production Bisq profile and glossary. |
+| `profiles/bisq-mobile/` | Sanitized Bisq mobile production-shape profile and glossary. |
 | `examples/generic-java-properties/` | Small Java `.properties` example. |
 | `examples/generic-json/` | Small JSON example. |
 
@@ -99,6 +101,7 @@ OPENAI_API_KEY=sk-test-key venv/bin/pytest -q
 | `docs/github-action.md` | GitHub Action setup and inputs. |
 | `docs/localization-cli.md` | CLI, plugins, custom adapters, and public API. |
 | `docs/new-project-deployment.md` | Docker Compose server deployment. |
+| `docs/new-format-checklist.md` | Required tests/docs for adding localization formats. |
 | `docs/adding-new-locales.md` | Locale onboarding workflow. |
 | `docs/maintenance/` | Host maintenance and disk cleanup. |
 | `docs/llm/` | Historical debugging notes, not the public usage guide. |

@@ -1,11 +1,14 @@
 # Localize Pipeline
 
-AI localization for projects that want translations as normal pull requests.
+Agent-friendly AI localization for projects that want translations as normal
+pull requests.
 
 Localize Pipeline detects changed source strings, translates the matching target
 locale entries, runs deterministic and AI review checks, and opens a PR that your
 team can inspect before merge. It runs in your CI or on your own server with your
 model provider and your credentials.
+
+Repository: <https://github.com/bisq-network/localize-pipeline>
 
 ## Why Use It
 
@@ -22,6 +25,8 @@ model provider and your credentials.
   projects use a profile list.
 - **Reusable by other projects.** The stable surfaces are the `localize` CLI,
   `localize.core`, `localize.formats`, and `localize.providers`.
+- **Agent discoverable.** `llms.txt`, examples, profiles, and docs point agents
+  to stable commands and module boundaries.
 
 ## Quickstart
 
@@ -34,6 +39,8 @@ python3 -m venv venv
 ./venv/bin/pip install -e .
 localize init
 localize check --config config.yaml
+localize doctor --config config.yaml
+localize smoke --config config.yaml
 localize run --dry-run --config config.yaml
 ```
 
@@ -102,7 +109,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/translate-java-property-files@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.0
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -173,6 +180,8 @@ Examples:
 - [examples/generic-json](examples/generic-json) shows JSON.
 - [profiles/bisq](profiles/bisq) is the production Bisq profile with richer
   style and semantic QA rules.
+- [profiles/bisq-mobile](profiles/bisq-mobile) mirrors the production mobile
+  profile shape without secrets.
 
 ## CLI
 
@@ -180,9 +189,12 @@ Examples:
 localize formats
 localize init
 localize check --config config.yaml
+localize doctor --config config.yaml
+localize smoke --config config.yaml
 localize validate --config config.yaml
 localize run --dry-run --config config.yaml
 localize run --config config.yaml
+localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
 localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.0
 localize memory stats --memory-file logs/translation_memory.json
 ```
@@ -232,6 +244,17 @@ Use these packages for reusable code:
 Avoid importing implementation modules directly unless you are contributing to
 this repository.
 
+## Modularity Guardrails
+
+Java properties, JSON, Bisq, and Bisq mobile are supported profiles, not core
+assumptions. New validation, queue handling, prompt behavior, and publishing
+logic should flow through config, adapters, providers, connectors, or profiles.
+
+Before adding another localization format, use
+[docs/new-format-checklist.md](docs/new-format-checklist.md). The minimum bar is
+an adapter, conformance tests, realistic placeholder/escaping coverage, an
+example project, dry-run integration coverage, and docs.
+
 ## Translation Memory
 
 The runtime maintains an exact-match translation memory at
@@ -274,7 +297,7 @@ matches only.
 Pin a tagged release for production workflows once tags are available:
 
 ```yaml
-- uses: bisq-network/translate-java-property-files@v0.1.0
+- uses: bisq-network/localize-pipeline@v0.1.0
 ```
 
 Use `@main` only when you intentionally want the latest unreleased changes.

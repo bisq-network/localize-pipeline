@@ -18,7 +18,9 @@ from localize.app_config import ConfigIssue, validate_config
 from localize.bootstrap_pr import BootstrapPrOptions, create_bootstrap_pr
 from localize.formats import list_localization_adapters, list_localization_formats
 from localize.init_config import main as init_config_main
+from localize.localization_profiles import load_localization_profiles
 from localize.plugins import load_plugins
+from localize.translation_quality_gate import main as translation_quality_gate_main
 from localize.translation_memory import (
     load_translation_memory_strict,
     load_translation_memory,
@@ -109,6 +111,102 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return _cmd_validate_config(args, success_message="Preflight OK")
 
 
+def _resolve_input_folder(config: dict[str, Any]) -> Path:
+    target_root = Path(str(config.get("target_project_root") or ".")).expanduser()
+    input_folder = Path(str(config.get("input_folder") or ".")).expanduser()
+    if not input_folder.is_absolute():
+        input_folder = target_root / input_folder
+    return input_folder.resolve()
+
+
+def _runtime_dir(raw_path: Any, *, config_path: Path) -> Path:
+    path = Path(str(raw_path)).expanduser()
+    if path.is_absolute():
+        return path
+    return (config_path.parent / path).resolve()
+
+
+def _load_checked_config(config_path: Path) -> tuple[dict[str, Any], list[ConfigIssue]]:
+    config = _load_config_file(config_path)
+    review_model_override = os.environ.get("REVIEW_MODEL_NAME")
+    if review_model_override:
+        config = {**config, "review_model_name": review_model_override}
+    issues = validate_config(
+        config,
+        effective_api_base_url=_effective_api_base_url(config),
+        api_key_available=bool(os.environ.get("OPENAI_API_KEY")),
+        dry_run_override=_effective_dry_run_override(),
+    )
+    return config, issues
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        print(f"error: configuration file not found: {config_path}", file=sys.stderr)
+        return 1
+    try:
+        config, issues = _load_checked_config(config_path)
+        profiles = load_localization_profiles(config)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: could not inspect configuration: {exc}", file=sys.stderr)
+        return 1
+
+    profile = os.environ.get("TRANSLATOR_PROFILE") or "default"
+    target_root = Path(str(config.get("target_project_root") or ".")).expanduser().resolve()
+    input_folder = _resolve_input_folder(config)
+    semantic_review = config.get("semantic_review", {}) or {}
+    semantic_status = "enabled" if bool(semantic_review.get("enabled", False)) else "disabled"
+    api_base_url = _effective_api_base_url(config) or "default"
+    model_provider = str(config.get("model_provider", "aisuite"))
+    queue = _runtime_dir(config.get("translation_queue_folder", "translation_queue"), config_path=config_path)
+    translated = _runtime_dir(config.get("translated_queue_folder", "translated_queue"), config_path=config_path)
+    formats = ", ".join(
+        f"{profile.localization_format.id}/{profile.localization_layout.id}"
+        for profile in profiles
+    )
+
+    print("Localize Pipeline doctor")
+    print(f"profile: {profile}")
+    print(f"config: {config_path}")
+    print(f"target_project_root: {target_root}")
+    print(f"input_folder: {input_folder}")
+    print(f"translation_queue_folder: {queue}")
+    print(f"translated_queue_folder: {translated}")
+    print(f"localization_profiles: {formats}")
+    print(f"model_provider: {model_provider}")
+    print(f"model_name: {config.get('model_name', 'gpt-4')}")
+    print(f"review_model_name: {config.get('review_model_name', config.get('model_name', 'gpt-4'))}")
+    print(f"api_base_url: {api_base_url}")
+    print(f"semantic_review: {semantic_status}")
+    print(f"OPENAI_API_KEY: {'set' if os.environ.get('OPENAI_API_KEY') else 'unset'}")
+    _print_config_issues(issues)
+    return 1 if any(issue.level == "error" for issue in issues) else 0
+
+
+def _cmd_smoke(args: argparse.Namespace) -> int:
+    config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        print(f"error: configuration file not found: {config_path}", file=sys.stderr)
+        return 1
+    try:
+        config, issues = _load_checked_config(config_path)
+        load_localization_profiles(config)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: smoke check failed: {exc}", file=sys.stderr)
+        return 1
+    _print_config_issues(issues)
+    if any(issue.level == "error" for issue in issues):
+        return 1
+
+    queue = _runtime_dir(config.get("translation_queue_folder", "translation_queue"), config_path=config_path)
+    translated = _runtime_dir(config.get("translated_queue_folder", "translated_queue"), config_path=config_path)
+    queue.mkdir(parents=True, exist_ok=True)
+    translated.mkdir(parents=True, exist_ok=True)
+    print("Smoke OK")
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
     os.environ["TRANSLATOR_CONFIG_FILE"] = str(config_path)
@@ -158,6 +256,28 @@ def _cmd_bootstrap_pr(args: argparse.Namespace) -> int:
     else:
         print("Review the branch, then push/open a pull request when ready")
     return 0
+
+
+def _cmd_quality_gate(args: argparse.Namespace) -> int:
+    quality_args = [
+        "--repo-root",
+        args.repo_root,
+        "--input-folder",
+        args.input_folder,
+        "--config",
+        args.config,
+        "--validation-summary",
+        args.validation_summary,
+        "--output-json",
+        args.output_json,
+        "--output-markdown",
+        args.output_markdown,
+    ]
+    if args.audit_scope:
+        quality_args.extend(["--audit-scope", args.audit_scope])
+    quality_args.append("--changed-files")
+    quality_args.extend(args.changed_files)
+    return int(translation_quality_gate_main(quality_args))
 
 
 def _print_memory_stats(args: argparse.Namespace) -> int:
@@ -332,6 +452,20 @@ def _build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
     check_parser.set_defaults(func=_cmd_check)
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Print redacted effective config for deploy/debug checks.",
+    )
+    doctor_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    doctor_parser.set_defaults(func=_cmd_doctor)
+
+    smoke_parser = subparsers.add_parser(
+        "smoke",
+        help="Run read-only startup checks and create runtime scratch directories.",
+    )
+    smoke_parser.add_argument("--config", default="config.yaml", help="Path to config.yaml.")
+    smoke_parser.set_defaults(func=_cmd_smoke)
+
     run_parser = subparsers.add_parser(
         "run",
         help="Run the configured translation pipeline.",
@@ -408,6 +542,20 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--push", action="store_true", help="Push the onboarding branch to origin.")
     bootstrap_parser.add_argument("--open-pr", action="store_true", help="Push and open the onboarding PR with gh.")
     bootstrap_parser.set_defaults(func=_cmd_bootstrap_pr)
+
+    quality_parser = subparsers.add_parser(
+        "quality-gate",
+        help="Recompute the translation quality gate report for changed files.",
+    )
+    quality_parser.add_argument("--repo-root", required=True)
+    quality_parser.add_argument("--input-folder", required=True)
+    quality_parser.add_argument("--config", required=True)
+    quality_parser.add_argument("--validation-summary", required=True)
+    quality_parser.add_argument("--output-json", required=True)
+    quality_parser.add_argument("--output-markdown", required=True)
+    quality_parser.add_argument("--changed-files", nargs="+", required=True)
+    quality_parser.add_argument("--audit-scope", choices=["changed", "all"], default=None)
+    quality_parser.set_defaults(func=_cmd_quality_gate)
 
     memory_parser = subparsers.add_parser(
         "memory",
