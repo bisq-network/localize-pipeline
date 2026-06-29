@@ -34,29 +34,48 @@ def _homepage_links() -> list[str]:
 def test_docs_homepage_is_packaged_for_github_pages():
     homepage = DOCS_ROOT / "index.html"
     stylesheet = DOCS_ROOT / "assets" / "site.css"
+    bisq_logo = DOCS_ROOT / "assets" / "bisq-logo.svg"
     readme = PROJECT_ROOT / "README.md"
 
     assert homepage.exists()
     assert stylesheet.exists()
+    assert bisq_logo.exists()
 
     html = homepage.read_text(encoding="utf-8")
     css = stylesheet.read_text(encoding="utf-8")
+    logo_svg = bisq_logo.read_text(encoding="utf-8")
 
     assert "<title>Localize Pipeline" in html
     assert '<meta property="og:title"' in html
     assert 'href="https://bisq.network/css/fonts.css"' in html
     assert 'href="assets/site.css"' in html
+    assert 'src="assets/bisq-logo.svg"' in html
+    assert 'alt="Bisq"' in html
     assert 'href="#content"' in html
     assert 'id="content"' in html
     assert "Agent entry points" in html
+    assert "Production credits" in html
+    assert "Bisq 2" in html
+    assert "Bisq Mobile" in html
+    assert "54 target locales" in html
+    assert "13 mobile target locales" in html
+    assert "14 languages including English" in html
+    assert "battle-tested" in html
     assert "localize bootstrap-pr" in html
     assert "localize memory stats" in html
     assert "GitHub Action" in html
     assert "Java .properties" in html
     assert "JSON" in html
     assert ">LP<" not in html
+    assert "brand-mark" not in html
     assert "served by GitHub Pages" not in html
+    assert 'fill="#25B135"' in logo_svg
     assert ".hero" in css
+    assert ".brand-logo" in css
+    assert ".credit-band" in css
+    assert ".run-panel {\n  min-width: 0;" in css
+    assert ".run-panel code {\n  white-space: pre-wrap;" in css
+    assert "overflow-wrap: anywhere;" in css
     assert ".skip-link:focus" in css
     assert "#25b135" in css
     assert "IBM Plex Sans" in css

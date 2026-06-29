@@ -32,11 +32,7 @@
 
     <header class="site-header">
       <a class="brand" href="index.html" aria-label="Localize Pipeline docs homepage">
-        <span class="brand-mark" aria-hidden="true">
-          <span></span>
-          <span></span>
-          <span></span>
-        </span>
+        <img class="brand-logo" src="assets/bisq-logo.svg" alt="Bisq" width="98" height="34">
         <span class="brand-copy">
           <strong>Localize Pipeline</strong>
           <small>Bisq Network tooling</small>
@@ -115,6 +111,30 @@ localize quality-gate --repo-root . --changed-files ...</code></pre>
           <a href="https://github.com/bisq-network/localize-pipeline/blob/main/llms.txt">llms.txt</a>
           <a href="repository-structure.md">Repository structure</a>
           <a href="localization-cli.md">CLI commands</a>
+        </div>
+      </section>
+
+      <section class="credit-band" aria-labelledby="credits-title">
+        <div>
+          <p class="eyebrow">Production credits</p>
+          <h2 id="credits-title">Battle-tested by Bisq maintainers.</h2>
+        </div>
+        <p>
+          Localize Pipeline runs the scheduled localization workflow for Bisq 2
+          and Bisq Mobile. It is battle-tested in production, where generated
+          translations land as ordinary GitHub pull requests for maintainer review.
+          Bisq 2 is configured for 54 target locales; Bisq Mobile currently
+          carries 13 mobile target locales, or 14 languages including English.
+        </p>
+        <div class="credit-projects" aria-label="Production users">
+          <a href="https://github.com/bisq-network/bisq2">
+            <span>Bisq 2</span>
+            <strong>54 target locales</strong>
+          </a>
+          <a href="https://github.com/bisq-network/bisq-mobile">
+            <span>Bisq Mobile</span>
+            <strong>13 mobile target locales, 14 languages including English</strong>
+          </a>
         </div>
       </section>
 

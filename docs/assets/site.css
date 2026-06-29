@@ -100,34 +100,11 @@ pre {
   min-width: 0;
 }
 
-.brand-mark {
-  display: grid;
-  grid-template-columns: repeat(3, 4px);
-  gap: 4px;
-  align-items: end;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 auto;
-  background: var(--green);
-}
-
-.brand-mark span {
+.brand-logo {
   display: block;
-  width: 4px;
-  background: var(--white);
-}
-
-.brand-mark span:nth-child(1) {
-  height: 13px;
-}
-
-.brand-mark span:nth-child(2) {
-  height: 22px;
-}
-
-.brand-mark span:nth-child(3) {
-  height: 17px;
+  width: 98px;
+  height: auto;
+  flex: 0 0 auto;
 }
 
 .brand-copy {
@@ -284,6 +261,7 @@ h3 {
 }
 
 .run-panel {
+  min-width: 0;
   border: 1px solid var(--line);
   background: var(--white);
   box-shadow: var(--shadow);
@@ -358,22 +336,30 @@ h3 {
 }
 
 .run-panel pre {
+  max-width: 100%;
   padding: 20px;
 }
 
 .run-panel code {
-  white-space: pre;
+  white-space: pre-wrap;
+  display: block;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
 }
 
-.agent-strip {
+.agent-strip,
+.credit-band {
   display: grid;
   grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1fr) auto;
   gap: 24px;
   align-items: center;
-  margin-bottom: 76px;
   padding: 26px 0;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
+}
+
+.agent-strip {
+  margin-bottom: 0;
 }
 
 .agent-strip h2 {
@@ -381,9 +367,54 @@ h3 {
   font-size: 28px;
 }
 
-.agent-strip p {
+.agent-strip p,
+.credit-band p {
   margin-bottom: 0;
   color: var(--muted);
+}
+
+.credit-band {
+  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1fr) minmax(280px, 0.76fr);
+  margin-bottom: 76px;
+  border-top: 0;
+  background: linear-gradient(90deg, transparent, rgb(37 177 53 / 7%), transparent);
+}
+
+.credit-band h2 {
+  margin-bottom: 0;
+  font-size: 28px;
+}
+
+.credit-projects {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.credit-projects a {
+  display: grid;
+  gap: 3px;
+  padding: 14px 16px;
+  background: var(--white);
+  transition:
+    background-color 160ms ease-out,
+    color 160ms ease-out;
+}
+
+.credit-projects a:hover {
+  background: var(--soft-green);
+  color: var(--green-dark);
+}
+
+.credit-projects span {
+  font-weight: 700;
+}
+
+.credit-projects strong {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
 }
 
 .agent-links {
@@ -568,6 +599,7 @@ h3 {
   }
 
   .agent-strip,
+  .credit-band,
   .split {
     grid-template-columns: 1fr;
   }
@@ -615,6 +647,10 @@ h3 {
   }
 
   .agent-strip {
+    margin-bottom: 42px;
+  }
+
+  .credit-band {
     margin-bottom: 42px;
   }
 
