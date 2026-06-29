@@ -29,24 +29,49 @@ class TestCoreLogic(unittest.TestCase):
 
     def test_validate_paths_creates_missing_queue_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            input_folder = os.path.join(temp_dir, 'i18n')
+            repo_root = os.path.join(temp_dir, 'repo')
+            input_folder = os.path.join(repo_root, 'i18n')
             queue_folder = os.path.join(temp_dir, 'translation_queue')
             translated_folder = os.path.join(temp_dir, 'translated_queue')
-            os.mkdir(input_folder)
+            os.makedirs(input_folder)
 
-            validate_paths(input_folder, queue_folder, translated_folder, temp_dir)
+            validate_paths(input_folder, queue_folder, translated_folder, repo_root)
 
             self.assertTrue(os.path.isdir(queue_folder))
             self.assertTrue(os.path.isdir(translated_folder))
 
     def test_validate_paths_rejects_queue_path_collisions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            input_folder = os.path.join(temp_dir, 'i18n')
-            translated_folder = os.path.join(temp_dir, 'translated_queue')
-            os.mkdir(input_folder)
+            repo_root = os.path.join(temp_dir, 'repo')
+            input_folder = os.path.join(repo_root, 'i18n')
+            safe_queue = os.path.join(temp_dir, 'translation_queue')
+            safe_translated = os.path.join(temp_dir, 'translated_queue')
+            os.makedirs(input_folder)
 
-            with self.assertRaisesRegex(ValueError, 'separate from repo_root and input_folder'):
-                validate_paths(input_folder, input_folder, translated_folder, temp_dir)
+            unsafe_cases = [
+                (input_folder, safe_translated),
+                (os.path.join(repo_root, '.translation_queue'), safe_translated),
+                (temp_dir, safe_translated),
+                (safe_queue, os.path.join(input_folder, 'translated_queue')),
+            ]
+
+            for queue_folder, translated_folder in unsafe_cases:
+                with self.subTest(queue_folder=queue_folder, translated_folder=translated_folder):
+                    with self.assertRaisesRegex(ValueError, 'separate from repo_root and input_folder'):
+                        validate_paths(input_folder, queue_folder, translated_folder, repo_root)
+
+    def test_validate_paths_rejects_existing_queue_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = os.path.join(temp_dir, 'repo')
+            input_folder = os.path.join(repo_root, 'i18n')
+            queue_file = os.path.join(temp_dir, 'translation_queue')
+            translated_folder = os.path.join(temp_dir, 'translated_queue')
+            os.makedirs(input_folder)
+            with open(queue_file, 'w', encoding='utf-8') as file:
+                file.write('not a directory')
+
+            with self.assertRaises(NotADirectoryError):
+                validate_paths(input_folder, queue_file, translated_folder, repo_root)
 
     def test_parse_properties_file_with_multiline_values(self):
         """

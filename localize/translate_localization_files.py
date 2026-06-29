@@ -1565,6 +1565,18 @@ def copy_translated_files_back(
                     shutil.copy2(translated_file_path, dest_path)
                     logger.info(f"Copied translated file '{translated_file_path}' back to '{dest_path}'.")
 
+def _real_path(path: str) -> str:
+    return os.path.realpath(os.path.abspath(path))
+
+
+def _paths_overlap(first_path: str, second_path: str) -> bool:
+    try:
+        common_path = os.path.commonpath([first_path, second_path])
+    except ValueError:
+        return False
+    return common_path in {first_path, second_path}
+
+
 def validate_paths(input_folder: str, translation_queue: str, translated_queue: str, repo_root: str):
     """
     Validate that the input and queue folders are usable.
@@ -1576,17 +1588,19 @@ def validate_paths(input_folder: str, translation_queue: str, translated_queue: 
         repo_root (str): Path to the Git repository root.
     """
     protected_paths = {
-        os.path.abspath(input_folder),
-        os.path.abspath(repo_root),
+        "Input Folder": _real_path(input_folder),
+        "Repository Root": _real_path(repo_root),
     }
     queue_paths = {
-        os.path.abspath(translation_queue): "Translation Queue Folder",
-        os.path.abspath(translated_queue): "Translated Queue Folder",
+        _real_path(translation_queue): "Translation Queue Folder",
+        _real_path(translated_queue): "Translated Queue Folder",
     }
     if len(queue_paths) != 2:
         raise ValueError("translation_queue and translated_queue must be different folders.")
-    if any(path in protected_paths for path in queue_paths):
-        raise ValueError("Queue folders must be separate from repo_root and input_folder.")
+    for queue_path in queue_paths:
+        for protected_path in protected_paths.values():
+            if _paths_overlap(queue_path, protected_path):
+                raise ValueError("Queue folders must be separate from repo_root and input_folder.")
 
     for path, name in [(input_folder, "Input Folder"), (repo_root, "Repository Root")]:
         if not os.path.exists(path):
@@ -1599,10 +1613,10 @@ def validate_paths(input_folder: str, translation_queue: str, translated_queue: 
             logger.error("%s '%s' is not accessible (required perms: %s).", name, path, "R+W" if required & os.W_OK else "R")
             raise PermissionError(f"{name} '{path}' lacks required permissions.")
     for path, name in queue_paths.items():
-        os.makedirs(path, exist_ok=True)
-        if not os.path.isdir(path):
+        if os.path.exists(path) and not os.path.isdir(path):
             logger.error("%s '%s' is not a directory.", name, path)
             raise NotADirectoryError(f"{name} '{path}' is not a directory.")
+        os.makedirs(path, exist_ok=True)
         if not os.access(path, os.R_OK | os.W_OK):
             logger.error("%s '%s' is not accessible (required perms: R+W).", name, path)
             raise PermissionError(f"{name} '{path}' lacks required permissions.")

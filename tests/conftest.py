@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 from unittest.mock import patch
 
 import pytest
@@ -12,10 +13,11 @@ def integration_test_paths():
     """Session-scoped fixture to define the absolute paths for test directories."""
     tests_root = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(tests_root, '..'))
-    # Place temp dirs in the root of the tests folder for simplicity
+    scratch_root = tempfile.mkdtemp(prefix='localize_integration_')
+    # Keep the input folder under tests, but place scratch queues outside the repo.
     input_dir = os.path.join(tests_root, 'temp_integration_input')
-    translation_queue_dir = os.path.join(tests_root, 'temp_integration_translation_queue')
-    translated_queue_dir = os.path.join(tests_root, 'temp_integration_translated_queue')
+    translation_queue_dir = os.path.join(scratch_root, 'translation_queue')
+    translated_queue_dir = os.path.join(scratch_root, 'translated_queue')
     mock_glossary_path = os.path.join(tests_root, 'temp_mock_glossary.json')
     translation_memory_path = os.path.join(tests_root, 'temp_translation_memory.json')
 
@@ -25,6 +27,7 @@ def integration_test_paths():
         "translated_queue_folder": translated_queue_dir,
         "mock_glossary_path": mock_glossary_path,
         "translation_memory_path": translation_memory_path,
+        "scratch_root": scratch_root,
         "project_root": project_root
     }
 
@@ -90,6 +93,8 @@ def setup_global_test_environment(integration_test_paths):
                 logging.error(f"Failed to delete directory {folder}. Reason: {e}")
     if os.path.exists(paths['translation_memory_path']):
         os.remove(paths['translation_memory_path'])
+    if os.path.exists(paths['scratch_root']):
+        shutil.rmtree(paths['scratch_root'])
 
 
 @pytest.fixture
