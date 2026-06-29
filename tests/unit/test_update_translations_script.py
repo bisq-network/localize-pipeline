@@ -101,6 +101,9 @@ def test_smoke_only_mode_runs_before_pending_pr_guard():
     pending_guard_index = script.index("Checking for manually-blocked PRs")
 
     assert "run_smoke_only_if_requested()" in script
+    assert 'local app_root="${APP_ROOT:-/app}"' in script
+    assert '( cd "$app_root" && python3 -m localize.cli doctor --config "$CONFIG_FILE" )' in script
+    assert '( cd "$app_root" && python3 -m localize.cli smoke --config "$CONFIG_FILE" )' in script
     assert "python3 -m localize.cli doctor" in script
     assert "python3 -m localize.cli smoke" in script
     assert smoke_index < pending_guard_index

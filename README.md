@@ -121,11 +121,11 @@ incremental runs.
 
 Full guide: [docs/github-action.md](docs/github-action.md).
 
-## Documentation Site
+## Documentation
 
-The polished docs entry point is [docs/index.html](docs/index.html). It is a
-static page that can be served by GitHub Pages from the `docs/` directory or
-opened directly in a browser.
+Start with the agent-readable index in [llms.txt](llms.txt), then use the
+developer guide in [docs/index.html](docs/index.html) for setup, configuration,
+CLI commands, and supported localization formats.
 
 ## Configuration Model
 

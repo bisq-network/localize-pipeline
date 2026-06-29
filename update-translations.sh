@@ -117,9 +117,13 @@ run_smoke_only_if_requested() {
     fi
 
     resolve_config_file
+    local app_root="${APP_ROOT:-/app}"
+    if [ ! -d "$app_root" ]; then
+        app_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    fi
     log "Running smoke-only deployment verification with configuration file: $CONFIG_FILE"
-    python3 -m localize.cli doctor --config "$CONFIG_FILE"
-    python3 -m localize.cli smoke --config "$CONFIG_FILE"
+    ( cd "$app_root" && python3 -m localize.cli doctor --config "$CONFIG_FILE" )
+    ( cd "$app_root" && python3 -m localize.cli smoke --config "$CONFIG_FILE" )
     record_pipeline_event "smoke_only_ok" "config=$CONFIG_FILE"
     send_heartbeat_if_configured "smoke_only_ok"
     exit 0
