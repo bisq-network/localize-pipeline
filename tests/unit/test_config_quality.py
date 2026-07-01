@@ -119,6 +119,7 @@ def test_release_maturity_docs_are_packaged():
 
     assert changelog.exists()
     changelog_text = changelog.read_text(encoding="utf-8")
+    assert "## [0.1.3]" in changelog_text
     assert "## [0.1.2]" in changelog_text
     assert "## [0.1.1]" in changelog_text
     assert "## [0.1.0]" in changelog_text

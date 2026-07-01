@@ -5,6 +5,17 @@ All notable changes to Localize Pipeline are documented here.
 This project follows semantic versioning once tagged releases begin. Until a
 stable `1.0.0`, minor releases may still refine public APIs with migration notes.
 
+## [0.1.3] - 2026-07-01
+
+### Fixed
+
+- Shortened the GitHub Action description so the action can be published to the
+  GitHub Marketplace.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.3`.
+
 ## [0.1.2] - 2026-07-01
 
 ### Added

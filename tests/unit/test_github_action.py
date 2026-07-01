@@ -18,6 +18,10 @@ def test_action_exists_and_is_composite(action):
     assert action["runs"]["using"] == "composite"
 
 
+def test_action_description_is_marketplace_publishable(action):
+    assert len(action["description"]) < 125
+
+
 def test_supports_byo_key_and_local_endpoint(action):
     inputs = action["inputs"]
     assert "openai-api-key" in inputs
