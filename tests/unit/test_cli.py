@@ -378,7 +378,7 @@ def test_cli_bootstrap_pr_delegates_to_onboarding_generator(capsys):
             "--input-folder",
             "i18n",
             "--action-ref",
-            "v0.1.0",
+            "v0.1.1",
             "--plugin-module",
             "target_repo.localize_adapter",
             "--plugin-install-command",
@@ -390,7 +390,7 @@ def test_cli_bootstrap_pr_delegates_to_onboarding_generator(capsys):
     options = create.call_args.args[0]
     assert options.target_project_root == "/repo"
     assert options.input_folder == "i18n"
-    assert options.action_ref == "v0.1.0"
+    assert options.action_ref == "v0.1.1"
     assert options.plugin_modules == ("target_repo.localize_adapter",)
     assert options.plugin_install_command == "python -m pip install ."
     assert "Created onboarding commit abc123" in captured.out

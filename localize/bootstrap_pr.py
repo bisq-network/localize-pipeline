@@ -30,7 +30,7 @@ class BootstrapPrOptions:
     workflow_path: str = ".github/workflows/translate.yml"
     branch_name: str = "localize/onboarding"
     base_branch: Optional[str] = None
-    action_ref: str = "v0.1.0"
+    action_ref: str = "v0.1.1"
     commit_message: str = "Add Localize Pipeline onboarding"
     pr_title: str = "Add Localize Pipeline onboarding"
     overwrite: bool = False

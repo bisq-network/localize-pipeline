@@ -10,6 +10,8 @@ model provider and your credentials.
 
 Repository: <https://github.com/bisq-network/localize-pipeline>
 
+Rendered docs: <https://bisq-network.github.io/localize-pipeline/>
+
 ## Why Use It
 
 - **Runs in your infrastructure.** Use GitHub Actions, local CLI runs, or a Docker
@@ -109,7 +111,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.1
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -119,13 +121,22 @@ The action translates only files changed since the configured diff base. Use
 `process-all-files: true` once for an initial backfill, then return to
 incremental runs.
 
+Before enabling live PR creation in a target repo, add the `OPENAI_API_KEY`
+repository secret and set the repository's Actions workflow permissions to
+allow write tokens and workflow-created pull requests. The workflow-level
+`contents: write` and `pull-requests: write` permissions are necessary but not
+sufficient if repository or organization settings keep the default token
+read-only.
+
 Full guide: [docs/github-action.md](docs/github-action.md).
 
 ## Documentation
 
-Start with the agent-readable index in [llms.txt](llms.txt), then use the
-developer guide in [docs/index.html](docs/index.html) for setup, configuration,
-CLI commands, and supported localization formats.
+Start with the rendered developer guide at
+<https://bisq-network.github.io/localize-pipeline/>. The source lives in
+[docs/index.html](docs/index.html). Agents should start with the
+agent-readable index in [llms.txt](llms.txt), then use the developer guide for
+setup, configuration, CLI commands, and supported localization formats.
 
 ## Configuration Model
 
@@ -195,7 +206,7 @@ localize validate --config config.yaml
 localize run --dry-run --config config.yaml
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.0
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.1
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
@@ -215,7 +226,7 @@ Full guide: [docs/localization-cli.md](docs/localization-cli.md).
 To onboard another repository without hand-copying files, run:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.0
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.1
 ```
 
 The command refuses dirty worktrees, creates a `localize/onboarding` branch, and
@@ -297,7 +308,7 @@ matches only.
 Pin a tagged release for production workflows once tags are available:
 
 ```yaml
-- uses: bisq-network/localize-pipeline@v0.1.0
+- uses: bisq-network/localize-pipeline@v0.1.1
 ```
 
 Use `@main` only when you intentionally want the latest unreleased changes.
@@ -336,6 +347,12 @@ Server guide: [docs/new-project-deployment.md](docs/new-project-deployment.md).
 - **Quality gate failed:** inspect the PR report. The pipeline reports skipped
   files, placeholder errors, semantic findings, and suspicious source-identical
   values.
+- **Action pushed a branch but failed to create a PR:** enable repository
+  Actions workflow write permissions and allow workflow-created pull requests
+  in the target repository settings.
+- **Unexpected archive files in a generated PR:** ignore the pipeline archive
+  folder under your localization input folder, for example
+  `/src/main/resources/archive/` for Java `.properties` suffix layouts.
 - **Model parameter errors:** completion-token caps are normalized at the provider
   boundary. Use `model_provider: aisuite` unless you need the direct
   `openai_compatible` fallback.
