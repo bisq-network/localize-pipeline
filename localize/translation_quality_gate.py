@@ -9,10 +9,11 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Pattern, Sequence, Tuple
 
 import yaml
 
+from localize.ignore_keys import compile_ignore_key_patterns, is_ignored_key
 from localize.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat, load_localization_format
 from localize.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout, load_localization_layout
 from localize.localization_profiles import LocalizationProfile, load_localization_profiles
@@ -43,6 +44,22 @@ class QualityGateConfig:
     block_on_semantic_qa_warnings: bool = False
     semantic_qa_audit_scope: str = "changed"
     retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    ignore_key_patterns: List[Pattern[str]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "source_identical_min_block_count": self.source_identical_min_block_count,
+            "source_identical_max_count": self.source_identical_max_count,
+            "source_identical_max_ratio": self.source_identical_max_ratio,
+            "block_on_pipeline_warnings": self.block_on_pipeline_warnings,
+            "block_on_semantic_qa_findings": self.block_on_semantic_qa_findings,
+            "block_on_semantic_qa_warnings": self.block_on_semantic_qa_warnings,
+            "semantic_qa_audit_scope": self.semantic_qa_audit_scope,
+            "retained_source_word_allowlist": self.retained_source_word_allowlist,
+            "ignore_key_patterns": [
+                pattern.pattern for pattern in self.ignore_key_patterns
+            ],
+        }
 
 
 @dataclass
@@ -107,6 +124,7 @@ def analyze_source_identical_changes(
     examples_limit: int = 10,
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
+    ignore_key_patterns: Sequence[Pattern[str] | str] = (),
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
     changes = iter_translation_changes_from_diff(
@@ -122,17 +140,39 @@ def analyze_source_identical_changes(
         changes=changes,
         brand_glossary=brand_glossary,
         examples_limit=examples_limit,
+        ignore_key_patterns=_ensure_ignore_key_patterns(ignore_key_patterns),
     )
+
+
+def _ensure_ignore_key_patterns(
+    patterns: Sequence[Pattern[str] | str],
+) -> List[Pattern[str]]:
+    if not patterns:
+        return []
+    if all(hasattr(pattern, "search") for pattern in patterns):
+        return list(patterns)  # type: ignore[list-item]
+    return compile_ignore_key_patterns(patterns)  # type: ignore[arg-type]
+
+
+def _filter_ignored_changes(
+    changes: Iterable[TranslationChange],
+    ignore_key_patterns: Sequence[Pattern[str]],
+) -> Iterable[TranslationChange]:
+    for change in changes:
+        if is_ignored_key(change.key, ignore_key_patterns):
+            continue
+        yield change
 
 
 def _analyze_source_identical_translation_changes(
     changes: Iterable[TranslationChange],
     brand_glossary: Iterable[str],
     examples_limit: int,
+    ignore_key_patterns: Sequence[Pattern[str]] = (),
 ) -> SourceIdenticalStats:
     stats = SourceIdenticalStats()
 
-    for change in changes:
+    for change in _filter_ignored_changes(changes, ignore_key_patterns):
         if change.source_value is None:
             continue
 
@@ -232,6 +272,7 @@ def analyze_source_identical_changes_for_profiles(
     brand_glossary: Iterable[str],
     localization_profiles: Sequence[LocalizationProfile],
     examples_limit: int = 10,
+    ignore_key_patterns: Sequence[Pattern[str]] = (),
 ) -> SourceIdenticalStats:
     """Analyze suspicious source-identical changes across configured profiles."""
     return _analyze_source_identical_translation_changes(
@@ -246,6 +287,7 @@ def analyze_source_identical_changes_for_profiles(
         ),
         brand_glossary=brand_glossary,
         examples_limit=examples_limit,
+        ignore_key_patterns=ignore_key_patterns,
     )
 
 
@@ -260,6 +302,7 @@ def analyze_semantic_qa_changes(
     examples_limit: int = 10,
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
+    ignore_key_patterns: Sequence[Pattern[str] | str] = (),
 ) -> SemanticQAStats:
     """Scan changed translations for configured semantic regressions."""
     changes = list(
@@ -272,8 +315,9 @@ def analyze_semantic_qa_changes(
             localization_layout=localization_layout,
         )
     )
+    compiled_ignore_key_patterns = _ensure_ignore_key_patterns(ignore_key_patterns)
     return analyze_translation_changes(
-        changes=changes,
+        changes=list(_filter_ignored_changes(changes, compiled_ignore_key_patterns)),
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
         retained_source_word_allowlist=retained_source_word_allowlist,
@@ -291,6 +335,7 @@ def analyze_semantic_qa_changes_for_profiles(
     retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     localization_profiles: Sequence[LocalizationProfile] = (),
     examples_limit: int = 10,
+    ignore_key_patterns: Sequence[Pattern[str]] = (),
 ) -> SemanticQAStats:
     """Scan changed translations across all configured format/layout profiles."""
     changes = _deduplicate_translation_changes(
@@ -303,7 +348,7 @@ def analyze_semantic_qa_changes_for_profiles(
         )
     )
     return analyze_translation_changes(
-        changes=changes,
+        changes=list(_filter_ignored_changes(changes, ignore_key_patterns)),
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
         retained_source_word_allowlist=retained_source_word_allowlist,
@@ -320,6 +365,7 @@ def analyze_all_translation_entries_for_profiles(
     retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     localization_profiles: Sequence[LocalizationProfile] = (),
     examples_limit: int = 10,
+    ignore_key_patterns: Sequence[Pattern[str]] = (),
 ) -> SemanticQAStats:
     """Scan all translations across all configured format/layout profiles."""
     changes = _deduplicate_translation_changes(
@@ -331,7 +377,7 @@ def analyze_all_translation_entries_for_profiles(
         )
     )
     return analyze_translation_changes(
-        changes=changes,
+        changes=list(_filter_ignored_changes(changes, ignore_key_patterns)),
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
         retained_source_word_allowlist=retained_source_word_allowlist,
@@ -371,6 +417,9 @@ def load_quality_gate_config(
             ),
             retained_source_word_allowlist=normalize_retained_source_word_allowlist(
                 quality_gate.get("retained_source_word_allowlist", {})
+            ),
+            ignore_key_patterns=compile_ignore_key_patterns(
+                raw_config.get("ignore_key_patterns", [])
             ),
         ),
         locales,
@@ -582,7 +631,7 @@ def build_quality_gate_report(
         "validation": validation_totals,
         "pipeline_warnings_count": len(pipeline_warnings),
         "pipeline_warnings": pipeline_warnings,
-        "thresholds": asdict(config),
+        "thresholds": config.to_dict(),
     }
 
 
@@ -726,6 +775,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         locale_codes=locale_codes,
         brand_glossary=brand_glossary,
         localization_profiles=localization_profiles,
+        ignore_key_patterns=config.ignore_key_patterns,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
@@ -737,6 +787,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             semantic_rules=semantic_rules,
             retained_source_word_allowlist=config.retained_source_word_allowlist,
             localization_profiles=localization_profiles,
+            ignore_key_patterns=config.ignore_key_patterns,
         )
     else:
         semantic_stats = analyze_semantic_qa_changes_for_profiles(
@@ -748,6 +799,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             semantic_rules=semantic_rules,
             retained_source_word_allowlist=config.retained_source_word_allowlist,
             localization_profiles=localization_profiles,
+            ignore_key_patterns=config.ignore_key_patterns,
         )
     report = build_quality_gate_report(
         source_stats=source_stats,

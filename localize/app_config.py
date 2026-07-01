@@ -4,11 +4,12 @@ import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Pattern, Tuple
 
 import yaml
 from dotenv import load_dotenv
 
+from localize.ignore_keys import compile_ignore_key_patterns
 from localize.logging_config import setup_logger
 from localize.localization_formats import (
     JAVA_PROPERTIES_FORMAT,
@@ -72,6 +73,7 @@ class AppConfig:
     style_rules: Dict[str, List[str]]
     precomputed_style_rules_text: Dict[str, str]
     brand_glossary: List[str]
+    ignore_key_patterns: List[Pattern[str]]
 
     # Queue settings
     translation_queue_folder: str
@@ -544,6 +546,7 @@ def load_app_config() -> AppConfig:
         logger.critical("CRITICAL: %s", exc)
         sys.exit(1)
     retranslate_identical_source_strings = bool(config.get('retranslate_identical_source_strings', False))
+    ignore_key_patterns = compile_ignore_key_patterns(config.get('ignore_key_patterns', []))
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(
         source_identical_min_block_count=int(quality_gate_config.get('source_identical_min_block_count', 5)),
@@ -642,6 +645,7 @@ def load_app_config() -> AppConfig:
         style_rules=style_rules,
         precomputed_style_rules_text=precomputed_style_rules_text,
         brand_glossary=[str(term) for term in (config.get('brand_technical_glossary') or [])],
+        ignore_key_patterns=ignore_key_patterns,
         translation_queue_folder=translation_queue_folder,
         translated_queue_folder=translated_queue_folder,
         translation_key_ledger_file_path=translation_key_ledger_file_path,

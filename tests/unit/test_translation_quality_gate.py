@@ -177,6 +177,23 @@ def test_quality_gate_config_loads_ignore_key_patterns(tmp_path):
     config, _locale_codes, _brand_glossary, _rules = load_quality_gate_config(str(config_path))
 
     assert [pattern.pattern for pattern in config.ignore_key_patterns] == [r"^/#\d+$"]
+    report = build_quality_gate_report(
+        source_stats=analyze_source_identical_changes(
+            diff_text="",
+            repo_root=str(tmp_path),
+            input_folder=str(tmp_path),
+            locale_codes=["de"],
+            brand_glossary=[],
+            ignore_key_patterns=config.ignore_key_patterns,
+        ),
+        semantic_stats=None,
+        validation_summary={"files": {}, "pipeline_warnings": []},
+        changed_files=[],
+        input_folder=str(tmp_path),
+        config=config,
+    )
+    assert report["thresholds"]["ignore_key_patterns"] == [r"^/#\d+$"]
+    json.dumps(report["thresholds"])
 
 
 def test_quality_gate_localization_metadata_rejects_invalid_format(tmp_path):

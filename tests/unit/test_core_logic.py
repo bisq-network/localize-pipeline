@@ -13,6 +13,7 @@ os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY_FOR_TESTING'
 # This might require adjusting the Python path if the test runner doesn't handle it.
 from localize.translate_localization_files import (
     build_context,
+    apply_ignored_source_values,
     normalize_value,
     compute_ledger_hash,
     extract_texts_to_translate,
@@ -391,6 +392,36 @@ class TestCoreLogic(unittest.TestCase):
 
         self.assertEqual(baseline, explicit_empty)
         self.assertEqual(baseline[2], ['/#1', '/welcome'])
+
+    def test_empty_ignore_patterns_do_not_rewrite_content(self):
+        """Empty ignore_key_patterns should be byte-for-byte inert."""
+        content = textwrap.dedent("""\
+            # Existing target file
+            comment.1=Phrases in basic/Main.tsx
+            welcome=Willkommen
+        """)
+        with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+
+        try:
+            parsed_lines, target_translations = parse_properties_file(temp_file_path)
+            before = reassemble_file(parsed_lines)
+
+            updated_keys = apply_ignored_source_values(
+                parsed_lines,
+                target_translations,
+                {
+                    'comment.1': 'Phrases in basic/Main.tsx',
+                    'welcome': 'Welcome',
+                },
+                [],
+            )
+
+            self.assertEqual(updated_keys, set())
+            self.assertEqual(reassemble_file(parsed_lines), before)
+        finally:
+            os.unlink(temp_file_path)
 
     def test_per_key_validation_excludes_ignored_keys_from_failures(self):
         valid_translations, summary = run_per_key_validation_with_summary(
