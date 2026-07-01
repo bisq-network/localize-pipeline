@@ -118,7 +118,10 @@ def test_release_maturity_docs_are_packaged():
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert changelog.exists()
-    assert "## [0.1.0]" in changelog.read_text(encoding="utf-8")
+    changelog_text = changelog.read_text(encoding="utf-8")
+    assert "## [0.1.2]" in changelog_text
+    assert "## [0.1.1]" in changelog_text
+    assert "## [0.1.0]" in changelog_text
     assert "Pin a tagged release" in readme
 
 

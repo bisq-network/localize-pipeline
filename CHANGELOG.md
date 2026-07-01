@@ -5,6 +5,31 @@ All notable changes to Localize Pipeline are documented here.
 This project follows semantic versioning once tagged releases begin. Until a
 stable `1.0.0`, minor releases may still refine public APIs with migration notes.
 
+## [0.1.2] - 2026-07-01
+
+### Added
+
+- Optional SSH commit signing for generated GitHub Action translation PRs.
+- Generated PR descriptions based on translation summary, validation summary,
+  and token usage JSON files.
+- Workflow artifact upload for translation summaries and skipped-file reports.
+
+### Changed
+
+- The GitHub Action PR step stages only configured localization output and
+  excludes runtime `archive/` folders.
+- Onboarding docs now recommend doing the initial locale baseline locally, then
+  using GitHub Actions for incremental changed-string updates.
+- The default bootstrap action ref is now `v0.1.2`.
+
+## [0.1.1] - 2026-07-01
+
+### Fixed
+
+- Blank optional GitHub Action inputs no longer poison OpenAI SDK environment
+  defaults. Empty `api-base-url` and `review-model` inputs are treated as
+  unset before the pipeline initializes model providers.
+
 ## [0.1.0] - 2026-06-28
 
 ### Added
