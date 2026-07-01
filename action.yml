@@ -102,12 +102,22 @@ runs:
         PYTHONPATH: ${{ github.action_path }}
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
-        OPENAI_BASE_URL: ${{ inputs.api-base-url }}
-        REVIEW_MODEL_NAME: ${{ inputs.review-model }}
+        LOCALIZE_API_BASE_URL_INPUT: ${{ inputs.api-base-url }}
+        LOCALIZE_REVIEW_MODEL_INPUT: ${{ inputs.review-model }}
         LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
         LOCALIZE_PLUGIN_MODULES: ${{ inputs.plugin-modules }}
       run: |
         set -euo pipefail
+        if [ -n "${LOCALIZE_API_BASE_URL_INPUT:-}" ]; then
+          export OPENAI_BASE_URL="$LOCALIZE_API_BASE_URL_INPUT"
+        else
+          unset OPENAI_BASE_URL
+        fi
+        if [ -n "${LOCALIZE_REVIEW_MODEL_INPUT:-}" ]; then
+          export REVIEW_MODEL_NAME="$LOCALIZE_REVIEW_MODEL_INPUT"
+        else
+          unset REVIEW_MODEL_NAME
+        fi
         python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"
 
     - name: Translate changed strings
@@ -117,14 +127,24 @@ runs:
         PYTHONPATH: ${{ github.action_path }}
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
-        OPENAI_BASE_URL: ${{ inputs.api-base-url }}
-        REVIEW_MODEL_NAME: ${{ inputs.review-model }}
+        LOCALIZE_API_BASE_URL_INPUT: ${{ inputs.api-base-url }}
+        LOCALIZE_REVIEW_MODEL_INPUT: ${{ inputs.review-model }}
         PROCESS_ALL_FILES: ${{ inputs.process-all-files }}
         DIFF_BASE_INPUT: ${{ inputs.diff-base }}
         LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
         LOCALIZE_PLUGIN_MODULES: ${{ inputs.plugin-modules }}
       run: |
         set -euo pipefail
+        if [ -n "${LOCALIZE_API_BASE_URL_INPUT:-}" ]; then
+          export OPENAI_BASE_URL="$LOCALIZE_API_BASE_URL_INPUT"
+        else
+          unset OPENAI_BASE_URL
+        fi
+        if [ -n "${LOCALIZE_REVIEW_MODEL_INPUT:-}" ]; then
+          export REVIEW_MODEL_NAME="$LOCALIZE_REVIEW_MODEL_INPUT"
+        else
+          unset REVIEW_MODEL_NAME
+        fi
         # An all-zero SHA (first push to a branch) is not a valid diff base; fall back
         # to working-tree detection rather than failing the run.
         if [[ "${DIFF_BASE_INPUT:-}" =~ ^0*$ ]]; then

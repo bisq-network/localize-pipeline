@@ -37,10 +37,15 @@ def test_translate_step_wires_provider_and_process_all_env(action):
     steps = action["runs"]["steps"]
     translate = next(s for s in steps if s["name"] == "Translate changed strings")
     env = translate["env"]
-    assert env["OPENAI_BASE_URL"] == "${{ inputs.api-base-url }}"
+    assert "OPENAI_BASE_URL" not in env
+    assert "REVIEW_MODEL_NAME" not in env
+    assert env["LOCALIZE_API_BASE_URL_INPUT"] == "${{ inputs.api-base-url }}"
+    assert env["LOCALIZE_REVIEW_MODEL_INPUT"] == "${{ inputs.review-model }}"
     assert env["PROCESS_ALL_FILES"] == "${{ inputs.process-all-files }}"
     assert env["LOCALIZE_DRY_RUN"] == "${{ inputs.dry-run }}"
     assert env["LOCALIZE_PLUGIN_MODULES"] == "${{ inputs.plugin-modules }}"
+    assert 'unset OPENAI_BASE_URL' in translate["run"]
+    assert 'unset REVIEW_MODEL_NAME' in translate["run"]
     assert 'python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"' in translate["run"]
 
 
@@ -49,9 +54,13 @@ def test_action_runs_preflight_check_before_translation(action):
     preflight_index = next(i for i, step in enumerate(steps) if step["name"] == "Check localization setup")
     translate_index = next(i for i, step in enumerate(steps) if step["name"] == "Translate changed strings")
     assert preflight_index < translate_index
-    assert steps[preflight_index]["env"]["OPENAI_BASE_URL"] == "${{ inputs.api-base-url }}"
-    assert steps[preflight_index]["env"]["REVIEW_MODEL_NAME"] == "${{ inputs.review-model }}"
+    assert "OPENAI_BASE_URL" not in steps[preflight_index]["env"]
+    assert "REVIEW_MODEL_NAME" not in steps[preflight_index]["env"]
+    assert steps[preflight_index]["env"]["LOCALIZE_API_BASE_URL_INPUT"] == "${{ inputs.api-base-url }}"
+    assert steps[preflight_index]["env"]["LOCALIZE_REVIEW_MODEL_INPUT"] == "${{ inputs.review-model }}"
     assert steps[preflight_index]["env"]["LOCALIZE_PLUGIN_MODULES"] == "${{ inputs.plugin-modules }}"
+    assert 'unset OPENAI_BASE_URL' in steps[preflight_index]["run"]
+    assert 'unset REVIEW_MODEL_NAME' in steps[preflight_index]["run"]
     assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
 
 

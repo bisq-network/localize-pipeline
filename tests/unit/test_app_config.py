@@ -5,7 +5,7 @@ from unittest.mock import patch, mock_open, MagicMock
 import pytest
 import yaml
 
-from localize.app_config import AppConfig, load_app_config, validate_config
+from localize.app_config import AppConfig, _non_empty_env, load_app_config, validate_config
 from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
 from localize.localization_layouts import SUFFIX_LAYOUT
 
@@ -808,6 +808,36 @@ class TestProviderAbstraction:
         assert config.api_base_url == "http://env-host/v1"
         _, kwargs = mock_openai.call_args
         assert kwargs["base_url"] == "http://env-host/v1"
+
+    def test_empty_base_url_env_is_ignored(self):
+        """A blank OPENAI_BASE_URL must not shadow the SDK default endpoint."""
+        config, mock_openai = self._load(
+            {
+                "dry_run": False,
+                "model_provider": "openai_compatible",
+            },
+            {"OPENAI_API_KEY": "sk-test-key", "OPENAI_BASE_URL": ""},
+        )
+        assert config.api_base_url is None
+        _, kwargs = mock_openai.call_args
+        assert "base_url" not in kwargs
+
+    def test_empty_env_value_is_removed_before_sdk_initialization(self):
+        with patch.dict(os.environ, {"OPENAI_BASE_URL": "   "}, clear=True):
+            assert _non_empty_env("OPENAI_BASE_URL") is None
+            assert "OPENAI_BASE_URL" not in os.environ
+
+    def test_empty_review_model_env_falls_back_to_config(self):
+        config, _ = self._load(
+            {
+                "dry_run": False,
+                "model_provider": "openai_compatible",
+                "model_name": "gpt-4o-mini",
+                "review_model_name": "gpt-4o-mini",
+            },
+            {"OPENAI_API_KEY": "sk-test-key", "REVIEW_MODEL_NAME": ""},
+        )
+        assert config.review_model_name == "gpt-4o-mini"
 
     def test_local_provider_without_key_uses_placeholder(self):
         """A custom endpoint (e.g. Ollama) needs no real key; we must not exit."""

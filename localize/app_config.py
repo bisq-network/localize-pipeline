@@ -406,12 +406,29 @@ def _resolve_dry_run(config: Dict[str, Any]) -> bool:
     return _as_bool(config.get('dry_run', False), default=False)
 
 
+def _non_empty_env(name: str) -> Optional[str]:
+    """Return a stripped environment value, treating blanks as unset.
+
+    Some CI systems export optional inputs as empty environment variables. The
+    OpenAI SDK reads OPENAI_BASE_URL directly from the environment, so leaving a
+    blank value in place can override the SDK default endpoint with an empty URL.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    if stripped:
+        return stripped
+    os.environ.pop(name, None)
+    return None
+
+
 def _resolve_api_base_url(config: Dict[str, Any]) -> Optional[str]:
     """Resolve the OpenAI-compatible endpoint, env (OPENAI_BASE_URL) over config.
 
     Returns None for the default OpenAI API.
     """
-    for candidate in (os.environ.get('OPENAI_BASE_URL'), config.get('api_base_url')):
+    for candidate in (_non_empty_env('OPENAI_BASE_URL'), config.get('api_base_url')):
         if candidate is not None:
             stripped = str(candidate).strip()
             if stripped:
@@ -438,7 +455,7 @@ def _create_model_provider(
         logger.info("Running in dry-run mode, model provider will not be initialized")
         return None
 
-    api_key_from_env = os.environ.get('OPENAI_API_KEY')
+    api_key_from_env = _non_empty_env('OPENAI_API_KEY')
 
     try:
         return create_model_provider(
@@ -517,7 +534,7 @@ def load_app_config() -> AppConfig:
         default=False,
     )
     model_name = config.get('model_name', 'gpt-4')
-    review_model_name = os.environ.get('REVIEW_MODEL_NAME', config.get('review_model_name', model_name))
+    review_model_name = _non_empty_env('REVIEW_MODEL_NAME') or config.get('review_model_name', model_name)
     model_provider_name = normalize_model_provider_name(
         str(config.get('model_provider', DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     )
