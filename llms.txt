@@ -47,6 +47,11 @@ Treat `profiles/bisq/` as one production profile, not as a product default.
 Treat `profiles/bisq-mobile/` the same way. Core modules must stay reusable and
 must not depend on Bisq paths, terms, or Transifex behavior.
 
+Config `ignore_key_patterns` is a format-agnostic list of Python regexes matched
+against adapter keys with `re.search`. JSON uses JSON Pointer keys such as `/#1`
+and `/nav/settings`; Java properties use the dotted property key. Matching keys
+are copied verbatim from the source locale and never sent to the model.
+
 ## Supported Built-In Formats
 
 - Java properties (`localization_format: java_properties`)
