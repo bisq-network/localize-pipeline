@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.1
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -36,6 +36,33 @@ The default run is incremental. It compares the working tree against
 For a no-cost setup preview, add `dry-run: true`. The action still validates the
 config and discovery path, but the runtime skips model calls and translation
 writes.
+
+## Target Repository Settings
+
+Before live runs can open translation PRs, configure the target repository:
+
+- Add `OPENAI_API_KEY` as an Actions repository secret for OpenAI-backed runs.
+- Set repository Actions workflow permissions to read and write.
+- Enable workflow-created pull requests in repository or organization Actions
+  settings.
+- Keep workflow-level permissions:
+
+```yaml
+permissions:
+  contents: write
+  pull-requests: write
+```
+
+If the repo setting leaves the workflow token read-only, the action can still
+complete translation and push a branch in some configurations, but `gh pr
+create` fails with a `createPullRequest` permission error.
+
+For Java `.properties` suffix layouts, ignore the runtime archive folder created
+under the localization input folder, for example:
+
+```gitignore
+/src/main/resources/archive/
+```
 
 ## First Run
 
@@ -88,7 +115,7 @@ profile list.
 Use `api-base-url` for any OpenAI-compatible endpoint:
 
 ```yaml
-      - uses: bisq-network/localize-pipeline@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.1
         with:
           config-file: config.yaml
           api-base-url: http://localhost:11434/v1
@@ -107,7 +134,7 @@ For custom adapters, install the package and list the adapter modules with the
 first-class plugin inputs:
 
 ```yaml
-      - uses: bisq-network/localize-pipeline@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.1
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -135,7 +162,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.0
+      - uses: bisq-network/localize-pipeline@v0.1.1
         with:
           config-file: config.yaml
           diff-base: ${{ github.event.pull_request.base.sha }}

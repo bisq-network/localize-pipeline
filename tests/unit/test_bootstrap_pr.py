@@ -39,7 +39,7 @@ def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
         BootstrapPrOptions(
             target_project_root=repo,
             branch_name="localize/onboarding",
-            action_ref="v0.1.0",
+            action_ref="v0.1.1",
             push=False,
             open_pr=False,
         )
@@ -63,7 +63,7 @@ def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
     assert config["supported_locales"] == [{"code": "de", "name": "German"}]
 
     workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
-    assert "bisq-network/localize-pipeline@v0.1.0" in workflow
+    assert "bisq-network/localize-pipeline@v0.1.1" in workflow
     assert "dry-run: true" in workflow
 
     glossary = yaml.safe_load((repo / "glossary.json").read_text(encoding="utf-8"))
