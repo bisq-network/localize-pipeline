@@ -5,6 +5,14 @@ All notable changes to Localize Pipeline are documented here.
 This project follows semantic versioning once tagged releases begin. Until a
 stable `1.0.0`, minor releases may still refine public APIs with migration notes.
 
+## Unreleased
+
+### Added
+
+- `ignore_key_patterns` config to keep matching localization keys copied from
+  the source locale while excluding them from model calls, validation accounting,
+  quality gates, and cost estimates.
+
 ## [0.1.3] - 2026-07-01
 
 ### Fixed

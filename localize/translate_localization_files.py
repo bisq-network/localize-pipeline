@@ -12,7 +12,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Optional, Pattern, Set, Tuple
 
 # --- Python Version Check ---
 # This script requires Python 3.11 or newer for features like modern asyncio.
@@ -32,6 +32,7 @@ from openai.types.chat import (
 from tqdm.asyncio import tqdm
 
 from localize.app_config import load_app_config
+from localize.ignore_keys import is_ignored_key
 from localize.localization_adapters import (
     get_localization_adapter,
     lint_properties_file as lint_properties_file,
@@ -98,6 +99,7 @@ RETRANSLATE_IDENTICAL_SOURCE_STRINGS = config.retranslate_identical_source_strin
 STYLE_RULES = config.style_rules
 PRECOMPUTED_STYLE_RULES_TEXT = config.precomputed_style_rules_text
 BRAND_GLOSSARY = config.brand_glossary
+IGNORE_KEY_PATTERNS = config.ignore_key_patterns
 PROJECT_CONTEXT = config.project_context
 LOCALIZATION_FORMAT = config.localization_format
 LOCALIZATION_LAYOUT = config.localization_layout
@@ -340,7 +342,8 @@ def extract_texts_to_translate(
         target_translations: Dict[str, str],
         newly_added_keys: Optional[Set[str]] = None,
         file_ledger_entries: Optional[Dict[str, Dict[str, str]]] = None,
-        retranslate_identical_existing: bool = False
+        retranslate_identical_existing: bool = False,
+        ignore_key_patterns: Optional[List[Pattern[str]]] = None,
 ) -> Tuple[List[str], List[int], List[str]]:
     """
     Identifies which texts need to be translated. A text needs translation if:
@@ -358,6 +361,7 @@ def extract_texts_to_translate(
         newly_added_keys: Keys that were added by key synchronization in this run.
         file_ledger_entries: Persisted hash data for keys in this translation file.
         retranslate_identical_existing: Whether to retranslate pre-existing source-identical keys.
+        ignore_key_patterns: Compiled key regexes that are never model-translated.
 
     Returns:
         A tuple containing the list of texts to translate, their corresponding indices, and their keys.
@@ -367,6 +371,7 @@ def extract_texts_to_translate(
     keys_to_translate = []
     newly_added_keys = newly_added_keys or set()
     file_ledger_entries = file_ledger_entries or {}
+    ignore_key_patterns = ignore_key_patterns or []
 
     existing_keys_in_target = {line['key'] for line in parsed_lines if line['type'] == 'entry'}
 
@@ -374,6 +379,8 @@ def extract_texts_to_translate(
     for i, line in enumerate(parsed_lines):
         if line['type'] == 'entry':
             key = line['key']
+            if is_ignored_key(key, ignore_key_patterns):
+                continue
             target_value = line.get('value', '')
             source_value = source_translations.get(key)
 
@@ -439,6 +446,8 @@ def extract_texts_to_translate(
     next_new_key_index = len(parsed_lines)
 
     for key in sorted(list(new_keys)):  # Sort for deterministic order
+        if is_ignored_key(key, ignore_key_patterns):
+            continue
         source_value = source_translations[key]
         texts_to_translate.append(source_value)
         indices.append(next_new_key_index)
@@ -446,6 +455,33 @@ def extract_texts_to_translate(
         next_new_key_index += 1
 
     return texts_to_translate, indices, keys_to_translate
+
+
+def apply_ignored_source_values(
+        parsed_lines: List[Dict],
+        target_translations: Dict[str, str],
+        source_translations: Dict[str, str],
+        ignore_key_patterns: List[Pattern[str]],
+) -> Set[str]:
+    """Force ignored keys in the target draft to the source value verbatim."""
+    if not ignore_key_patterns:
+        return set()
+
+    updated_keys: Set[str] = set()
+    for line in parsed_lines:
+        if line.get('type') != 'entry':
+            continue
+        key = line.get('key')
+        if not key or not is_ignored_key(key, ignore_key_patterns):
+            continue
+        if key not in source_translations:
+            continue
+        source_value = source_translations[key]
+        if line.get('value', '') != source_value:
+            updated_keys.add(key)
+        line['value'] = source_value
+        target_translations[key] = source_value
+    return updated_keys
 
 
 def filter_git_changed_keys_by_source(
@@ -744,6 +780,7 @@ def run_pre_translation_validation(
         localization_format: Optional[LocalizationFormat] = None,
         git_changed_keys: Optional[Set[str]] = None,
         file_ledger_entries: Optional[Dict[str, Dict[str, str]]] = None,
+        ignore_key_patterns: Optional[List[Pattern[str]]] = None,
 ) -> Tuple[List[str], Set[str]]:
     """
     Runs validation and preparation checks on a target localization file.
@@ -763,6 +800,7 @@ def run_pre_translation_validation(
     newly_added_keys: Set[str] = set()
     filename = os.path.basename(target_file_path)
     adapter = get_localization_adapter(localization_format or LOCALIZATION_FORMAT)
+    ignore_key_patterns = ignore_key_patterns or []
     logger.info(f"Running pre-translation validation for '{filename}'...")
 
     # 1. Synchronize keys (add missing, remove extra)
@@ -804,6 +842,8 @@ def run_pre_translation_validation(
     # 3. Check placeholder parity
     common_keys = set(source_translations.keys()).intersection(set(target_translations.keys()))
     for key in common_keys:
+        if is_ignored_key(key, ignore_key_patterns):
+            continue
         source_value = source_translations.get(key, "")
         target_value = target_translations.get(key, "")
         if not check_placeholder_parity(source_value, target_value):
@@ -825,6 +865,7 @@ def run_post_translation_validation(
         source_translations: Dict[str, str],
         filename: str,
         localization_format: Optional[LocalizationFormat] = None,
+        ignore_key_patterns: Optional[List[Pattern[str]]] = None,
 ) -> bool:
     """
     Runs a series of validation checks on the final translated file content.
@@ -843,6 +884,7 @@ def run_post_translation_validation(
     temp_file_path = None
     effective_format = localization_format or LOCALIZATION_FORMAT
     adapter = get_localization_adapter(effective_format)
+    ignore_key_patterns = ignore_key_patterns or []
     try:
         # Create a temporary file with delete=False to control its lifecycle.
         with tempfile.NamedTemporaryFile(
@@ -869,6 +911,8 @@ def run_post_translation_validation(
             _, final_translations = adapter.parse_file(temp_file_path)
             common_keys = set(source_translations.keys()).intersection(set(final_translations.keys()))
             for key in common_keys:
+                if is_ignored_key(key, ignore_key_patterns):
+                    continue
                 source_value = source_translations.get(key, "")
                 target_value = final_translations.get(key, "")
                 if not check_placeholder_parity(source_value, target_value):
@@ -906,7 +950,8 @@ def run_post_translation_validation(
 def run_per_key_validation_with_summary(
         final_translations: Dict[str, str],
         source_translations: Dict[str, str],
-        filename: str
+        filename: str,
+        ignore_key_patterns: Optional[List[Pattern[str]]] = None,
 ) -> Tuple[Dict[str, str], Dict[str, object]]:
     """
     Validates each translation key individually and selectively reverts failed keys.
@@ -930,9 +975,13 @@ def run_per_key_validation_with_summary(
     failed_keys = []
     control_character_keys = []
     placeholder_mismatch_keys = []
+    ignore_key_patterns = ignore_key_patterns or []
 
     for key, target_value in final_translations.items():
         source_value = source_translations.get(key, "")
+        if is_ignored_key(key, ignore_key_patterns):
+            valid_translations[key] = source_value
+            continue
         control_character_findings = find_disallowed_control_characters(target_value)
 
         if control_character_findings:
@@ -998,7 +1047,8 @@ def run_per_key_validation_with_summary(
 def run_per_key_validation(
         final_translations: Dict[str, str],
         source_translations: Dict[str, str],
-        filename: str
+        filename: str,
+        ignore_key_patterns: Optional[List[Pattern[str]]] = None,
 ) -> Tuple[Dict[str, str], List[str]]:
     """
     Backward-compatible wrapper returning only the failed key list.
@@ -1006,7 +1056,8 @@ def run_per_key_validation(
     valid_translations, summary = run_per_key_validation_with_summary(
         final_translations,
         source_translations,
-        filename
+        filename,
+        ignore_key_patterns=ignore_key_patterns,
     )
     return valid_translations, list(summary["failed_keys"])
 
@@ -1966,6 +2017,7 @@ async def process_translation_queue(
             localization_format,
             git_changed_keys=raw_git_changed_keys,
             file_ledger_entries=file_ledger_entries,
+            ignore_key_patterns=IGNORE_KEY_PATTERNS,
         )
         if validation_errors:
             logger.error(f"Skipping translation for '{translation_file}' due to pre-translation validation errors.")
@@ -1989,6 +2041,15 @@ async def process_translation_queue(
         # Load files
         parsed_lines, target_translations = adapter.parse_file(translation_file_path)
         _, source_translations = adapter.parse_file(source_file_path)
+        ignored_keys_updated = apply_ignored_source_values(
+            parsed_lines,
+            target_translations,
+            source_translations,
+            IGNORE_KEY_PATTERNS,
+        )
+        ignored_keys_requiring_output = ignored_keys_updated.union(
+            key for key in newly_added_keys if is_ignored_key(key, IGNORE_KEY_PATTERNS)
+        )
 
         # Extract texts to translate
         git_changed_keys = raw_git_changed_keys
@@ -2014,12 +2075,30 @@ async def process_translation_queue(
             target_translations,
             newly_added_keys=newly_synchronized_keys,
             file_ledger_entries=file_ledger_entries,
-            retranslate_identical_existing=RETRANSLATE_IDENTICAL_SOURCE_STRINGS
+            retranslate_identical_existing=RETRANSLATE_IDENTICAL_SOURCE_STRINGS,
+            ignore_key_patterns=IGNORE_KEY_PATTERNS,
         )
         if not texts_to_translate:
             # Refresh ledger baseline even when no translation was required.
             key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
             save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
+            if ignored_keys_requiring_output:
+                translated_file_path = os.path.join(translated_queue_folder, translation_file)
+                new_file_content = adapter.reassemble_file(parsed_lines)
+                if DRY_RUN:
+                    logger.info(f"[Dry Run] Would write ignored-key passthrough content to '{translated_file_path}'.")
+                else:
+                    os.makedirs(os.path.dirname(translated_file_path), exist_ok=True)
+                    with open(translated_file_path, 'w', encoding='utf-8') as file:
+                        file.write(new_file_content)
+                processed_files_count += 1
+                processed_filenames.append(translation_file)
+                logger.info(
+                    "Updated %d ignored key(s) from source in '%s'.",
+                    len(ignored_keys_requiring_output),
+                    translation_file,
+                )
+                continue
             logger.info(f"No texts to translate in file '{translation_file}'.")
             continue
 
@@ -2223,7 +2302,8 @@ async def process_translation_queue(
         valid_translations, per_key_summary = run_per_key_validation_with_summary(
             changed_final_translations,
             source_translations,
-            translation_file
+            translation_file,
+            ignore_key_patterns=IGNORE_KEY_PATTERNS,
         )
         failed_keys = list(per_key_summary["failed_keys"])
         if validation_summary is not None:

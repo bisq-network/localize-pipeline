@@ -13,6 +13,7 @@ os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY_FOR_TESTING'
 # This might require adjusting the Python path if the test runner doesn't handle it.
 from localize.translate_localization_files import (
     build_context,
+    apply_ignored_source_values,
     normalize_value,
     compute_ledger_hash,
     extract_texts_to_translate,
@@ -20,9 +21,11 @@ from localize.translate_localization_files import (
     get_working_tree_changed_keys,
     extract_language_from_filename,
     run_post_translation_validation,
+    run_per_key_validation_with_summary,
     run_pre_translation_validation,
     validate_paths,
 )
+from localize.ignore_keys import compile_ignore_key_patterns
 from localize.properties_parser import parse_properties_file, reassemble_file
 
 
@@ -106,6 +109,25 @@ class TestCoreLogic(unittest.TestCase):
                 source_path,
                 git_changed_keys={'new.key'},
                 file_ledger_entries={},
+            )
+
+            self.assertEqual(errors, ['Placeholder mismatch for key `new.key`.'])
+
+    def test_pre_validation_ignores_placeholder_mismatch_for_ignored_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, 'mobile.properties')
+            target_path = os.path.join(temp_dir, 'mobile_de.properties')
+            with open(source_path, 'w', encoding='utf-8') as file:
+                file.write('comment.key=Path {0}\nnew.key=New {0}\n')
+            with open(target_path, 'w', encoding='utf-8') as file:
+                file.write('comment.key=Path\nnew.key=Neu\n')
+
+            errors, _newly_added_keys = run_pre_translation_validation(
+                target_path,
+                source_path,
+                git_changed_keys={'comment.key', 'new.key'},
+                file_ledger_entries={},
+                ignore_key_patterns=compile_ignore_key_patterns([r'^comment\.']),
             )
 
             self.assertEqual(errors, ['Placeholder mismatch for key `new.key`.'])
@@ -311,6 +333,117 @@ class TestCoreLogic(unittest.TestCase):
         self.assertEqual(texts, ['Source New'])
         self.assertEqual(indices, [1])
         self.assertEqual(keys, ['key_newly_added'])
+
+    def test_extract_texts_to_translate_skips_ignored_keys(self):
+        """Ignored keys should never be selected for model translation."""
+        parsed_lines = [
+            {'type': 'entry', 'key': '/#1', 'value': 'Phrases in basic/Main.tsx', 'line_number': 0},
+            {'type': 'entry', 'key': '/welcome', 'value': 'Welcome', 'line_number': 1},
+        ]
+        target_translations = {
+            '/#1': 'Phrases in basic/Main.tsx',
+            '/welcome': 'Welcome',
+        }
+        source_translations = {
+            '/#1': 'Phrases in basic/Main.tsx',
+            '/welcome': 'Welcome',
+        }
+
+        texts, indices, keys = extract_texts_to_translate(
+            parsed_lines,
+            source_translations,
+            target_translations,
+            newly_added_keys={'/#1', '/welcome'},
+            ignore_key_patterns=compile_ignore_key_patterns([r'^/#\d+$']),
+        )
+
+        self.assertEqual(texts, ['Welcome'])
+        self.assertEqual(indices, [1])
+        self.assertEqual(keys, ['/welcome'])
+
+    def test_extract_texts_to_translate_is_unchanged_without_ignore_patterns(self):
+        """Unset ignore_key_patterns should preserve existing selection behavior."""
+        parsed_lines = [
+            {'type': 'entry', 'key': '/#1', 'value': 'Phrases in basic/Main.tsx', 'line_number': 0},
+            {'type': 'entry', 'key': '/welcome', 'value': 'Welcome', 'line_number': 1},
+        ]
+        target_translations = {
+            '/#1': 'Phrases in basic/Main.tsx',
+            '/welcome': 'Welcome',
+        }
+        source_translations = {
+            '/#1': 'Phrases in basic/Main.tsx',
+            '/welcome': 'Welcome',
+        }
+
+        baseline = extract_texts_to_translate(
+            parsed_lines,
+            source_translations,
+            target_translations,
+            newly_added_keys={'/#1', '/welcome'},
+        )
+        explicit_empty = extract_texts_to_translate(
+            parsed_lines,
+            source_translations,
+            target_translations,
+            newly_added_keys={'/#1', '/welcome'},
+            ignore_key_patterns=[],
+        )
+
+        self.assertEqual(baseline, explicit_empty)
+        self.assertEqual(baseline[2], ['/#1', '/welcome'])
+
+    def test_empty_ignore_patterns_do_not_rewrite_content(self):
+        """Empty ignore_key_patterns should be byte-for-byte inert."""
+        content = textwrap.dedent("""\
+            # Existing target file
+            comment.1=Phrases in basic/Main.tsx
+            welcome=Willkommen
+        """)
+        with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+
+        try:
+            parsed_lines, target_translations = parse_properties_file(temp_file_path)
+            before = reassemble_file(parsed_lines)
+
+            updated_keys = apply_ignored_source_values(
+                parsed_lines,
+                target_translations,
+                {
+                    'comment.1': 'Phrases in basic/Main.tsx',
+                    'welcome': 'Welcome',
+                },
+                [],
+            )
+
+            self.assertEqual(updated_keys, set())
+            self.assertEqual(reassemble_file(parsed_lines), before)
+        finally:
+            os.unlink(temp_file_path)
+
+    def test_per_key_validation_excludes_ignored_keys_from_failures(self):
+        valid_translations, summary = run_per_key_validation_with_summary(
+            {
+                '/#1': 'Phrases in basic/Main.tsx',
+                '/welcome': 'Willkommen',
+                '/broken': 'Hallo',
+            },
+            {
+                '/#1': 'Phrases in basic/Main.tsx {{name}}',
+                '/welcome': 'Welcome',
+                '/broken': 'Hello {{name}}',
+            },
+            'de.json',
+            ignore_key_patterns=compile_ignore_key_patterns([r'^/#\d+$']),
+        )
+
+        self.assertEqual(valid_translations['/#1'], 'Phrases in basic/Main.tsx {{name}}')
+        self.assertEqual(valid_translations['/welcome'], 'Willkommen')
+        self.assertEqual(valid_translations['/broken'], 'Hello {{name}}')
+        self.assertEqual(summary['failed_keys'], ['/broken'])
+        self.assertEqual(summary['placeholder_failures_count'], 1)
 
     def test_extract_texts_to_translate_can_opt_in_retranslate_identical_existing(self):
         """Legacy behavior can be enabled explicitly for source-identical existing keys."""

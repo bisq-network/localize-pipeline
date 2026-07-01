@@ -33,6 +33,7 @@ class TestAppConfig:
             style_rules={},
             precomputed_style_rules_text={},
             brand_glossary=["Bisq"],
+            ignore_key_patterns=[],
             project_context="A desktop trading app.",
             localization_format=JAVA_PROPERTIES_FORMAT,
             localization_layout=SUFFIX_LAYOUT,
@@ -122,6 +123,7 @@ class TestLoadAppConfig:
         }
         assert config.language_codes == {"de": "German", "es": "Spanish"}
         assert config.name_to_code == {"german": "de", "spanish": "es"}
+        assert config.ignore_key_patterns == []
 
     def test_load_config_with_missing_file_uses_defaults(self):
         """Test that missing config file results in default values."""
@@ -151,6 +153,7 @@ class TestLoadAppConfig:
         assert config.quality_gate.semantic_qa_audit_scope == "changed"
         assert config.quality_gate.retained_source_word_allowlist == {}
         assert config.brand_glossary == []
+        assert config.ignore_key_patterns == []
         assert config.project_context == ""
         assert config.localization_format == JAVA_PROPERTIES_FORMAT
         assert config.localization_layout == SUFFIX_LAYOUT
@@ -210,6 +213,38 @@ class TestLoadAppConfig:
         assert config.localization_layout.id == "locale_directory"
         assert config.localization_layout.source_locale == "en"
         assert config.localization_profiles[0].localization_format.id == "custom_json"
+
+    def test_load_config_compiles_ignore_key_patterns(self):
+        mock_config = {
+            "dry_run": True,
+            "ignore_key_patterns": [r"^/#\d+$", r"^debug\."],
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("localize.app_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        config = load_app_config()
+
+        assert [pattern.pattern for pattern in config.ignore_key_patterns] == [
+            r"^/#\d+$",
+            r"^debug\.",
+        ]
+
+    def test_load_config_rejects_invalid_ignore_key_pattern(self):
+        mock_config = {
+            "dry_run": True,
+            "ignore_key_patterns": ["["],
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("localize.app_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        with pytest.raises(ValueError, match=r"Invalid ignore_key_patterns regex '\['"):
+                            load_app_config()
 
     def test_load_config_reads_multiple_localization_profiles(self):
         mock_config = {

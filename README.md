@@ -183,6 +183,7 @@ Key settings:
 | `supported_locales` | Target locales. |
 | `project_context` | Product/domain context injected into prompts. |
 | `brand_technical_glossary` | Terms that must not be translated. |
+| `ignore_key_patterns` | Python regexes matched against adapter keys; matching keys are copied from source and never translated. |
 | `style_rules` | Locale-specific writing rules. |
 
 Examples:

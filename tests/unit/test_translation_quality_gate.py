@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 
 import pytest
 import yaml
@@ -118,6 +119,82 @@ def test_source_identical_gate_supports_json_locale_directory_layout(tmp_path):
     assert stats.examples == [
         {"file": "de/common.json", "key": "/title", "value": "Open trades"},
     ]
+
+
+def test_source_identical_gate_excludes_ignored_json_pointer_keys(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "locales"
+    _write_json(
+        input_folder / "en.json",
+        {
+            "#1": "Phrases in basic/Main.tsx",
+            "title": "Open trades",
+        },
+    )
+    _write_json(
+        input_folder / "de.json",
+        {
+            "#1": "Phrases in basic/Main.tsx",
+            "title": "Open trades",
+        },
+    )
+    diff_text = """diff --git a/locales/de.json b/locales/de.json
++++ b/locales/de.json
++  "#1": "Phrases in basic/Main.tsx",
++  "title": "Open trades",
+"""
+
+    stats = analyze_source_identical_changes(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        localization_format=JSON_FORMAT,
+        localization_layout=LocalizationLayout(id="locale_filename", source_locale="en"),
+        ignore_key_patterns=[re.compile(r"^/#\d+$"), r"^/metadata$"],
+    )
+
+    assert stats.changed_entries_count == 1
+    assert stats.source_identical_count == 1
+    assert stats.unexpected_source_identical_count == 1
+    assert stats.examples == [
+        {"file": "de.json", "key": "/title", "value": "Open trades"},
+    ]
+
+
+def test_quality_gate_config_loads_ignore_key_patterns(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "ignore_key_patterns": [r"^/#\d+$"],
+                "supported_locales": [{"code": "de", "name": "German"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config, _locale_codes, _brand_glossary, _rules = load_quality_gate_config(str(config_path))
+
+    assert [pattern.pattern for pattern in config.ignore_key_patterns] == [r"^/#\d+$"]
+    report = build_quality_gate_report(
+        source_stats=analyze_source_identical_changes(
+            diff_text="",
+            repo_root=str(tmp_path),
+            input_folder=str(tmp_path),
+            locale_codes=["de"],
+            brand_glossary=[],
+            ignore_key_patterns=config.ignore_key_patterns,
+        ),
+        semantic_stats=None,
+        validation_summary={"files": {}, "pipeline_warnings": []},
+        changed_files=[],
+        input_folder=str(tmp_path),
+        config=config,
+    )
+    assert report["thresholds"]["ignore_key_patterns"] == [r"^/#\d+$"]
+    json.dumps(report["thresholds"])
 
 
 def test_quality_gate_localization_metadata_rejects_invalid_format(tmp_path):

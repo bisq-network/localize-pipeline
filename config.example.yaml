@@ -90,6 +90,13 @@ brand_technical_glossary:
   - Bitcoin
   - GitHub
 
+# Optional key exclusions. Patterns are Python regular expressions matched with
+# re.search against the adapter key: JSON uses JSON Pointer keys such as "/#1"
+# and "/nav/settings"; Java properties use the dotted property key. Matching
+# keys are never sent to the model and are copied from the source locale.
+# ignore_key_patterns:
+#   - "^/#\\d+$"  # RoboSats-style JSON pseudo-comments: "#1", "#2", ...
+
 # If true, the script logs actions without calling the API or writing files.
 dry_run: false
 

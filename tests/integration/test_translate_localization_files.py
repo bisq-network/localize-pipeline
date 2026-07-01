@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from types import SimpleNamespace
 import pytest
 import localize.translate_localization_files
+from localize.ignore_keys import compile_ignore_key_patterns
 from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
 from localize.localization_layouts import LocalizationLayout
 from localize.localization_profiles import LocalizationProfile
@@ -360,6 +361,152 @@ async def test_process_translation_queue_translates_json_locale_directory_layout
             {"title": "Details prüfen"},
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_process_translation_queue_preserves_ignored_json_comment_keys(integration_test_environment):
+    env = integration_test_environment
+    layout = LocalizationLayout(id="locale_filename", source_locale="en")
+    source_content = {
+        "#1": "Phrases in basic/Main.tsx",
+        "#2": "Phrases in basic/BookPage/index.tsx",
+        "welcome": "Welcome to RoboSats",
+        "amount": "Amount {{amount}} sats",
+    }
+    target_content = {}
+    source_file_path = os.path.join(env['input_folder'], 'en.json')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'de.json')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        json.dump(source_content, f, ensure_ascii=False, indent=2)
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        json.dump(target_content, f, ensure_ascii=False, indent=2)
+
+    seen_prompt_texts = []
+
+    async def fake_completion(**kwargs):
+        prompt_text = "\n".join(message["content"] for message in kwargs["messages"])
+        seen_prompt_texts.append(prompt_text)
+        if kwargs.get("response_format"):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content=json.dumps({
+                    "/amount": "Betrag {{amount}} sats",
+                    "/welcome": "Willkommen bei RoboSats",
+                })
+            ))])
+        if "Key: /amount" in prompt_text:
+            content = "Betrag {{amount}} sats"
+        elif "Key: /welcome" in prompt_text:
+            content = "Willkommen bei RoboSats"
+        else:
+            raise AssertionError(f"Unexpected model prompt: {prompt_text}")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=fake_completion)
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    profiles = (
+        LocalizationProfile(JSON_FORMAT, layout),
+    )
+    with patch('localize.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('localize.translate_localization_files.LOCALIZATION_LAYOUT', layout), \
+         patch('localize.translate_localization_files.LOCALIZATION_PROFILES', profiles), \
+         patch('localize.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.IGNORE_KEY_PATTERNS',
+               compile_ignore_key_patterns([r"^/#\d+$"])), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        processed_count, processed_files, skipped_files, total_keys = (
+            await localize.translate_localization_files.process_translation_queue(
+                translation_queue_folder=env['translation_queue_folder'],
+                translated_queue_folder=env['translated_queue_folder'],
+                glossary_file_path=env['mock_glossary_path_resolved']
+            )
+        )
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'de.json')
+    assert os.path.exists(output_file_path)
+    with open(output_file_path, 'r', encoding='utf-8') as f:
+        final_payload = json.load(f)
+
+    assert processed_count == 1
+    assert processed_files == ['de.json']
+    assert skipped_files == {}
+    assert total_keys == 2
+    assert final_payload == {
+        "#1": "Phrases in basic/Main.tsx",
+        "#2": "Phrases in basic/BookPage/index.tsx",
+        "welcome": "Willkommen bei RoboSats",
+        "amount": "Betrag {{amount}} sats",
+    }
+    assert provider.estimate_run_cost.call_args.kwargs["num_keys"] == 2
+    assert all('"#1"' not in prompt for prompt in seen_prompt_texts)
+    assert all('"#2"' not in prompt for prompt in seen_prompt_texts)
+    assert all("Phrases in basic" not in prompt for prompt in seen_prompt_texts)
+
+
+@pytest.mark.asyncio
+async def test_process_translation_queue_writes_only_ignored_json_keys(integration_test_environment):
+    env = integration_test_environment
+    layout = LocalizationLayout(id="locale_filename", source_locale="en")
+    source_content = {
+        "#1": "Phrases in basic/Main.tsx",
+        "#2": "Phrases in basic/BookPage/index.tsx",
+    }
+    source_file_path = os.path.join(env['input_folder'], 'en.json')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'de.json')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        json.dump(source_content, f, ensure_ascii=False, indent=2)
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        json.dump({}, f, ensure_ascii=False, indent=2)
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(
+        side_effect=AssertionError("Ignored keys must not call the model")
+    )
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+
+    profiles = (
+        LocalizationProfile(JSON_FORMAT, layout),
+    )
+    with patch('localize.translate_localization_files.LOCALIZATION_FORMAT', JSON_FORMAT), \
+         patch('localize.translate_localization_files.LOCALIZATION_LAYOUT', layout), \
+         patch('localize.translate_localization_files.LOCALIZATION_PROFILES', profiles), \
+         patch('localize.translate_localization_files.LANGUAGE_CODES', {'de': 'German'}), \
+         patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.IGNORE_KEY_PATTERNS',
+               compile_ignore_key_patterns([r"^/#\d+$"])), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()):
+        processed_count, processed_files, skipped_files, total_keys = (
+            await localize.translate_localization_files.process_translation_queue(
+                translation_queue_folder=env['translation_queue_folder'],
+                translated_queue_folder=env['translated_queue_folder'],
+                glossary_file_path=env['mock_glossary_path_resolved']
+            )
+        )
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'de.json')
+    assert os.path.exists(output_file_path)
+    with open(output_file_path, 'r', encoding='utf-8') as f:
+        final_payload = json.load(f)
+
+    assert processed_count == 1
+    assert processed_files == ['de.json']
+    assert skipped_files == {}
+    assert total_keys == 0
+    assert final_payload == source_content
+    provider.create_chat_completion.assert_not_awaited()
+    provider.estimate_run_cost.assert_not_called()
 
 
 @pytest.mark.asyncio
