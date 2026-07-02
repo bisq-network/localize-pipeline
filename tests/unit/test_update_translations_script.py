@@ -190,6 +190,52 @@ def test_transifex_pull_is_skipped_when_source_is_git():
     assert guard_index < tx_pull_index
 
 
+def test_git_source_prepares_diff_baseline_before_pipeline():
+    """Git-source cron runs must diff against the last processed upstream commit."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "prepare_git_source_diff_base()" in script
+    assert 'prepare_git_source_diff_base "$TRANSLATION_SOURCE"' in script
+    assert 'export TRANSLATION_DIFF_BASE="$baseline_sha"' in script
+    assert 'git merge-base --is-ancestor "$baseline_sha" HEAD' in script
+
+    checkout_index = script.index('git checkout -B "${DEFAULT_BRANCH}"')
+    baseline_index = script.index('prepare_git_source_diff_base "$TRANSLATION_SOURCE"')
+    prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
+    python_index = script.index('python3 -u -m localize.cli run --config "$CONFIG_FILE"')
+
+    assert checkout_index < baseline_index < prepare_index < python_index
+
+
+def test_git_source_baseline_uses_persistent_logs_state():
+    """The baseline survives container restarts by living under the logs mount."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "sanitize_state_component()" in script
+    assert 'state_dir="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"' in script
+    assert "git-source-baseline" in script
+    assert "GIT_SOURCE_BASELINE_FILE=" in script
+    assert "GIT_SOURCE_CURRENT_HEAD=" in script
+
+
+def test_git_source_baseline_advances_only_after_no_change_success():
+    """Do not advance the baseline while a generated translation PR is pending."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "update_git_source_baseline_if_safe()" in script
+    assert "TRANSLATION_CHANGES_CREATED=false" in script
+    assert "TRANSLATION_CHANGES_CREATED=true" in script
+    assert '"${DRY_RUN:-false}" == "true"' in script
+    assert '"${TRANSLATION_CHANGES_CREATED:-false}" == "true"' in script
+    assert "Not advancing git-source baseline because translation changes were produced" in script
+
+    publish_index = script.index("\npublish_translation_changes\n")
+    update_index = script.index('update_git_source_baseline_if_safe "$TRANSLATION_SOURCE"')
+    return_branch_index = script.index("# Go back to original branch")
+
+    assert publish_index < update_index < return_branch_index
+
+
 def test_translation_source_read_before_transifex_step():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 

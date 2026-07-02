@@ -17,6 +17,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 - Translation service health checks now alert on stale completed cron runs and
   continue to inspect the latest run after log rotation.
+- Git-source production installs now persist a last-processed upstream commit and
+  use it as `TRANSLATION_DIFF_BASE`, so committed source-file changes are still
+  detected after the wrapper resets the target repository to a clean checkout.
+- The Bisq Mobile production profile now uses Transifex as its translation
+  source again, matching the operational setup used by Bisq 2 and mobile.
 
 ## [0.1.3] - 2026-07-01
 

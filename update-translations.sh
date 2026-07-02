@@ -139,6 +139,96 @@ is_supported_translation_source() {
     [[ "$source" == "git" || "$source" == "transifex" ]]
 }
 
+sanitize_state_component() {
+    local value="${1:-unknown}"
+    printf '%s' "$value" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+git_source_baseline_path() {
+    local state_dir="$1"
+    local repo_component
+    local branch_component
+    repo_component=$(sanitize_state_component "$UPSTREAM_REPO_NAME")
+    branch_component=$(sanitize_state_component "$DEFAULT_BRANCH")
+    printf '%s/git-source-baseline-%s-%s.sha\n' "$state_dir" "$repo_component" "$branch_component"
+}
+
+prepare_git_source_diff_base() {
+    local translation_source="$1"
+    if [[ "$translation_source" != "git" ]]; then
+        return 0
+    fi
+
+    GIT_SOURCE_CURRENT_HEAD=$(git rev-parse HEAD)
+    export GIT_SOURCE_CURRENT_HEAD
+
+    local state_dir
+    state_dir="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"
+    mkdir -p "$state_dir"
+    GIT_SOURCE_BASELINE_FILE=$(git_source_baseline_path "$state_dir")
+    export GIT_SOURCE_BASELINE_FILE
+
+    if [ -n "${TRANSLATION_DIFF_BASE:-}" ]; then
+        log "Using explicit TRANSLATION_DIFF_BASE='$TRANSLATION_DIFF_BASE' for git-source change detection." "INFO"
+        return 0
+    fi
+
+    if [ ! -s "$GIT_SOURCE_BASELINE_FILE" ]; then
+        log "No git-source baseline found at '$GIT_SOURCE_BASELINE_FILE'. This run will seed the baseline after a successful no-change run." "INFO"
+        return 0
+    fi
+
+    local baseline_sha
+    IFS= read -r baseline_sha < "$GIT_SOURCE_BASELINE_FILE" || baseline_sha=""
+    baseline_sha="${baseline_sha%%[[:space:]]*}"
+    if ! git rev-parse --verify --quiet "${baseline_sha}^{commit}" >/dev/null; then
+        log "Ignoring invalid git-source baseline '$baseline_sha' in '$GIT_SOURCE_BASELINE_FILE'." "WARNING"
+        return 0
+    fi
+    if ! git merge-base --is-ancestor "$baseline_sha" HEAD; then
+        log "Ignoring git-source baseline '$baseline_sha' because it is not an ancestor of HEAD." "WARNING"
+        return 0
+    fi
+
+    export TRANSLATION_DIFF_BASE="$baseline_sha"
+    log "Using git-source baseline '$baseline_sha' for change detection against HEAD '$GIT_SOURCE_CURRENT_HEAD'." "INFO"
+    record_pipeline_event "git_source_diff_base" "base=$baseline_sha" "head=$GIT_SOURCE_CURRENT_HEAD"
+}
+
+update_git_source_baseline_if_safe() {
+    local translation_source="$1"
+    if [[ "$translation_source" != "git" ]]; then
+        return 0
+    fi
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "Dry run is enabled. Not advancing git-source baseline." "INFO"
+        return 0
+    fi
+    if [[ "${TRANSLATION_CHANGES_CREATED:-false}" == "true" ]]; then
+        log "Not advancing git-source baseline because translation changes were produced and need PR review." "INFO"
+        return 0
+    fi
+    if [ -z "${GIT_SOURCE_CURRENT_HEAD:-}" ]; then
+        log "Git-source baseline was not prepared; skipping baseline update." "WARNING"
+        return 0
+    fi
+
+    local state_dir
+    state_dir="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"
+    mkdir -p "$state_dir"
+    if [ -z "${GIT_SOURCE_BASELINE_FILE:-}" ]; then
+        GIT_SOURCE_BASELINE_FILE=$(git_source_baseline_path "$state_dir")
+        export GIT_SOURCE_BASELINE_FILE
+    fi
+
+    local tmp_file
+    tmp_file="${GIT_SOURCE_BASELINE_FILE}.$$"
+    printf '%s\n' "$GIT_SOURCE_CURRENT_HEAD" > "$tmp_file"
+    mv "$tmp_file" "$GIT_SOURCE_BASELINE_FILE"
+    log "Advanced git-source baseline to '$GIT_SOURCE_CURRENT_HEAD'." "INFO"
+    record_pipeline_event "git_source_baseline_updated" "head=$GIT_SOURCE_CURRENT_HEAD"
+}
+
 translation_file_change_regex() {
     printf '\\.(%s)([[:space:]]|$|->)' "$(translation_file_extension_regex)"
 }
@@ -307,6 +397,9 @@ done
 # Lock file to prevent concurrent executions for the same repository
 LOCK_FILE="/tmp/translation-${UPSTREAM_REPO_NAME//\//-}.lock"
 EXECUTION_LOG="${LOG_DIR}/translation-executions.log"
+GIT_SOURCE_BASELINE_FILE=""
+GIT_SOURCE_CURRENT_HEAD=""
+TRANSLATION_CHANGES_CREATED=false
 
 # Log execution start
 echo "$(date -Iseconds) START ${HOSTNAME:-unknown} REPO=${UPSTREAM_REPO_NAME} PID=$$" >> "$EXECUTION_LOG" 2>/dev/null || true
@@ -596,6 +689,7 @@ git clean -fde "venv/" -e ".idea/" -e "*.iml" -e "secrets/" -e "docker/.env"
 # No further git pull or submodule init/update should be necessary here before tx pull.
 log "Proceeding with Transifex operations. Current HEAD on ${DEFAULT_BRANCH}:"
 git log -1 --pretty=%H
+prepare_git_source_diff_base "$TRANSLATION_SOURCE"
 
 # Step 2: Use the configured source adapter to prepare translation files.
 prepare_translation_source "$TRANSLATION_SOURCE" "${DRY_RUN:-false}" "${PULL_SOURCE_FILES:-false}"
@@ -866,9 +960,11 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
 }
 
 publish_translation_changes() {
+TRANSLATION_CHANGES_CREATED=false
 TRANSLATION_CHANGES=$(git status --porcelain | grep -E "$(translation_file_status_regex)" || true)
 
 if [ -n "$TRANSLATION_CHANGES" ]; then
+    TRANSLATION_CHANGES_CREATED=true
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         log "Dry run is enabled. Skipping commit and pull request creation." "WARNING"
         log "The following changes would have been committed:" "INFO"
@@ -961,6 +1057,7 @@ fi
 }
 
 publish_translation_changes
+update_git_source_baseline_if_safe "$TRANSLATION_SOURCE"
 
 # Go back to original branch
 if [ -n "$ORIGINAL_BRANCH" ] && [ "$ORIGINAL_BRANCH" != "$DEFAULT_BRANCH" ]; then
