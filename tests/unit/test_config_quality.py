@@ -187,7 +187,7 @@ def test_bisq_mobile_profile_packages_sanitized_production_shape():
     glossary = yaml.safe_load(BISQ_MOBILE_PROFILE_GLOSSARY.read_text(encoding="utf-8"))
 
     assert config["localization_format"] == "java_properties"
-    assert config["translation_source"] == "git"
+    assert config.get("translation_source", "transifex") == "transifex"
     assert config["input_folder"] == "/target_repo/shared/domain/src/commonMain/resources/mobile"
     assert "Bisq mobile" in config["project_context"]
     assert config["semantic_review"]["enabled"] is True

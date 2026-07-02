@@ -2,7 +2,7 @@ target_project_root: "/target_repo"
 input_folder: "/target_repo/shared/domain/src/commonMain/resources/mobile"
 glossary_file_path: "glossary.json"
 localization_format: "java_properties"
-translation_source: "git"
+translation_source: "transifex"
 project_context: >
   Translate for Bisq mobile, the Kotlin Multiplatform mobile companion for the
   Bisq peer-to-peer bitcoin trading ecosystem. Keep navigation labels concise,
