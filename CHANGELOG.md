@@ -13,6 +13,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   the source locale while excluding them from model calls, validation accounting,
   quality gates, and cost estimates.
 
+### Fixed
+
+- Translation service health checks now alert on stale completed cron runs and
+  continue to inspect the latest run after log rotation.
+
 ## [0.1.3] - 2026-07-01
 
 ### Fixed

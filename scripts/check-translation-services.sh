@@ -10,6 +10,8 @@ INSTALL_ROOT="${LOCALIZE_PIPELINE_ROOT:-/opt/localize-pipeline}"
 MOBILE_INSTALL_ROOT="${LOCALIZE_PIPELINE_MOBILE_ROOT:-/opt/localize-pipeline-mobile}"
 LEGACY_INSTALL_ROOT="/opt/translate-java-property-files"
 LEGACY_MOBILE_INSTALL_ROOT="/opt/translate-java-property-files-mobile-app"
+MAX_CRON_SUCCESS_AGE_SECONDS="${MAX_CRON_SUCCESS_AGE_SECONDS:-93600}"
+MAX_RUNNING_AGE_SECONDS="${MAX_RUNNING_AGE_SECONDS:-10800}"
 
 if [ ! -d "$INSTALL_ROOT" ] && [ -d "$LEGACY_INSTALL_ROOT" ]; then
     INSTALL_ROOT="$LEGACY_INSTALL_ROOT"
@@ -81,31 +83,93 @@ count_open_translation_prs() {
     echo "$total"
 }
 
+cron_log_files() {
+    local log_file="$1"
+    local log_dir log_name
+    log_dir=$(dirname "$log_file")
+    log_name=$(basename "$log_file")
+
+    find "$log_dir" -maxdepth 1 -type f -name "${log_name}-*" 2>/dev/null | sort
+    if [ -f "$log_file" ]; then
+        printf '%s\n' "$log_file"
+    fi
+}
+
+combine_cron_logs() {
+    local log_file="$1"
+    local file
+
+    while IFS= read -r file; do
+        case "$file" in
+            *.gz)
+                gzip -cd -- "$file"
+                ;;
+            *)
+                cat -- "$file"
+                ;;
+        esac
+    done < <(cron_log_files "$log_file")
+}
+
 check_cron_log() {
     local label="$1"
     local log_file="$2"
+    local max_success_age_sec="$3"
 
     if [ ! -f "$log_file" ]; then
         log_alert "$label cron log not found: $log_file"
         return
     fi
 
+    local combined_log
+    combined_log=$(mktemp)
+    combine_cron_logs "$log_file" > "$combined_log"
+
     local start_line
-    start_line=$(grep -nE "Starting Git and Transifex validation" "$log_file" | tail -n1 | cut -d: -f1 || true)
+    start_line=$(grep -nE "Starting Git and Transifex validation" "$combined_log" | tail -n1 | cut -d: -f1 || true)
 
     if [ -z "$start_line" ]; then
         log_alert "$label cron job has no run markers - check $log_file"
+        rm -f "$combined_log"
         return
     fi
 
     local start_ts
-    start_ts=$(sed -n "${start_line}p" "$log_file" | sed -n 's/^\[\([^]]*\)\].*/\1/p')
+    start_ts=$(sed -n "${start_line}p" "$combined_log" | sed -n 's/^\[\([^]]*\)\].*/\1/p')
 
     local status_segment
-    status_segment=$(tail -n +"$start_line" "$log_file" | grep -E "Translation update script finished successfully|No further processing needed|BLOCKING CONDITION DETECTED" | tail -n1 || true)
+    status_segment=$(tail -n +"$start_line" "$combined_log" | grep -E "Translation update script finished successfully|No further processing needed|BLOCKING CONDITION DETECTED" | tail -n1 || true)
 
     if [ -n "$status_segment" ]; then
+        local status_ts status_epoch now_epoch status_age_sec
+        status_ts=$(sed -n 's/^\[\([^]]*\)\].*/\1/p' <<<"$status_segment")
+        status_epoch=$(date -d "$status_ts" +%s 2>/dev/null || echo 0)
+        now_epoch=$(date +%s)
+        status_age_sec=$((now_epoch - status_epoch))
+
+        if [ "$status_epoch" -le 0 ] || [ "$status_age_sec" -gt "$max_success_age_sec" ]; then
+            log_alert "$label cron job last completed run is too old - check $log_file"
+            rm -f "$combined_log"
+            return
+        fi
+
+        local heartbeat_failure heartbeat_segment
+        heartbeat_failure=$(tail -n +"$start_line" "$combined_log" | grep -E "Warning: Health check ping failed" | tail -n1 || true)
+        if [ -n "$heartbeat_failure" ]; then
+            log_alert "$label cron job heartbeat failed - check $log_file"
+            rm -f "$combined_log"
+            return
+        fi
+
+        heartbeat_segment=$(tail -n +"$start_line" "$combined_log" | grep -E "Sending heartbeat to health check URL" | tail -n1 || true)
+        if [ -z "$heartbeat_segment" ]; then
+            log_alert "$label cron job did not attempt a heartbeat - check $log_file"
+            rm -f "$combined_log"
+            return
+        fi
+
         log_ok "$label cron job completed successfully or blocked appropriately"
+        rm -f "$combined_log"
         return
     fi
 
@@ -114,11 +178,12 @@ check_cron_log() {
     start_epoch=$(date -d "$start_ts" +%s 2>/dev/null || echo 0)
     age_sec=$((now_epoch - start_epoch))
 
-    if [ "$start_epoch" -gt 0 ] && [ "$age_sec" -lt 10800 ]; then
+    if [ "$start_epoch" -gt 0 ] && [ "$age_sec" -lt "$MAX_RUNNING_AGE_SECONDS" ]; then
         log_ok "$label cron job appears to be still running (started ${age_sec}s ago)"
     else
         log_alert "$label cron job may have failed or stalled - check $log_file"
     fi
+    rm -f "$combined_log"
 }
 
 # Check 1: Ensure systemd service is NOT running
@@ -148,8 +213,8 @@ fi
 # Check 3: Check latest cron run result robustly
 main_log="$INSTALL_ROOT/logs/cron_job.log"
 mobile_log="$MOBILE_INSTALL_ROOT/logs/cron_job.log"
-check_cron_log "Main service" "$main_log"
-check_cron_log "Mobile app service" "$mobile_log"
+check_cron_log "Main service" "$main_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"
+check_cron_log "Mobile app service" "$mobile_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"
 
 # Check 4: Disk space for Docker volumes
 disk_usage=$(df -h /var/lib/docker | tail -1 | awk '{print $5}' | sed 's/%//' )

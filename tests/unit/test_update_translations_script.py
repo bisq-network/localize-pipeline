@@ -45,6 +45,27 @@ def test_health_check_reads_github_token_from_main_or_mobile_install():
     assert 'if [ -z "$GITHUB_TOKEN" ] && [ -f "$env_file" ]; then' in script
 
 
+def test_health_check_alerts_on_stale_completed_cron_runs():
+    script = (REPO_ROOT / "scripts" / "check-translation-services.sh").read_text()
+
+    assert "cron_log_files()" in script
+    assert "combine_cron_logs()" in script
+    assert 'gzip -cd -- "$file"' in script
+    assert 'MAX_CRON_SUCCESS_AGE_SECONDS="${MAX_CRON_SUCCESS_AGE_SECONDS:-93600}"' in script
+    assert 'local max_success_age_sec="$3"' in script
+    assert "last completed run is too old" in script
+    assert 'check_cron_log "Main service" "$main_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"' in script
+    assert 'check_cron_log "Mobile app service" "$mobile_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"' in script
+
+
+def test_health_check_verifies_job_heartbeat_attempts():
+    script = (REPO_ROOT / "scripts" / "check-translation-services.sh").read_text()
+
+    assert "Warning: Health check ping failed" in script
+    assert "did not attempt a heartbeat" in script
+    assert "Sending heartbeat to health check URL" in script
+
+
 def test_generated_prs_publish_translation_quality_gate_status():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
