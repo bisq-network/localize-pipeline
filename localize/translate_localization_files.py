@@ -12,7 +12,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Dict, List, Optional, Pattern, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Pattern, Set, Tuple
 
 # --- Python Version Check ---
 # This script requires Python 3.11 or newer for features like modern asyncio.
@@ -272,6 +272,62 @@ class TranslationMemoryPlan:
     pending_positions: List[int]
 
 
+RUN_METRIC_KEYS = (
+    "candidate_keys_count",
+    "model_translation_keys_count",
+    "translation_memory_reused_count",
+    "source_identical_skipped_count",
+    "changed_values_count",
+)
+
+
+def new_run_metrics() -> Dict[str, int]:
+    """Create a run-metrics map with stable keys for reporting."""
+    return {key: 0 for key in RUN_METRIC_KEYS}
+
+
+def increment_run_metric(metrics: Dict[str, int], key: str, amount: int = 1) -> None:
+    """Increment a named run metric in-place."""
+    metrics[key] = int(metrics.get(key, 0)) + amount
+
+
+def count_changed_translation_values(
+        before: Mapping[str, str],
+        after: Mapping[str, str],
+) -> int:
+    """Count target values that changed during this pipeline run."""
+    changed = 0
+    for key, value in after.items():
+        if before.get(key) != value:
+            changed += 1
+    return changed
+
+
+class ProcessTranslationQueueResult(tuple):
+    """Four-value process result with attached run metrics.
+
+    Existing direct callers can still unpack the legacy four fields, while the
+    generic pipeline core can read ``run_metrics`` for richer reporting.
+    """
+
+    run_metrics: Dict[str, int]
+
+    def __new__(
+            cls,
+            processed_files_count: int,
+            processed_filenames: List[str],
+            skipped_files: Dict[str, List[str]],
+            total_keys_translated: int,
+            run_metrics: Optional[Dict[str, int]] = None,
+    ):
+        obj = super().__new__(
+            cls,
+            (processed_files_count, processed_filenames, skipped_files, total_keys_translated),
+        )
+        obj.run_metrics = run_metrics or new_run_metrics()
+        return obj
+
+
 def apply_translation_memory(
         *,
         texts_to_translate: List[str],
@@ -344,6 +400,7 @@ def extract_texts_to_translate(
         file_ledger_entries: Optional[Dict[str, Dict[str, str]]] = None,
         retranslate_identical_existing: bool = False,
         ignore_key_patterns: Optional[List[Pattern[str]]] = None,
+        selection_metrics: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[str], List[int], List[str]]:
     """
     Identifies which texts need to be translated. A text needs translation if:
@@ -362,6 +419,7 @@ def extract_texts_to_translate(
         file_ledger_entries: Persisted hash data for keys in this translation file.
         retranslate_identical_existing: Whether to retranslate pre-existing source-identical keys.
         ignore_key_patterns: Compiled key regexes that are never model-translated.
+        selection_metrics: Optional metrics map updated with selection decisions.
 
     Returns:
         A tuple containing the list of texts to translate, their corresponding indices, and their keys.
@@ -438,6 +496,8 @@ def extract_texts_to_translate(
                     "Enable 'retranslate_identical_source_strings' or seed the translation key ledger.",
                     key
                 )
+                if selection_metrics is not None:
+                    increment_run_metric(selection_metrics, "source_identical_skipped_count")
 
     # 2. Find new keys that are in the source but not in the target file.
     new_keys = source_translations.keys() - existing_keys_in_target
@@ -1917,7 +1977,7 @@ async def process_translation_queue(
         translated_queue_folder: str,
         glossary_file_path: str,
         validation_summary: Optional[Dict[str, Dict[str, object]]] = None
-) -> Tuple[int, List[str], Dict[str, List[str]], int]:
+) -> ProcessTranslationQueueResult:
     """
     Process all localization files in the translation queue folder.
 
@@ -1932,6 +1992,7 @@ async def process_translation_queue(
         - List of successfully processed filenames.
         - A dictionary of skipped files, mapping filename to a list of error strings.
         - Total number of keys translated across all files.
+        Run metrics are attached to the result as ``result.run_metrics``.
     """
     localization_files: List[Tuple[str, LocalizationProfile]] = []
     for root, dirs, files in os.walk(translation_queue_folder):
@@ -1967,6 +2028,7 @@ async def process_translation_queue(
     processed_files_count = 0
     processed_filenames: List[str] = []
     total_keys_translated = 0
+    run_metrics = new_run_metrics()
     skipped_files: Dict[str, List[str]] = {}
 
     for translation_file, localization_profile in localization_files:
@@ -2041,6 +2103,7 @@ async def process_translation_queue(
         # Load files
         parsed_lines, target_translations = adapter.parse_file(translation_file_path)
         _, source_translations = adapter.parse_file(source_file_path)
+        original_target_translations = dict(target_translations)
         ignored_keys_updated = apply_ignored_source_values(
             parsed_lines,
             target_translations,
@@ -2077,12 +2140,18 @@ async def process_translation_queue(
             file_ledger_entries=file_ledger_entries,
             retranslate_identical_existing=RETRANSLATE_IDENTICAL_SOURCE_STRINGS,
             ignore_key_patterns=IGNORE_KEY_PATTERNS,
+            selection_metrics=run_metrics,
         )
         if not texts_to_translate:
             # Refresh ledger baseline even when no translation was required.
             key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
             save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
             if ignored_keys_requiring_output:
+                increment_run_metric(
+                    run_metrics,
+                    "changed_values_count",
+                    count_changed_translation_values(original_target_translations, target_translations),
+                )
                 translated_file_path = os.path.join(translated_queue_folder, translation_file)
                 new_file_content = adapter.reassemble_file(parsed_lines)
                 if DRY_RUN:
@@ -2102,6 +2171,8 @@ async def process_translation_queue(
             logger.info(f"No texts to translate in file '{translation_file}'.")
             continue
 
+        increment_run_metric(run_metrics, "candidate_keys_count", len(keys_to_translate))
+
         memory_plan = apply_translation_memory(
             texts_to_translate=texts_to_translate,
             indices=indices,
@@ -2110,6 +2181,8 @@ async def process_translation_queue(
             locale=language_code,
             format_id=localization_format.id,
         )
+        increment_run_metric(run_metrics, "translation_memory_reused_count", len(memory_plan.cached_results))
+        increment_run_metric(run_metrics, "model_translation_keys_count", len(memory_plan.pending_keys))
 
         # Pre-run scope/cost preview for this file (ballpark — actuals logged at the end).
         provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
@@ -2319,6 +2392,16 @@ async def process_translation_queue(
         # Reassemble the final file content with validated translations
         updated_lines = draft_lines
         new_file_content = adapter.reassemble_file(updated_lines)
+        final_output_translations = {
+            line['key']: line.get('value', '')
+            for line in updated_lines
+            if line.get('type') == 'entry' and line.get('key')
+        }
+        increment_run_metric(
+            run_metrics,
+            "changed_values_count",
+            count_changed_translation_values(original_target_translations, final_output_translations),
+        )
         # --- End Per-Key Validation ---
 
         translated_file_path = os.path.join(translated_queue_folder, translation_file)
@@ -2355,7 +2438,13 @@ async def process_translation_queue(
         processed_filenames.append(translation_file)
         total_keys_translated += len(keys_to_translate)
 
-    return processed_files_count, processed_filenames, skipped_files, total_keys_translated
+    return ProcessTranslationQueueResult(
+        processed_files_count,
+        processed_filenames,
+        skipped_files,
+        total_keys_translated,
+        run_metrics,
+    )
 
 def archive_original_files(
         changed_files: List[str],
@@ -2387,6 +2476,7 @@ def generate_translation_summary(
     new_keys_count: int,
     updated_keys_count: int,
     supported_codes: Optional[List[str]] = None,
+    run_metrics: Optional[Mapping[str, int]] = None,
 ) -> None:
     """Write a JSON summary consumed by the shell script for PR title/body.
 
@@ -2397,6 +2487,7 @@ def generate_translation_summary(
         updated_keys_count: Total number of updated translation keys.
         supported_codes: Language codes for locale extraction. Defaults to
             ``LANGUAGE_CODES`` keys.
+        run_metrics: Optional explicit run counters for PR reporting.
     """
     if supported_codes is None:
         supported_codes = list(LANGUAGE_CODES.keys())
@@ -2432,7 +2523,15 @@ def generate_translation_summary(
     sorted_modules = sorted(modules)
     sorted_locales = sorted(locales)
 
-    title = _build_pr_title(sorted_modules, new_keys_count, updated_keys_count, len(sorted_locales))
+    metrics = {key: int(value) for key, value in (run_metrics or {}).items()}
+    changed_values_count = metrics.get("changed_values_count")
+    title = _build_pr_title(
+        sorted_modules,
+        new_keys_count,
+        updated_keys_count,
+        len(sorted_locales),
+        changed_values=changed_values_count,
+    )
 
     summary = {
         "title": title,
@@ -2442,6 +2541,8 @@ def generate_translation_summary(
         "new_keys_count": new_keys_count,
         "updated_keys_count": updated_keys_count,
     }
+    for key in RUN_METRIC_KEYS:
+        summary[key] = metrics.get(key, 0)
 
     os.makedirs(os.path.dirname(summary_path) or '.', exist_ok=True)
     with open(summary_path, 'w', encoding='utf-8') as f:
@@ -2519,18 +2620,21 @@ def _build_pr_title(
     new_keys: int,
     updated_keys: int,
     locale_count: int,
+    changed_values: Optional[int] = None,
 ) -> str:
     """Build a concise, descriptive PR title (max 72 chars)."""
-    if not modules and not new_keys and not updated_keys:
+    if changed_values is not None and changed_values > 0:
+        key_segment = f" ({changed_values} changed values)"
+    elif not modules and not new_keys and not updated_keys:
         return "Update translations"
-
-    parts: list[str] = []
-    if new_keys:
-        parts.append(f"{new_keys} new")
-    if updated_keys:
-        parts.append(f"{updated_keys} updated")
-    key_desc = ", ".join(parts)
-    key_segment = f" ({key_desc} keys)" if key_desc else ""
+    else:
+        parts: list[str] = []
+        if new_keys:
+            parts.append(f"{new_keys} new")
+        if updated_keys:
+            parts.append(f"{updated_keys} updated")
+        key_desc = ", ".join(parts)
+        key_segment = f" ({key_desc} keys)" if key_desc else ""
 
     if len(modules) == 1:
         mod_segment = f" in {modules[0]}"

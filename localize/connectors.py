@@ -8,7 +8,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Protocol
+from typing import Awaitable, Callable, Dict, List, Mapping, Optional, Protocol
 
 from localize.pipeline_core import (
     ProcessQueueResult,
@@ -81,6 +81,7 @@ class PipelineReporterConnector(Protocol):
         processed_files: List[str],
         new_keys_count: int,
         updated_keys_count: int,
+        run_metrics: Optional[Mapping[str, int]] = None,
     ) -> None:
         """Write a machine-readable translation summary."""
 
@@ -279,14 +280,18 @@ class FileReporterConnector:
         processed_files: List[str],
         new_keys_count: int,
         updated_keys_count: int,
+        run_metrics: Optional[Mapping[str, int]] = None,
     ) -> None:
+        payload = {
+            "processed_files": processed_files,
+            "new_keys_count": new_keys_count,
+            "updated_keys_count": updated_keys_count,
+        }
+        if run_metrics:
+            payload.update({key: int(value) for key, value in run_metrics.items()})
         self._write_json(
             summary_path,
-            {
-                "processed_files": processed_files,
-                "new_keys_count": new_keys_count,
-                "updated_keys_count": updated_keys_count,
-            },
+            payload,
         )
 
     def write_translation_validation_summary(

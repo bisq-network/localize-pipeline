@@ -15,6 +15,9 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Fixed
 
+- Generated translation PRs now report output values changed separately from
+  candidate keys, model calls, translation-memory reuse, and ledgerless
+  source-identical skips, so catch-up backlogs are visible in review.
 - Translation quality reports now separate AI semantic-review findings from
   rule/heuristic findings, show suggested AI-review values in PR examples, and
   exclude already auto-remediated AI findings from outstanding counts.

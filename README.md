@@ -350,6 +350,10 @@ Server guide: [docs/new-project-deployment.md](docs/new-project-deployment.md).
 - **Quality gate failed:** inspect the PR report. The pipeline reports skipped
   files, placeholder errors, semantic findings, and suspicious source-identical
   values.
+- **Generated PR title or counts look surprising:** inspect the "Translation run
+  summary" section. It separates output values changed from candidate keys,
+  model calls, translation-memory reuse, and source-identical keys skipped
+  because no ledger baseline exists yet.
 - **Action pushed a branch but failed to create a PR:** enable repository
   Actions workflow write permissions and allow workflow-created pull requests
   in the target repository settings.
