@@ -306,6 +306,65 @@ def test_changed_json_diff_yields_only_changed_leaf(tmp_path):
     ]
 
 
+def test_changed_json_diff_disambiguates_nested_leaf_by_value(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "locales"
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+    _write_json(
+        input_folder / "en" / "common.json",
+        {
+            "title": "Top title",
+            "nested": {"title": "Nested title"},
+        },
+    )
+    _write_json(
+        input_folder / "de" / "common.json",
+        {
+            "title": "Obertitel",
+            "nested": {"title": "Verschachtelter Titel"},
+        },
+    )
+    diff_text = """diff --git a/locales/de/common.json b/locales/de/common.json
++++ b/locales/de/common.json
++    "title": "Verschachtelter Titel",
+"""
+
+    changes = list(iter_translation_changes_from_diff(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        localization_format=JSON_FORMAT,
+        localization_layout=layout,
+    ))
+
+    assert [(change.key, change.new_value) for change in changes] == [
+        ("/nested/title", "Verschachtelter Titel"),
+    ]
+
+
+def test_changed_properties_diff_joins_multiline_continuations(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(input_folder / "mobile.properties", {"long": "Hello world"})
+    diff_text = """diff --git a/resources/mobile_de.properties b/resources/mobile_de.properties
++++ b/resources/mobile_de.properties
++long=Hallo \\
++Welt
+"""
+
+    changes = list(iter_translation_changes_from_diff(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+    ))
+
+    assert [(change.key, change.new_value) for change in changes] == [
+        ("long", "Hallo Welt"),
+    ]
+
+
 def test_feedback_rules_load_review_source_metadata():
     rules = load_semantic_rules(
         [

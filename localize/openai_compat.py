@@ -54,6 +54,17 @@ def completion_token_parameter_for_model(model: str) -> CompletionTokenParameter
     return "max_tokens"
 
 
+def _uses_reasoning_completion_contract(model: str) -> bool:
+    return completion_token_parameter_for_model(model) == "max_completion_tokens"
+
+
+def _normalize_model_kwargs(model: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    request_kwargs = dict(kwargs)
+    if _uses_reasoning_completion_contract(model):
+        request_kwargs.pop("temperature", None)
+    return request_kwargs
+
+
 def _looks_like_unsupported_parameter(exc: Exception, parameter: str) -> bool:
     message = str(exc).lower()
     if parameter.lower() not in message:
@@ -107,6 +118,7 @@ async def create_chat_completion_with_fallback(
     chooses the preferred OpenAI parameter name for known models and retries
     once with the alternate name if an OpenAI-compatible API rejects it.
     """
+    kwargs = _normalize_model_kwargs(model, kwargs)
     if completion_token_limit is None:
         return await _maybe_await(create_completion(model=model, messages=messages, **kwargs))
 

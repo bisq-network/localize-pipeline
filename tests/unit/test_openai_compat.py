@@ -49,6 +49,7 @@ async def test_newer_openai_models_use_max_completion_tokens():
 
     assert client.calls[0]["max_completion_tokens"] == 4096
     assert "max_tokens" not in client.calls[0]
+    assert "temperature" not in client.calls[0]
 
 
 @pytest.mark.asyncio
@@ -65,6 +66,7 @@ async def test_default_models_keep_max_tokens_for_provider_compatibility():
 
     assert client.calls[0]["max_tokens"] == 4096
     assert "max_completion_tokens" not in client.calls[0]
+    assert client.calls[0]["temperature"] == 0
 
 
 @pytest.mark.asyncio
