@@ -15,7 +15,12 @@ from localize.ignore_keys import compile_ignore_key_patterns
 from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
 from localize.localization_layouts import LocalizationLayout
 from localize.localization_profiles import LocalizationProfile
-from localize.translation_memory import TranslationMemory, save_translation_memory
+from localize.properties_parser import parse_properties_file
+from localize.translation_memory import (
+    TranslationMemory,
+    load_translation_memory,
+    save_translation_memory,
+)
 
 # All fixtures are now defined in conftest.py and are auto-discovered by pytest.
 
@@ -202,6 +207,185 @@ async def test_process_translation_queue_does_not_seed_memory_for_noop_file(inte
 
     assert not os.path.exists(memory_path)
     provider.create_chat_completion.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_translation_queue_ignores_out_of_scope_review_keys(integration_test_environment):
+    env = integration_test_environment
+    source_file_path = os.path.join(env['input_folder'], 'app.properties')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.keep=Keep\nkey.new=New\n")
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.keep=Alt\n")
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Neu draft"))]
+    ))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()), \
+         patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock) as review:
+        review.return_value = {"key.new": "Neu", "key.keep": "Nicht anwenden"}
+        await localize.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved']
+        )
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'app_de.properties')
+    with open(output_file_path, 'r', encoding='utf-8') as f:
+        final_content = f.read()
+
+    assert "key.keep=Alt" in final_content
+    assert "key.keep=Nicht anwenden" not in final_content
+    assert "key.new=Neu" in final_content
+
+
+@pytest.mark.asyncio
+async def test_failed_model_translation_marks_ledger_and_skips_memory(integration_test_environment):
+    env = integration_test_environment
+    source_file_path = os.path.join(env['input_folder'], 'app.properties')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+    ledger_path = os.path.join(env['input_folder'], 'ledger.json')
+    memory_path = os.path.join(env['input_folder'], 'translation_memory.json')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.fail=Needs translation\n")
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        f.write("")
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=RuntimeError("rate limited"))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = True
+
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_MEMORY_ENABLED', True), \
+         patch('localize.translate_localization_files.TRANSLATION_MEMORY_FILE_PATH', memory_path), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH', ledger_path), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()), \
+         patch('localize.translate_localization_files._handle_retry', new_callable=AsyncMock) as retry, \
+         patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock) as review:
+        retry.return_value = False
+        review.return_value = None
+        await localize.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved']
+        )
+
+    ledger = localize.translate_localization_files.load_translation_key_ledger(ledger_path)
+    assert ledger["app_de.properties"]["key.fail"]["status"] == "failed"
+
+    memory = load_translation_memory(memory_path)
+    assert memory.lookup(
+        "Needs translation",
+        locale="de",
+        format_id=JAVA_PROPERTIES_FORMAT.id,
+    ) is None
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'app_de.properties')
+    parsed_lines, target_translations = parse_properties_file(output_file_path)
+    texts, _indices, keys = localize.translate_localization_files.extract_texts_to_translate(
+        parsed_lines,
+        {"key.fail": "Needs translation"},
+        target_translations,
+        file_ledger_entries=ledger["app_de.properties"],
+    )
+    assert keys == ["key.fail"]
+    assert texts == ["Needs translation"]
+
+
+@pytest.mark.asyncio
+async def test_key_ledger_preserves_full_file_baseline_after_partial_translation(integration_test_environment):
+    env = integration_test_environment
+    source_file_path = os.path.join(env['input_folder'], 'app.properties')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+    ledger_path = os.path.join(env['input_folder'], 'ledger.json')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.one=One\nkey.two=Two\nkey.three=Three\n")
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.one=Eins\nkey.three=Drei\n")
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Zwei"))]
+    ))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH', ledger_path), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()), \
+         patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock) as review:
+        review.return_value = None
+        await localize.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved']
+        )
+
+    ledger = localize.translate_localization_files.load_translation_key_ledger(ledger_path)
+    assert set(ledger["app_de.properties"]) == {"key.one", "key.two", "key.three"}
+
+
+@pytest.mark.asyncio
+async def test_process_translation_queue_skips_file_when_post_validation_fails(integration_test_environment):
+    env = integration_test_environment
+    source_file_path = os.path.join(env['input_folder'], 'app.properties')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.one=One\n")
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        f.write("")
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Eins"))]
+    ))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH',
+               os.path.join(env['input_folder'], 'ledger.json')), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()), \
+         patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock) as review, \
+         patch('localize.translate_localization_files.run_post_translation_validation') as post_validation:
+        review.return_value = None
+        post_validation.return_value = False
+        processed_count, processed_files, skipped_files, total_keys = (
+            await localize.translate_localization_files.process_translation_queue(
+                translation_queue_folder=env['translation_queue_folder'],
+                translated_queue_folder=env['translated_queue_folder'],
+                glossary_file_path=env['mock_glossary_path_resolved']
+            )
+        )
+
+    output_file_path = os.path.join(env['translated_queue_folder'], 'app_de.properties')
+    assert processed_count == 0
+    assert processed_files == []
+    assert total_keys == 0
+    assert "app_de.properties" in skipped_files
+    assert not os.path.exists(output_file_path)
+    post_validation.assert_called_once()
 
 
 @pytest.mark.asyncio
