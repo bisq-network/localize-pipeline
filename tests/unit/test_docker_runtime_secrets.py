@@ -42,13 +42,33 @@ def test_compose_mounts_private_keys_only_as_runtime_secrets():
     build = translator.get("build", {})
 
     assert "secrets" not in build
-    assert "DEPLOY_KEY_NAME" not in "\n".join(build.get("args", []))
+    build_args = build.get("args", [])
+    if isinstance(build_args, dict):
+        build_args_text = "\n".join(f"{key}={value}" for key, value in build_args.items())
+    else:
+        build_args_text = "\n".join(build_args)
+    assert "DEPLOY_KEY_NAME" not in build_args_text
 
-    service_secrets = {
-        secret["source"] if isinstance(secret, dict) else secret
-        for secret in translator["secrets"]
-    }
-    assert {"gpg_bot_key", "deploy_key"} <= service_secrets
+    assert translator["secrets"] == [
+        {
+            "source": "gpg_bot_key",
+            "target": "gpg_bot_key",
+            "mode": 0o400,
+        },
+        {
+            "source": "deploy_key",
+            "target": "deploy_key",
+            "mode": 0o400,
+        },
+    ]
+    assert (
+        compose["secrets"]["gpg_bot_key"]["file"]
+        == "${GPG_BOT_KEY_FILE:-../secrets/gpg_bot_key/bot_secret_key.asc}"
+    )
+    assert (
+        compose["secrets"]["deploy_key"]["file"]
+        == "${DEPLOY_KEY_FILE:-../secrets/deploy_key/id_ed25519}"
+    )
 
 
 def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
@@ -58,5 +78,14 @@ def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
     assert 'GPG_BOT_KEY_PATH:-/run/secrets/gpg_bot_key' in entrypoint
     assert 'SKIP_GPG_IMPORT:-false' in entrypoint
     assert 'gpg --batch --import "$gpg_import_file"' in entrypoint
+    assert 'gpg --import-options show-only --with-colons "$gpg_import_file"' in entrypoint
     assert '"$runtime_deploy_key_path" "$user_home/.ssh/deploy_key"' in entrypoint
     assert 'chmod 600 "$user_home/.ssh/deploy_key"' in entrypoint
+
+    appuser_block = entrypoint.split('if [ "$(id -u)" -ne 0 ]; then', 1)[1].split("else", 1)[0]
+    assert appuser_block.index("install_runtime_deploy_key") < appuser_block.index("setup_ssh")
+    assert appuser_block.index("import_runtime_gpg_key") < appuser_block.index("setup_ssh")
+
+    root_block = entrypoint.split("# --- Root Execution Block ---", 1)[1]
+    assert root_block.index("install_runtime_deploy_key") < root_block.index("setup_ssh")
+    assert root_block.index("import_runtime_gpg_key") < root_block.index("setup_ssh")

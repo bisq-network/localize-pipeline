@@ -151,6 +151,14 @@ import_runtime_gpg_key() {
         cleanup_gpg_import_file="$gpg_import_file"
     fi
 
+    fingerprint="$(run_as_appuser "$user_home" gpg --import-options show-only --with-colons "$gpg_import_file" \
+        | awk -F: '/^fpr/ {print $10; exit}')"
+    if [ -z "$fingerprint" ]; then
+        rm -f "$cleanup_gpg_import_file"
+        log "Runtime GPG key source did not expose a secret-key fingerprint." "ERROR"
+        return 1
+    fi
+
     if ! run_as_appuser "$user_home" gpg --batch --import "$gpg_import_file"; then
         rm -f "$cleanup_gpg_import_file"
         log "Failed to import runtime GPG key from $runtime_gpg_key_path." "ERROR"
@@ -158,12 +166,6 @@ import_runtime_gpg_key() {
     fi
 
     rm -f "$cleanup_gpg_import_file"
-    fingerprint="$(run_as_appuser "$user_home" gpg --list-secret-keys --with-colons \
-        | awk -F: '/^fpr/ {print $10; exit}')"
-    if [ -z "$fingerprint" ]; then
-        log "Runtime GPG key import completed, but no secret-key fingerprint was found." "ERROR"
-        return 1
-    fi
 
     printf '%s:6:\n' "$fingerprint" \
         | run_as_appuser "$user_home" gpg --batch --import-ownertrust
