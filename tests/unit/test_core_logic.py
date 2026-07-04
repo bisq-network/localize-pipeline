@@ -763,7 +763,7 @@ class TestValidationLogic(unittest.TestCase):
             # Correctly escaped characters
             key.two=This value has a tab \\t and a newline \\n.
 
-            # Invalid escape sequence
+            # Unknown Java escape sequence
             key.three.bad.escape=This contains a bad escape \\U.
 
             # Line with double dots in key (should be flagged)
@@ -781,8 +781,9 @@ class TestValidationLogic(unittest.TestCase):
         try:
             errors = lint_properties_file(temp_file_path)
             self.assertEqual(len(errors), 2)
-            self.assertIn("Invalid escape sequence", errors[0])
+            self.assertIn("Unknown escape sequence", errors[0])
             self.assertIn("key.three.bad.escape", errors[0])
+            self.assertTrue(errors[0].startswith("Linter Warning:"))
             self.assertIn("Malformed key", errors[1])
             self.assertIn("key..four", errors[1])
         finally:
@@ -802,7 +803,7 @@ class TestValidationLogic(unittest.TestCase):
             key.two=This is a multi-line value with a newline.\n\
                      And it continues here.
 
-            # A genuinely invalid escape sequence for control
+            # A tolerated Java escape sequence that should warn, not block.
             key.three=This has an invalid escape \z.
             ''')
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.properties') as temp_f:
@@ -811,9 +812,10 @@ class TestValidationLogic(unittest.TestCase):
 
         try:
             errors = lint_properties_file(temp_file_path)
-            # It should only flag the genuinely invalid escape sequence
+            # It should only flag the unknown escape sequence as a warning.
             self.assertEqual(len(errors), 1)
-            self.assertIn("Invalid escape sequence in value for key 'key.three'", errors[0])
+            self.assertIn("Unknown escape sequence in value for key 'key.three'", errors[0])
+            self.assertTrue(errors[0].startswith("Linter Warning:"))
         finally:
             os.remove(temp_file_path)
 

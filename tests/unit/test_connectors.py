@@ -235,7 +235,7 @@ def test_file_reporter_connector_writes_machine_and_human_reports(tmp_path):
     reporter.write_translation_validation_summary(
         str(validation_path),
         validation_files={"messages_de.json": {"failed_keys": []}},
-        skipped_files={},
+        skipped_files={"messages_fr.json": ["placeholder mismatch"]},
     )
 
     assert "placeholder mismatch" in skipped_report.read_text(encoding="utf-8")
@@ -243,9 +243,45 @@ def test_file_reporter_connector_writes_machine_and_human_reports(tmp_path):
     assert summary["new_keys_count"] == 2
     for key in RUN_METRIC_KEYS:
         assert summary[key] == 0
-    assert json.loads(validation_path.read_text(encoding="utf-8"))["files"]["messages_de.json"] == {
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    assert validation["files"]["messages_de.json"] == {
         "failed_keys": []
     }
+    assert validation["pipeline_warnings"] == [
+        {"file": "messages_fr.json", "errors": ["placeholder mismatch"]}
+    ]
+
+
+def test_connector_set_uses_fresh_noop_publisher_defaults():
+    first = PipelineConnectorSet(
+        source=FakeSourceConnector([]),
+        processor=FakeProcessorConnector(),
+        reporter=FakeReporterConnector(),
+    )
+    second = PipelineConnectorSet(
+        source=FakeSourceConnector([]),
+        processor=FakeProcessorConnector(),
+        reporter=FakeReporterConnector(),
+    )
+
+    assert first.publisher is not second.publisher
+
+
+def test_filesystem_source_connector_skips_symlink_escapes_when_copying_back(tmp_path):
+    translated = tmp_path / "translated"
+    input_folder = tmp_path / "input"
+    outside = tmp_path / "outside.properties"
+    translated.mkdir()
+    input_folder.mkdir()
+    outside.write_text("secret=outside\n", encoding="utf-8")
+    (translated / "messages_de.properties").write_text("hello=Hallo\n", encoding="utf-8")
+    (translated / "escape.properties").symlink_to(outside)
+    connector = FilesystemSourceConnector(detect_changed_translation_files=lambda *args, **kwargs: [])
+
+    connector.copy_translated_files_back(str(translated), str(input_folder))
+
+    assert (input_folder / "messages_de.properties").read_text(encoding="utf-8") == "hello=Hallo\n"
+    assert not (input_folder / "escape.properties").exists()
 
 
 @pytest.mark.asyncio

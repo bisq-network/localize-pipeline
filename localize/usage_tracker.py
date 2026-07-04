@@ -19,6 +19,11 @@ from typing import Any, Dict, Optional
 
 # USD per 1,000,000 tokens. Verify against current OpenAI pricing before relying.
 DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
+    "gpt-5.5": {"input": 2.50, "output": 15.00},
+    "gpt-5.4": {"input": 1.25, "output": 7.50},
+    "gpt-5.4-mini": {"input": 0.375, "output": 2.25},
+    "gpt-5.4-nano": {"input": 0.10, "output": 0.625},
+    "gpt-5.4-pro": {"input": 15.00, "output": 90.00},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.00},
     "gpt-4": {"input": 30.00, "output": 60.00},

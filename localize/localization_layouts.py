@@ -22,6 +22,21 @@ def _path_parts(path: str) -> tuple[str, ...]:
     return PurePath(_as_posix(path)).parts
 
 
+def _locale_directory_segment(
+    path: str,
+    locale_codes: Sequence[str],
+) -> tuple[str, int] | None:
+    """Return a configured locale segment, ignoring ambiguous project roots."""
+    parts = _path_parts(path)
+    supported = sorted((str(code) for code in locale_codes), key=len, reverse=True)
+    for index, segment in enumerate(parts):
+        if index == 0 and len(parts) > 1 and parts[1] in {"src", "build", "target", "node_modules"}:
+            continue
+        if segment in supported:
+            return segment, index
+    return None
+
+
 @dataclass(frozen=True)
 class LocalizationLayout:
     """Path convention for source and target locale files."""
@@ -50,8 +65,8 @@ class LocalizationLayout:
         if self.id == "suffix":
             return localization_format.extract_supported_locale_suffix(PurePath(path).name, list(supported))
         if self.id == "locale_directory":
-            parts = _path_parts(path)
-            return next((part for part in supported if part in parts), None)
+            match = _locale_directory_segment(path, supported)
+            return match[0] if match else None
         if self.id == "locale_filename":
             stem = PurePath(path).stem
             return next((code for code in supported if stem == code), None)
@@ -82,7 +97,7 @@ class LocalizationLayout:
         if self.id == "suffix":
             return localization_format.extract_locale_suffix(PurePath(path).name) is None
         if self.id == "locale_directory":
-            return self.source_locale in _path_parts(path)
+            return _locale_directory_segment(path, [self.source_locale]) is not None
         if self.id == "locale_filename":
             return PurePath(path).stem == self.source_locale
         return False
@@ -100,11 +115,12 @@ class LocalizationLayout:
             source_name = localization_format.source_filename(pure_path.name, list(supported_codes))
             return pure_path.with_name(source_name).as_posix()
         if self.id == "locale_directory":
-            locale = self.extract_locale(path, supported_codes, localization_format)
-            if not locale:
+            match = _locale_directory_segment(path, supported_codes)
+            if not match:
                 return path
+            _locale, index = match
             parts = list(_path_parts(path))
-            parts[parts.index(locale)] = self.source_locale
+            parts[index] = self.source_locale
             return PurePath(*parts).as_posix()
         if self.id == "locale_filename":
             return pure_path.with_name(f"{self.source_locale}{localization_format.file_extension}").as_posix()

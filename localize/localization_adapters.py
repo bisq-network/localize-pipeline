@@ -13,7 +13,11 @@ from localize.localization_formats import (
     register_localization_format,
     unregister_localization_format,
 )
-from localize.properties_parser import parse_properties_file, reassemble_file as reassemble_properties_file
+from localize.properties_parser import (
+    _has_unescaped_trailing_backslash,
+    parse_properties_file,
+    reassemble_file as reassemble_properties_file,
+)
 from localize.translation_validator import (
     check_encoding_and_mojibake,
     find_disallowed_control_characters,
@@ -54,29 +58,47 @@ def _lint_comment_syntax(line: str, line_number: int) -> Optional[str]:
     return None
 
 
+def _is_escaped_separator(line: str, index: int) -> bool:
+    count = 0
+    cursor = index - 1
+    while cursor >= 0 and line[cursor] == "\\":
+        count += 1
+        cursor -= 1
+    return count % 2 == 1
+
+
 def lint_properties_file(file_path: str) -> List[str]:
     """Lint a Java properties file for common syntax mistakes."""
     errors = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
+            in_continuation = False
             for i, line in enumerate(f, 1):
-                line = line.strip()
+                raw_line = line.rstrip('\r\n')
+                line = raw_line.strip()
+                if in_continuation:
+                    in_continuation = _has_unescaped_trailing_backslash(raw_line)
+                    continue
+
                 if not line:
+                    in_continuation = False
                     continue
 
                 if line.startswith('#') or line.startswith('!'):
                     err = _lint_comment_syntax(line, i)
                     if err:
                         errors.append(err)
+                    in_continuation = False
                     continue
 
                 if '=' in line or ':' in line:
                     sep_idx = -1
                     for j, ch in enumerate(line):
-                        if ch in ('=', ':') and (j == 0 or line[j - 1] != '\\'):
+                        if ch in ('=', ':') and not _is_escaped_separator(line, j):
                             sep_idx = j
                             break
                     if sep_idx == -1:
+                        in_continuation = _has_unescaped_trailing_backslash(raw_line)
                         continue
                     key, value = line[:sep_idx], line[sep_idx + 1:]
                     key = key.strip()
@@ -91,7 +113,7 @@ def lint_properties_file(file_path: str) -> List[str]:
 
                     if re.search(r'\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])', value_to_check):
                         errors.append(
-                            f"Linter Error: Invalid escape sequence in value for key '{key}' on line {i}."
+                            f"Linter Warning: Unknown escape sequence in value for key '{key}' on line {i}."
                         )
 
                     control_character_findings = find_disallowed_control_characters(value_to_check)
@@ -102,6 +124,8 @@ def lint_properties_file(file_path: str) -> List[str]:
                             f"Linter Error: Disallowed control character artifact in value for key "
                             f"'{key}' on line {i}: {preview}{suffix}."
                         )
+
+                in_continuation = _has_unescaped_trailing_backslash(raw_line)
 
     except (IOError, OSError, UnicodeDecodeError) as e:
         errors.append(f"Linter Error: Could not read or process file {file_path}. Reason: {e}")
@@ -130,7 +154,7 @@ def _extract_properties_key_from_diff_line(diff_line: str) -> Optional[str]:
 
 
 def _escape_messageformat_if_needed(src_text: str, value: str) -> str:
-    if re.search(r'\{[^{}]+\}', src_text):
+    if re.search(r'\{\d+(?:,[^{}]+)?\}', src_text):
         value = value.replace("''", "'")
         value = value.replace("'", "''")
     return value

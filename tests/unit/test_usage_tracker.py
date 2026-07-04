@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from localize.usage_tracker import UsageTracker
+from localize.usage_tracker import DEFAULT_PRICES, UsageTracker
 
 
 PRICES = {
@@ -31,6 +31,11 @@ def test_cost_calculation():
     assert s["models"]["gpt-4o"]["estimated_cost_usd"] == 12.5
     assert s["totals"]["estimated_cost_usd"] == 12.5
     assert s["totals"]["cost_complete"] is True
+
+
+def test_default_prices_cover_configured_gpt5_models():
+    assert DEFAULT_PRICES["gpt-5.4-mini"] == {"input": 0.375, "output": 2.25}
+    assert DEFAULT_PRICES["gpt-5.4"]["input"] == 1.25
 
 
 def test_multiple_models_aggregate():
