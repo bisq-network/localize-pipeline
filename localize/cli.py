@@ -11,10 +11,19 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
-from localize.app_config import ConfigIssue, validate_config
+from localize.app_config import (
+    ConfigIssue,
+    _compute_project_root,
+    _load_dotenv_files,
+    _non_empty_env,
+    _scrub_blank_env,
+    resolve_runtime_dir,
+    validate_config,
+)
 from localize.bootstrap_pr import BootstrapPrOptions, create_bootstrap_pr
 from localize.formats import list_localization_adapters, list_localization_formats
 from localize.init_config import main as init_config_main
@@ -23,7 +32,6 @@ from localize.plugins import load_plugins
 from localize.translation_quality_gate import main as translation_quality_gate_main
 from localize.translation_memory import (
     load_translation_memory_strict,
-    load_translation_memory,
     merge_translation_memory,
     translation_memory_suggestions,
     write_translation_memory,
@@ -41,12 +49,25 @@ def _load_config_file(config_path: Path) -> dict[str, Any]:
 
 
 def _effective_api_base_url(config: dict[str, Any]) -> str | None:
-    for candidate in (os.environ.get("OPENAI_BASE_URL"), config.get("api_base_url")):
+    for candidate in (_non_empty_env("OPENAI_BASE_URL"), config.get("api_base_url")):
         if candidate is not None:
             stripped = str(candidate).strip()
             if stripped:
                 return stripped
     return None
+
+
+def _redact_url_userinfo(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.username and not parts.password:
+        return url
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
 
 
 def _effective_dry_run_override() -> bool | None:
@@ -77,6 +98,7 @@ def _cmd_formats(_args: argparse.Namespace) -> int:
 
 def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> int:
     config_path = Path(args.config).expanduser().resolve()
+    _load_cli_dotenv()
     if not config_path.exists():
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
@@ -92,8 +114,9 @@ def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> i
     issues = validate_config(
         config,
         effective_api_base_url=_effective_api_base_url(config),
-        api_key_available=bool(os.environ.get("OPENAI_API_KEY")),
+        api_key_available=bool(_non_empty_env("OPENAI_API_KEY")),
         dry_run_override=_effective_dry_run_override(),
+        config_base_dir=str(config_path.parent),
     )
     _print_config_issues(issues)
     has_errors = any(issue.level == "error" for issue in issues)
@@ -119,14 +142,46 @@ def _resolve_input_folder(config: dict[str, Any]) -> Path:
     return input_folder.resolve()
 
 
-def _runtime_dir(raw_path: Any, *, config_path: Path) -> Path:
-    path = Path(str(raw_path)).expanduser()
+def _config_relative_path(raw_path: Any, *, config_path: Path) -> Path:
+    path = Path(str(raw_path or ".")).expanduser()
     if path.is_absolute():
-        return path
+        return path.resolve()
     return (config_path.parent / path).resolve()
 
 
+def _resolve_input_folder_for_config(config: dict[str, Any], *, config_path: Path) -> Path:
+    target_root = _config_relative_path(config.get("target_project_root"), config_path=config_path)
+    input_folder = Path(str(config.get("input_folder") or ".")).expanduser()
+    if not input_folder.is_absolute():
+        input_folder = target_root / input_folder
+    return input_folder.resolve()
+
+
+def _runtime_dir(raw_path: Any, *, config_path: Path, default_name: str = "translation_queue") -> Path:
+    return Path(resolve_runtime_dir(
+        raw_path,
+        config_path=str(config_path),
+        default_name=default_name,
+    ))
+
+
+def _load_cli_dotenv() -> None:
+    """Load project dotenv files before CLI preflight checks inspect env."""
+    _load_dotenv_files(_compute_project_root())
+    _scrub_blank_env("OPENAI_API_KEY")
+    _scrub_blank_env("OPENAI_BASE_URL")
+
+
+def _queue_dir(config: dict[str, Any], key: str, default_name: str, *, config_path: Path) -> Path:
+    return Path(resolve_runtime_dir(
+        config.get(key),
+        config_path=str(config_path),
+        default_name=default_name,
+    ))
+
+
 def _load_checked_config(config_path: Path) -> tuple[dict[str, Any], list[ConfigIssue]]:
+    _load_cli_dotenv()
     config = _load_config_file(config_path)
     review_model_override = os.environ.get("REVIEW_MODEL_NAME")
     if review_model_override:
@@ -134,8 +189,9 @@ def _load_checked_config(config_path: Path) -> tuple[dict[str, Any], list[Config
     issues = validate_config(
         config,
         effective_api_base_url=_effective_api_base_url(config),
-        api_key_available=bool(os.environ.get("OPENAI_API_KEY")),
+        api_key_available=bool(_non_empty_env("OPENAI_API_KEY")),
         dry_run_override=_effective_dry_run_override(),
+        config_base_dir=str(config_path.parent),
     )
     return config, issues
 
@@ -153,14 +209,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         return 1
 
     profile = os.environ.get("TRANSLATOR_PROFILE") or "default"
-    target_root = Path(str(config.get("target_project_root") or ".")).expanduser().resolve()
-    input_folder = _resolve_input_folder(config)
+    target_root = _config_relative_path(config.get("target_project_root"), config_path=config_path)
+    input_folder = _resolve_input_folder_for_config(config, config_path=config_path)
     semantic_review = config.get("semantic_review", {}) or {}
     semantic_status = "enabled" if bool(semantic_review.get("enabled", False)) else "disabled"
-    api_base_url = _effective_api_base_url(config) or "default"
+    raw_api_base_url = _effective_api_base_url(config)
+    api_base_url = _redact_url_userinfo(raw_api_base_url) if raw_api_base_url else "default"
     model_provider = str(config.get("model_provider", "aisuite"))
-    queue = _runtime_dir(config.get("translation_queue_folder", "translation_queue"), config_path=config_path)
-    translated = _runtime_dir(config.get("translated_queue_folder", "translated_queue"), config_path=config_path)
+    queue = _queue_dir(config, "translation_queue_folder", "translation_queue", config_path=config_path)
+    translated = _queue_dir(config, "translated_queue_folder", "translated_queue", config_path=config_path)
     formats = ", ".join(
         f"{profile.localization_format.id}/{profile.localization_layout.id}"
         for profile in profiles
@@ -179,7 +236,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"review_model_name: {config.get('review_model_name', config.get('model_name', 'gpt-4'))}")
     print(f"api_base_url: {api_base_url}")
     print(f"semantic_review: {semantic_status}")
-    print(f"OPENAI_API_KEY: {'set' if os.environ.get('OPENAI_API_KEY') else 'unset'}")
+    print(f"OPENAI_API_KEY: {'set' if _non_empty_env('OPENAI_API_KEY') else 'unset'}")
     _print_config_issues(issues)
     return 1 if any(issue.level == "error" for issue in issues) else 0
 
@@ -199,8 +256,8 @@ def _cmd_smoke(args: argparse.Namespace) -> int:
     if any(issue.level == "error" for issue in issues):
         return 1
 
-    queue = _runtime_dir(config.get("translation_queue_folder", "translation_queue"), config_path=config_path)
-    translated = _runtime_dir(config.get("translated_queue_folder", "translated_queue"), config_path=config_path)
+    queue = _queue_dir(config, "translation_queue_folder", "translation_queue", config_path=config_path)
+    translated = _queue_dir(config, "translated_queue_folder", "translated_queue", config_path=config_path)
     queue.mkdir(parents=True, exist_ok=True)
     translated.mkdir(parents=True, exist_ok=True)
     print("Smoke OK")
@@ -209,11 +266,21 @@ def _cmd_smoke(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
+    if not config_path.exists():
+        print(f"error: configuration file not found: {config_path}", file=sys.stderr)
+        return 1
+    _load_cli_dotenv()
     os.environ["TRANSLATOR_CONFIG_FILE"] = str(config_path)
     if args.dry_run:
         os.environ["LOCALIZE_DRY_RUN"] = "true"
     runtime = importlib.import_module("localize.translate_localization_files")
-    asyncio.run(runtime.main())
+    try:
+        result = asyncio.run(runtime.main())
+    except Exception as exc:
+        print(f"error: pipeline failed: {exc}", file=sys.stderr)
+        return 1
+    if result is False:
+        return 1
     return 0
 
 
@@ -281,7 +348,11 @@ def _cmd_quality_gate(args: argparse.Namespace) -> int:
 
 
 def _print_memory_stats(args: argparse.Namespace) -> int:
-    memory = load_translation_memory(args.memory_file)
+    try:
+        memory = load_translation_memory_strict(args.memory_file)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     stats = memory.stats()
     if args.output_format == "json":
         print(json.dumps({
@@ -420,15 +491,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="localize",
         description="Validate and run the AI localization translation pipeline.",
-    )
-    parser.add_argument(
-        "--plugin",
-        action="append",
-        default=[],
-        help=(
-            "Import a plugin module before running the command. Plugins register "
-            "custom localization adapters at import time."
-        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -618,7 +680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.init_args = forwarded_args
     elif forwarded_args:
         parser.error(f"unrecognized arguments: {' '.join(forwarded_args)}")
-    load_plugins([*plugin_args, *args.plugin])
+    load_plugins(plugin_args)
     return int(args.func(args))
 
 

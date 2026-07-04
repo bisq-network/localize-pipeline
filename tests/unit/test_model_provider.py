@@ -459,3 +459,22 @@ def test_aisuite_factory_rejects_invalid_openai_config_before_endpoint_merge():
             aisuite_provider_configs={"openai": None},
             model_names=("gpt-4o-mini",),
         )
+
+
+def test_aisuite_factory_preserves_configured_openai_api_key_with_endpoint():
+    logger = logging.getLogger("test")
+    provider_configs = {"openai": {"api_key": "real-config-key"}}
+
+    with patch("localize.model_provider.create_aisuite_provider") as create_aisuite:
+        create_model_provider(
+            provider_name="aisuite",
+            api_key=None,
+            api_base_url="http://localhost:11434/v1",
+            logger=logger,
+            aisuite_provider_configs=provider_configs,
+            model_names=("gpt-4o-mini",),
+        )
+
+    kwargs = create_aisuite.call_args.kwargs
+    assert kwargs["provider_configs"]["openai"]["api_key"] == "real-config-key"
+    assert kwargs["provider_configs"]["openai"]["base_url"] == "http://localhost:11434/v1"

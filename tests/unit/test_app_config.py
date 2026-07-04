@@ -5,7 +5,13 @@ from unittest.mock import patch, mock_open, MagicMock
 import pytest
 import yaml
 
-from localize.app_config import AppConfig, _non_empty_env, load_app_config, validate_config
+from localize.app_config import (
+    AppConfig,
+    _non_empty_env,
+    _scrub_blank_env,
+    load_app_config,
+    validate_config,
+)
 from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
 from localize.localization_layouts import SUFFIX_LAYOUT
 
@@ -189,10 +195,62 @@ class TestLoadAppConfig:
                     with patch.dict(os.environ, {}, clear=True):
                         config = load_app_config()
 
-        assert config.translation_queue_folder == os.path.join(str(tmp_path), "translation_queue")
-        assert config.translated_queue_folder == os.path.join(str(tmp_path), "translated_queue")
+        import hashlib
+
+        config_path = os.path.join(config.project_root, "config.yaml")
+        digest = hashlib.sha256(os.path.abspath(config_path).encode("utf-8")).hexdigest()[:12]
+        assert config.translation_queue_folder == os.path.join(
+            str(tmp_path),
+            f"localize-pipeline-{digest}",
+            "translation_queue",
+        )
+        assert config.translated_queue_folder == os.path.join(
+            str(tmp_path),
+            f"localize-pipeline-{digest}",
+            "translated_queue",
+        )
         assert not os.path.exists(config.translation_queue_folder)
         assert not os.path.exists(config.translated_queue_folder)
+
+    def test_load_config_resolves_relative_state_paths_against_config_dir(self, tmp_path):
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "dry_run: true\n"
+            "translation_key_ledger_file_path: state/ledger.json\n"
+            "translation_memory_file_path: state/memory.json\n",
+            encoding="utf-8",
+        )
+
+        with patch("localize.app_config.setup_logger") as mock_logger:
+            mock_logger.return_value = MagicMock()
+            with patch.dict(os.environ, {"TRANSLATOR_CONFIG_FILE": str(config_path)}, clear=True):
+                config = load_app_config()
+
+        assert config.translation_key_ledger_file_path == str(config_dir / "state" / "ledger.json")
+        assert config.translation_memory_file_path == str(config_dir / "state" / "memory.json")
+
+    def test_load_config_and_cli_share_queue_dir_resolution(self, tmp_path):
+        from localize.cli import _runtime_dir
+
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "dry_run: true\n"
+            "translation_queue_folder: scratch/queue\n"
+            "translated_queue_folder: scratch/done\n",
+            encoding="utf-8",
+        )
+
+        with patch("localize.app_config.setup_logger") as mock_logger:
+            mock_logger.return_value = MagicMock()
+            with patch.dict(os.environ, {"TRANSLATOR_CONFIG_FILE": str(config_path)}, clear=True):
+                config = load_app_config()
+
+        assert config.translation_queue_folder == str(_runtime_dir("scratch/queue", config_path=config_path))
+        assert config.translated_queue_folder == str(_runtime_dir("scratch/done", config_path=config_path))
 
 
     def test_load_config_reads_project_context_and_format(self):
@@ -286,7 +344,7 @@ class TestLoadAppConfig:
         assert config.localization_format == JAVA_PROPERTIES_FORMAT
         assert config.localization_profiles[1].localization_layout.id == "locale_directory"
 
-    def test_load_config_with_invalid_format_falls_back_to_java_properties(self):
+    def test_load_config_with_invalid_format_raises(self):
         mock_config = {
             "dry_run": True,
             "localization_format": "unknown_format",
@@ -297,9 +355,8 @@ class TestLoadAppConfig:
                 with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
-                        config = load_app_config()
-
-        assert config.localization_format == JAVA_PROPERTIES_FORMAT
+                        with pytest.raises(ValueError, match="Unsupported localization_format"):
+                            load_app_config()
 
     def test_load_config_with_invalid_multi_profile_raises(self):
         mock_config = {
@@ -317,7 +374,7 @@ class TestLoadAppConfig:
                         with pytest.raises(ValueError, match="Unsupported localization_format"):
                             load_app_config()
 
-    def test_load_config_with_invalid_layout_preserves_source_locale(self):
+    def test_load_config_with_invalid_layout_raises(self):
         mock_config = {
             "dry_run": True,
             "source_locale": "fr",
@@ -329,10 +386,8 @@ class TestLoadAppConfig:
                 with patch("localize.app_config.setup_logger") as mock_logger:
                     mock_logger.return_value = MagicMock()
                     with patch.dict(os.environ, {}, clear=True):
-                        config = load_app_config()
-
-        assert config.localization_layout.id == "suffix"
-        assert config.localization_layout.source_locale == "fr"
+                        with pytest.raises(ValueError, match="Unsupported localization_layout"):
+                            load_app_config()
 
     def test_load_config_treats_null_brand_glossary_as_empty(self):
         mock_config = {
@@ -874,6 +929,8 @@ class TestProviderAbstraction:
     def test_empty_env_value_is_removed_before_sdk_initialization(self):
         with patch.dict(os.environ, {"OPENAI_BASE_URL": "   "}, clear=True):
             assert _non_empty_env("OPENAI_BASE_URL") is None
+            assert "OPENAI_BASE_URL" in os.environ
+            _scrub_blank_env("OPENAI_BASE_URL")
             assert "OPENAI_BASE_URL" not in os.environ
 
     def test_empty_review_model_env_falls_back_to_config(self):

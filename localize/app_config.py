@@ -1,4 +1,5 @@
 """Application configuration module for the translation service."""
+import hashlib
 import logging
 import os
 import sys
@@ -14,7 +15,6 @@ from localize.logging_config import setup_logger
 from localize.localization_formats import (
     JAVA_PROPERTIES_FORMAT,
     LocalizationFormat,
-    load_localization_format,
 )
 from localize.localization_layouts import (
     SUFFIX_LAYOUT,
@@ -130,6 +130,7 @@ def validate_config(
     effective_api_base_url: Optional[str] = None,
     api_key_available: Optional[bool] = None,
     dry_run_override: Optional[bool] = None,
+    config_base_dir: Optional[str] = None,
 ) -> List[ConfigIssue]:
     """Validate a raw config dict and return actionable issues.
 
@@ -144,6 +145,8 @@ def validate_config(
 
     # Required paths must be set, not a left-over placeholder, and must exist.
     target_root = config.get("target_project_root")
+    if target_root and config_base_dir and not os.path.isabs(str(target_root)):
+        target_root = os.path.join(config_base_dir, str(target_root))
     for key in ("target_project_root", "input_folder"):
         value = config.get(key)
         if not value:
@@ -160,9 +163,11 @@ def validate_config(
             continue
         # A relative input_folder is resolved against target_project_root, matching
         # how update-translations.sh builds ABSOLUTE_INPUT_FOLDER.
-        resolved = value
-        if key == "input_folder" and target_root and not os.path.isabs(value):
-            resolved = os.path.join(target_root, value)
+        resolved = str(value)
+        if not os.path.isabs(resolved) and key == "target_project_root" and config_base_dir:
+            resolved = os.path.join(config_base_dir, resolved)
+        if key == "input_folder" and target_root and not os.path.isabs(str(value)):
+            resolved = os.path.join(str(target_root), str(value))
         if not path_exists(resolved):
             issues.append(ConfigIssue(
                 "error",
@@ -174,8 +179,9 @@ def validate_config(
     locale_codes = set()
     if isinstance(locales, list):
         locale_codes = {
-            loc.get("code") for loc in locales
-            if isinstance(loc, dict) and loc.get("code")
+            loc if isinstance(loc, str) else loc.get("code")
+            for loc in locales
+            if (isinstance(loc, str) and loc) or (isinstance(loc, dict) and loc.get("code"))
         }
     if not locale_codes:
         issues.append(ConfigIssue(
@@ -271,6 +277,15 @@ def _compute_project_root() -> str:
     return os.path.abspath(os.path.join(script_dir, os.pardir))
 
 
+def _resolve_config_file_path(project_root: str) -> str:
+    """Resolve the active configuration file path."""
+    default_config_path = os.path.join(project_root, 'config.yaml')
+    config_file = os.environ.get('TRANSLATOR_CONFIG_FILE', default_config_path)
+    if not os.path.isabs(config_file):
+        config_file = os.path.abspath(config_file)
+    return config_file
+
+
 def _load_dotenv_files(project_root: str) -> None:
     """Load .env files from project root or docker directory."""
     dotenv_path_project_root = os.path.join(project_root, '.env')
@@ -284,13 +299,7 @@ def _load_dotenv_files(project_root: str) -> None:
 
 def _load_yaml_config(project_root: str) -> Dict[str, Any]:
     """Load YAML configuration file with enhanced error handling and path resolution."""
-    # If TRANSLATOR_CONFIG_FILE is set (potentially from .env), use it; otherwise, default to 'config.yaml'.
-    default_config_path = os.path.join(project_root, 'config.yaml')
-    config_file = os.environ.get('TRANSLATOR_CONFIG_FILE', default_config_path)
-
-    # Ensure we have an absolute path for better error reporting
-    if not os.path.isabs(config_file):
-        config_file = os.path.abspath(config_file)
+    config_file = _resolve_config_file_path(project_root)
 
     config = {}
     try:
@@ -322,21 +331,20 @@ def _load_yaml_config(project_root: str) -> Dict[str, Any]:
     except yaml.YAMLError as e:
         print(f"Error: Invalid YAML in configuration file '{config_file}': {e}", file=sys.stderr)
         print("Please check your YAML syntax. Using default configuration.", file=sys.stderr)
-    except (OSError, IOError) as e:
+    except OSError as e:
         print(f"Error: Could not read configuration file '{config_file}': {e}", file=sys.stderr)
-        print("Using default configuration.", file=sys.stderr)
-    except Exception as e:
-        print(f"Unexpected error loading configuration file '{config_file}': {e}", file=sys.stderr)
         print("Using default configuration.", file=sys.stderr)
 
     return config
 
 
-def _setup_logger_from_config(config: Dict[str, Any]) -> logging.Logger:
+def _setup_logger_from_config(config: Dict[str, Any], *, config_file_path: Optional[str] = None) -> logging.Logger:
     """Set up logger based on configuration."""
-    log_config = config.get('logging', {})
+    log_config = config.get('logging') or {}
     log_level_str = log_config.get('log_level', 'INFO').upper()
     log_file_path = log_config.get('log_file_path', 'logs/translation_log.log')
+    if config_file_path and not os.path.isabs(str(log_file_path)):
+        log_file_path = os.path.join(os.path.dirname(os.path.abspath(config_file_path)), str(log_file_path))
     log_to_console = log_config.get('log_to_console', True)
     return setup_logger(log_level_str, log_file_path, log_to_console)
 
@@ -364,8 +372,14 @@ def _build_language_mappings(locales_list: List[Dict[str, str]]) -> tuple[Dict[s
     name_to_code: Dict[str, str] = {}
 
     for locale in locales_list:
-        code = locale.get('code')
-        name = locale.get('name')
+        if isinstance(locale, str):
+            code = locale
+            name = locale
+        elif isinstance(locale, Mapping):
+            code = locale.get('code')
+            name = locale.get('name')
+        else:
+            continue
         if code and name:
             language_codes[code] = name
             name_to_code[name.lower()] = code
@@ -410,20 +424,21 @@ def _resolve_dry_run(config: Dict[str, Any]) -> bool:
 
 
 def _non_empty_env(name: str) -> Optional[str]:
-    """Return a stripped environment value, treating blanks as unset.
-
-    Some CI systems export optional inputs as empty environment variables. The
-    OpenAI SDK reads OPENAI_BASE_URL directly from the environment, so leaving a
-    blank value in place can override the SDK default endpoint with an empty URL.
-    """
+    """Return a stripped environment value, treating blanks as unset."""
     value = os.environ.get(name)
     if value is None:
         return None
     stripped = value.strip()
     if stripped:
         return stripped
-    os.environ.pop(name, None)
     return None
+
+
+def _scrub_blank_env(name: str) -> None:
+    """Remove a blank environment variable before SDKs can read it directly."""
+    value = os.environ.get(name)
+    if value is not None and not value.strip():
+        os.environ.pop(name, None)
 
 
 def _resolve_api_base_url(config: Dict[str, Any]) -> Optional[str]:
@@ -437,6 +452,57 @@ def _resolve_api_base_url(config: Dict[str, Any]) -> Optional[str]:
             if stripped:
                 return stripped
     return None
+
+
+def resolve_runtime_dir(
+    raw_path: Any,
+    *,
+    config_path: Optional[str],
+    default_name: str,
+) -> str:
+    """Resolve runtime scratch directories consistently for loader and CLI.
+
+    Explicit absolute paths are preserved. Explicit relative paths are resolved
+    against the config file directory. When the config omits the path entirely,
+    runtime queues stay under the system temp directory.
+    """
+    if raw_path is None or str(raw_path).strip() == "":
+        if config_path:
+            digest = hashlib.sha256(os.path.abspath(config_path).encode("utf-8")).hexdigest()[:12]
+            return os.path.abspath(
+                os.path.join(tempfile.gettempdir(), f"localize-pipeline-{digest}", default_name)
+            )
+        return os.path.abspath(os.path.join(tempfile.gettempdir(), default_name))
+
+    path = os.path.expanduser(str(raw_path))
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+
+    base_dir = os.path.dirname(os.path.abspath(config_path)) if config_path else tempfile.gettempdir()
+    return os.path.abspath(os.path.join(base_dir, path))
+
+
+def _resolve_config_relative_path(raw_path: Any, *, config_path: str, default_path: str) -> str:
+    """Resolve state files relative to the active config when explicitly set."""
+    path = str(raw_path or default_path)
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    return os.path.abspath(os.path.join(config_dir, path))
+
+
+def _as_positive_int(value: Any, *, default: int, name: str) -> int:
+    """Parse a positive integer config value with an actionable error."""
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive integer.") from exc
+    if parsed < 1:
+        raise ValueError(f"{name} must be at least 1.")
+    return parsed
 
 
 def _create_model_provider(
@@ -476,7 +542,7 @@ def _create_model_provider(
             logger.critical("For dry-run mode, set 'dry_run: true' in your config file.")
         sys.exit(1)
     except Exception as e:
-        logger.critical("Failed to initialize model provider: %s", str(e))
+        logger.critical("Failed to initialize model provider: %s", str(e), exc_info=True)
         logger.critical("Please check your OPENAI_API_KEY and network connectivity.")
         sys.exit(1)
 
@@ -493,12 +559,15 @@ def load_app_config() -> AppConfig:
 
     # Load .env files
     _load_dotenv_files(project_root)
+    _scrub_blank_env('OPENAI_API_KEY')
+    _scrub_blank_env('OPENAI_BASE_URL')
+    config_file_path = _resolve_config_file_path(project_root)
 
     # Load YAML configuration
     config = _load_yaml_config(project_root)
 
     # Set up logger
-    logger = _setup_logger_from_config(config)
+    logger = _setup_logger_from_config(config, config_file_path=config_file_path)
 
     # Log .env status now that logger is available
     _log_dotenv_status(logger, project_root)
@@ -509,35 +578,43 @@ def load_app_config() -> AppConfig:
 
     # Get configuration values with defaults that validation and runtime share.
     dry_run = _resolve_dry_run(config)
+    review_model_env = _non_empty_env('REVIEW_MODEL_NAME')
+    validation_config = (
+        {**config, 'review_model_name': review_model_env}
+        if review_model_env
+        else config
+    )
 
     # Validate the configuration and surface actionable problems (non-fatal).
     _log_config_issues(
         validate_config(
-            config,
+            validation_config,
             effective_api_base_url=api_base_url,
-            api_key_available=bool(os.environ.get('OPENAI_API_KEY')),
+            api_key_available=bool(_non_empty_env('OPENAI_API_KEY')),
             dry_run_override=dry_run,
+            config_base_dir=os.path.dirname(config_file_path),
         ),
         logger,
     )
 
     # Build language mappings
-    locales_list = config.get('supported_locales', [])
+    locales_list = config.get('supported_locales') or []
     language_codes, name_to_code = _build_language_mappings(locales_list)
 
     # Process style rules
-    style_rules = config.get('style_rules', {})
+    style_rules = config.get('style_rules') or {}
     precomputed_style_rules_text = _precompute_style_rules(style_rules, language_codes)
 
     # Get configuration values with defaults
     # PROCESS_ALL_FILES env var overrides config (the GitHub Action sets it so a
     # clean CI checkout, which has no working-tree changes, still finds work).
+    process_all_files_env = _non_empty_env('PROCESS_ALL_FILES')
     process_all_files = _as_bool(
-        os.environ.get('PROCESS_ALL_FILES', config.get('process_all_files', False)),
+        process_all_files_env if process_all_files_env is not None else config.get('process_all_files', False),
         default=False,
     )
-    model_name = config.get('model_name', 'gpt-4')
-    review_model_name = _non_empty_env('REVIEW_MODEL_NAME') or config.get('review_model_name', model_name)
+    model_name = str(config.get('model_name') or 'gpt-4')
+    review_model_name = review_model_env or str(config.get('review_model_name') or model_name)
     model_provider_name = normalize_model_provider_name(
         str(config.get('model_provider', DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     )
@@ -546,14 +623,20 @@ def load_app_config() -> AppConfig:
     except ModelProviderConfigurationError as exc:
         logger.critical("CRITICAL: %s", exc)
         sys.exit(1)
-    retranslate_identical_source_strings = bool(config.get('retranslate_identical_source_strings', False))
-    ignore_key_patterns = compile_ignore_key_patterns(config.get('ignore_key_patterns', []))
+    retranslate_identical_source_strings = _as_bool(
+        config.get('retranslate_identical_source_strings', False),
+        default=False,
+    )
+    ignore_key_patterns = compile_ignore_key_patterns(config.get('ignore_key_patterns') or [])
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(
         source_identical_min_block_count=int(quality_gate_config.get('source_identical_min_block_count', 5)),
         source_identical_max_count=int(quality_gate_config.get('source_identical_max_count', 20)),
         source_identical_max_ratio=float(quality_gate_config.get('source_identical_max_ratio', 0.30)),
-        block_on_pipeline_warnings=bool(quality_gate_config.get('block_on_pipeline_warnings', True)),
+        block_on_pipeline_warnings=_as_bool(
+            quality_gate_config.get('block_on_pipeline_warnings', True),
+            default=True,
+        ),
         block_on_semantic_qa_findings=_as_bool(
             quality_gate_config.get('block_on_semantic_qa_findings', True),
             default=True,
@@ -570,50 +653,56 @@ def load_app_config() -> AppConfig:
 
     # Holistic review chunk size with environment override
     # Reduced default from 75 to 30 to handle content-heavy files better
-    default_chunk_size = config.get('holistic_review_chunk_size', 30)
-    holistic_review_chunk_size = int(os.environ.get('HOLISTIC_REVIEW_CHUNK_SIZE', default_chunk_size))
-    rate_limit_per_minute = int(config.get('rate_limit_per_minute', 60))
+    default_chunk_size = _as_positive_int(
+        config.get('holistic_review_chunk_size', 30),
+        default=30,
+        name='holistic_review_chunk_size',
+    )
+    holistic_review_chunk_size = _as_positive_int(
+        _non_empty_env('HOLISTIC_REVIEW_CHUNK_SIZE'),
+        default=default_chunk_size,
+        name='HOLISTIC_REVIEW_CHUNK_SIZE',
+    )
+    rate_limit_per_minute = _as_positive_int(
+        config.get('rate_limit_per_minute', 60),
+        default=60,
+        name='rate_limit_per_minute',
+    )
 
     # Queue folders
-    temp_dir = tempfile.gettempdir()
-    translation_queue_name = config.get('translation_queue_folder', 'translation_queue')
-    translated_queue_name = config.get('translated_queue_folder', 'translated_queue')
-    translation_queue_folder = os.path.join(temp_dir, translation_queue_name)
-    translated_queue_folder = os.path.join(temp_dir, translated_queue_name)
-    translation_key_ledger_file_path = config.get(
-        'translation_key_ledger_file_path',
-        os.path.join(project_root, 'logs', 'translation_key_ledger.json')
+    translation_queue_folder = resolve_runtime_dir(
+        config.get('translation_queue_folder'),
+        config_path=config_file_path,
+        default_name='translation_queue',
     )
-    if not os.path.isabs(translation_key_ledger_file_path):
-        translation_key_ledger_file_path = os.path.join(project_root, translation_key_ledger_file_path)
-    translation_memory_file_path = config.get(
-        'translation_memory_file_path',
-        os.path.join(project_root, 'logs', 'translation_memory.json')
+    translated_queue_folder = resolve_runtime_dir(
+        config.get('translated_queue_folder'),
+        config_path=config_file_path,
+        default_name='translated_queue',
     )
-    if not os.path.isabs(translation_memory_file_path):
-        translation_memory_file_path = os.path.join(project_root, translation_memory_file_path)
+    translation_key_ledger_file_path = _resolve_config_relative_path(
+        config.get('translation_key_ledger_file_path'),
+        config_path=config_file_path,
+        default_path=os.path.join(project_root, 'logs', 'translation_key_ledger.json'),
+    )
+    translation_memory_file_path = _resolve_config_relative_path(
+        config.get('translation_memory_file_path'),
+        config_path=config_file_path,
+        default_path=os.path.join(project_root, 'logs', 'translation_memory.json'),
+    )
     translation_memory_enabled = _as_bool(config.get('translation_memory_enabled', True), default=True)
 
     project_context = str(config.get('project_context') or '').strip()
     try:
         localization_profiles = load_localization_profiles(config)
     except ValueError:
-        if config.get('localization_formats') is not None:
+        if any(key in config for key in ('localization_formats', 'localization_format', 'localization_layout')):
             raise
-        try:
-            localization_format = load_localization_format(config.get('localization_format'))
-        except ValueError:
-            localization_format = JAVA_PROPERTIES_FORMAT
-        try:
-            localization_layout = load_localization_layout(
-                config.get('localization_layout'),
-                source_locale=str(config.get('source_locale') or 'en'),
-            )
-        except ValueError:
-            localization_layout = load_localization_layout(
-                None,
-                source_locale=str(config.get('source_locale') or 'en'),
-            )
+        localization_format = JAVA_PROPERTIES_FORMAT
+        localization_layout = load_localization_layout(
+            None,
+            source_locale=str(config.get('source_locale') or 'en'),
+        )
         localization_profiles = (LocalizationProfile(localization_format, localization_layout),)
     localization_format = localization_profiles[0].localization_format
     localization_layout = localization_profiles[0].localization_layout
@@ -636,11 +725,19 @@ def load_app_config() -> AppConfig:
         glossary_file_path=config.get('glossary_file_path', 'glossary.json'),
         model_name=model_name,
         review_model_name=review_model_name,
-        max_model_tokens=config.get('max_model_tokens', 4000),
+        max_model_tokens=_as_positive_int(
+            config.get('max_model_tokens', 4000),
+            default=4000,
+            name='max_model_tokens',
+        ),
         dry_run=dry_run,
         process_all_files=process_all_files,
         holistic_review_chunk_size=holistic_review_chunk_size,
-        max_concurrent_api_calls=config.get('max_concurrent_api_calls', 1),
+        max_concurrent_api_calls=_as_positive_int(
+            config.get('max_concurrent_api_calls', 1),
+            default=1,
+            name='max_concurrent_api_calls',
+        ),
         rate_limit_per_minute=rate_limit_per_minute,
         language_codes=language_codes,
         name_to_code=name_to_code,
@@ -654,7 +751,7 @@ def load_app_config() -> AppConfig:
         translation_key_ledger_file_path=translation_key_ledger_file_path,
         translation_memory_file_path=translation_memory_file_path,
         translation_memory_enabled=translation_memory_enabled,
-        preserve_queues_for_debug=config.get('preserve_queues_for_debug', False),
+        preserve_queues_for_debug=_as_bool(config.get('preserve_queues_for_debug', False), default=False),
         model_provider=model_provider,
         openai_client=openai_client,
         model_provider_name=model_provider_name,
