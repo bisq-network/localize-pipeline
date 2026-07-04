@@ -129,9 +129,11 @@ async def test_connector_set_builds_pipeline_steps_and_publisher_boundary():
     )
 
     assert result.processed_files_count == 1
-    assert source.calls[:3] == [
+    assert source.calls[:5] == [
         "validate:/repo/i18n:/app/queue:/app/done:/repo",
         "detect:/repo/i18n:/repo:False",
+        "cleanup:/app/queue:/app/done",
+        "validate:/repo/i18n:/app/queue:/app/done:/repo",
         "archive:['messages_de.json']:/repo/i18n/archive",
     ]
     assert processor.calls == [

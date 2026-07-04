@@ -136,6 +136,7 @@ class TestTranslationSummary(unittest.TestCase):
                 "changed_values_count": 20,
                 "candidate_keys_count": 433,
                 "model_translation_keys_count": 17,
+                "model_translation_failed_count": 2,
                 "translation_memory_reused_count": 416,
                 "source_identical_skipped_count": 360,
             },
@@ -146,6 +147,7 @@ class TestTranslationSummary(unittest.TestCase):
         self.assertEqual(summary["changed_values_count"], 20)
         self.assertEqual(summary["candidate_keys_count"], 433)
         self.assertEqual(summary["model_translation_keys_count"], 17)
+        self.assertEqual(summary["model_translation_failed_count"], 2)
         self.assertEqual(summary["translation_memory_reused_count"], 416)
         self.assertEqual(summary["source_identical_skipped_count"], 360)
 

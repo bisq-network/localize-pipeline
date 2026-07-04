@@ -29,8 +29,7 @@ from localize.translation_memory import (
 @patch('localize.translate_localization_files.copy_files_to_translation_queue')
 @patch('localize.translate_localization_files.process_translation_queue')
 @patch('localize.translate_localization_files.copy_translated_files_back')
-@patch('localize.translate_localization_files.move_files_to_archive')
-async def test_main_flow_no_changes(mock_move, mock_copy_back, mock_process, mock_copy_to_queue, mock_get_changed, integration_test_environment):
+async def test_main_flow_no_changes(mock_copy_back, mock_process, mock_copy_to_queue, mock_get_changed, integration_test_environment):
     mock_get_changed.return_value = []
     await localize.translate_localization_files.main()
     mock_get_changed.assert_called_once_with(
@@ -41,7 +40,6 @@ async def test_main_flow_no_changes(mock_move, mock_copy_back, mock_process, moc
     mock_copy_to_queue.assert_not_called()
     mock_process.assert_not_called()
     mock_copy_back.assert_not_called()
-    mock_move.assert_not_called()
 
 
 @pytest.mark.asyncio

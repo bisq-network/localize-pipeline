@@ -881,6 +881,7 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
             if (n("changed_values_count") > 0
                 or n("candidate_keys_count") > 0
                 or n("model_translation_keys_count") > 0
+                or n("model_translation_failed_count") > 0
                 or n("translation_memory_reused_count") > 0
                 or n("source_identical_skipped_count") > 0) then
               [
@@ -888,6 +889,7 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
                 "- Output values changed: \(n("changed_values_count"))",
                 "- Candidate keys selected: \(n("candidate_keys_count"))",
                 "- Sent to model: \(n("model_translation_keys_count"))",
+                "- Failed model translations: \(n("model_translation_failed_count"))",
                 "- Reused from translation memory: \(n("translation_memory_reused_count"))",
                 "- Source-identical skipped (no ledger baseline): \(n("source_identical_skipped_count"))"
               ] | join("\n")

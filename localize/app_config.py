@@ -65,6 +65,7 @@ class AppConfig:
     process_all_files: bool
     holistic_review_chunk_size: int
     max_concurrent_api_calls: int
+    rate_limit_per_minute: int
 
     # Language configuration
     language_codes: Dict[str, str]
@@ -571,6 +572,7 @@ def load_app_config() -> AppConfig:
     # Reduced default from 75 to 30 to handle content-heavy files better
     default_chunk_size = config.get('holistic_review_chunk_size', 30)
     holistic_review_chunk_size = int(os.environ.get('HOLISTIC_REVIEW_CHUNK_SIZE', default_chunk_size))
+    rate_limit_per_minute = int(config.get('rate_limit_per_minute', 60))
 
     # Queue folders
     temp_dir = tempfile.gettempdir()
@@ -639,6 +641,7 @@ def load_app_config() -> AppConfig:
         process_all_files=process_all_files,
         holistic_review_chunk_size=holistic_review_chunk_size,
         max_concurrent_api_calls=config.get('max_concurrent_api_calls', 1),
+        rate_limit_per_minute=rate_limit_per_minute,
         language_codes=language_codes,
         name_to_code=name_to_code,
         retranslate_identical_source_strings=retranslate_identical_source_strings,

@@ -215,6 +215,8 @@ async def test_pipeline_runs_core_steps_with_injected_adapters(pipeline_paths):
     assert fake.calls == [
         "validate:/repo/i18n:/app/translation_queue:/app/translated_queue:/repo",
         "detect:/repo/i18n:/repo:False",
+        "cleanup:/app/translation_queue:/app/translated_queue",
+        "validate:/repo/i18n:/app/translation_queue:/app/translated_queue:/repo",
         "archive:['app_de.properties']:/repo/i18n:/repo/i18n/archive",
         "enqueue:['app_de.properties']:/repo/i18n:/app/translation_queue",
         "process:/app/translation_queue:/app/translated_queue:/app/glossary.json",
@@ -233,6 +235,7 @@ async def test_pipeline_passes_run_metrics_to_summary(pipeline_paths):
         "changed_values_count": 2,
         "candidate_keys_count": 5,
         "model_translation_keys_count": 3,
+        "model_translation_failed_count": 1,
         "translation_memory_reused_count": 2,
         "source_identical_skipped_count": 7,
     }
@@ -257,7 +260,7 @@ async def test_pipeline_passes_run_metrics_to_summary(pipeline_paths):
     assert result.total_keys_translated == 5
     assert result.run_metrics == run_metrics
     assert (
-        "summary:/app/logs/translation_summary.json:['app_de.properties']:5:0:"
+        "summary:/app/logs/translation_summary.json:['app_de.properties']:0:0:"
         f"{run_metrics}"
     ) in fake.calls
 
