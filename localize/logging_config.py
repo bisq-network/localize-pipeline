@@ -43,34 +43,48 @@ def setup_logger(log_level_str: str, log_file_path: str, log_to_console: bool) -
     Returns:
         The configured logger instance.
     """
-    # Use a specific logger name to avoid interfering with other loggers.
-    logger = logging.getLogger("translation_script")
-
     # Set the logging level from the config string
-    log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+    requested_level = str(log_level_str or "INFO").upper()
+    if requested_level not in logging._nameToLevel:  # noqa: SLF001 - stdlib exposes configured level names here.
+        print(
+            f"Warning: invalid log_level '{log_level_str}', falling back to INFO.",
+            file=sys.stderr,
+        )
+        requested_level = "INFO"
+    log_level = logging._nameToLevel[requested_level]  # noqa: SLF001
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.handlers.clear()
+
+    logger = logging.getLogger("translation_script")
     logger.setLevel(log_level)
-
-    # Clear any existing handlers to prevent duplicate logging
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    # Prevent the log messages from being passed to the root logger
-    logger.propagate = False
+    logger.handlers.clear()
+    logger.propagate = True
 
     # Define a standard formatter for log messages
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
     # --- File Handler ---
-    # Create the log directory if it doesn't exist
-    log_dir = os.path.dirname(log_file_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    # Add a handler to write log messages to a file
-    file_handler = RotatingFileHandler(
-        log_file_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8', delay=True
-    )
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    try:
+        resolved_log_file_path = os.path.abspath(log_file_path)
+        log_dir = os.path.dirname(resolved_log_file_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            resolved_log_file_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding='utf-8',
+            delay=True,
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+    except OSError as exc:
+        print(
+            f"Warning: could not configure file logging at '{log_file_path}': {exc}",
+            file=sys.stderr,
+        )
     # --- End File Handler ---
 
     # --- Console Handler ---
@@ -79,7 +93,7 @@ def setup_logger(log_level_str: str, log_file_path: str, log_to_console: bool) -
         # We now use the custom handler that plays nice with tqdm.
         tqdm_handler = TqdmLoggingHandler()
         tqdm_handler.setFormatter(formatter)
-        logger.addHandler(tqdm_handler)
+        root_logger.addHandler(tqdm_handler)
     # --- End Console Handler ---
 
     return logger
