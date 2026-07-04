@@ -27,6 +27,7 @@ class TestAppConfig:
             process_all_files=False,
             holistic_review_chunk_size=75,
             max_concurrent_api_calls=1,
+            rate_limit_per_minute=60,
             language_codes={"de": "German"},
             name_to_code={"german": "de"},
             retranslate_identical_source_strings=False,
@@ -55,6 +56,7 @@ class TestAppConfig:
         assert config.localization_format == JAVA_PROPERTIES_FORMAT
         assert config.localization_layout == SUFFIX_LAYOUT
         assert config.localization_profiles[0].localization_format == JAVA_PROPERTIES_FORMAT
+        assert config.rate_limit_per_minute == 60
 
 
 class TestLoadAppConfig:
@@ -164,6 +166,18 @@ class TestLoadAppConfig:
             config.project_root, "logs", "translation_memory.json"
         )
         assert config.translation_memory_enabled is True
+        assert config.rate_limit_per_minute == 60
+
+    def test_load_config_reads_rate_limit_per_minute(self):
+        mock_config = {"dry_run": True, "rate_limit_per_minute": 120}
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.setup_logger") as mock_logger:
+                mock_logger.return_value = MagicMock()
+                with patch.dict(os.environ, {}, clear=True):
+                    config = load_app_config()
+
+        assert config.rate_limit_per_minute == 120
 
     def test_load_config_resolves_queue_folders_without_creating_them(self, tmp_path):
         mock_config = {"dry_run": True}

@@ -340,6 +340,7 @@ def test_pr_body_includes_translation_run_summary_metrics():
     assert "changed_values_count" in script
     assert "candidate_keys_count" in script
     assert "model_translation_keys_count" in script
+    assert "model_translation_failed_count" in script
     assert "translation_memory_reused_count" in script
     assert "source_identical_skipped_count" in script
 
