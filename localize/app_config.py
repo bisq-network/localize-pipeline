@@ -65,6 +65,7 @@ class AppConfig:
     process_all_files: bool
     holistic_review_chunk_size: int
     max_concurrent_api_calls: int
+    rate_limit_per_minute: int
 
     # Language configuration
     language_codes: Dict[str, str]
@@ -662,6 +663,11 @@ def load_app_config() -> AppConfig:
         default=default_chunk_size,
         name='HOLISTIC_REVIEW_CHUNK_SIZE',
     )
+    rate_limit_per_minute = _as_positive_int(
+        config.get('rate_limit_per_minute', 60),
+        default=60,
+        name='rate_limit_per_minute',
+    )
 
     # Queue folders
     translation_queue_folder = resolve_runtime_dir(
@@ -732,6 +738,7 @@ def load_app_config() -> AppConfig:
             default=1,
             name='max_concurrent_api_calls',
         ),
+        rate_limit_per_minute=rate_limit_per_minute,
         language_codes=language_codes,
         name_to_code=name_to_code,
         retranslate_identical_source_strings=retranslate_identical_source_strings,

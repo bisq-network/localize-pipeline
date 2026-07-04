@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import re
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -473,6 +474,39 @@ def test_pipeline_warnings_are_blocking_when_configured():
     assert report["status_state"] == "failure"
 
 
+def test_validation_control_and_placeholder_failures_are_blocking():
+    source_stats = analyze_source_identical_changes(
+        diff_text="",
+        repo_root=".",
+        input_folder="resources",
+        locale_codes=["es"],
+        brand_glossary=[],
+    )
+    source_stats.control_character_findings_count = 1
+
+    report = build_quality_gate_report(
+        source_stats=source_stats,
+        semantic_stats=None,
+        validation_summary={
+            "files": {
+                "mobile_es.properties": {
+                    "reverted_keys_count": 2,
+                    "control_character_findings_count": 1,
+                    "placeholder_failures_count": 1,
+                }
+            },
+            "pipeline_warnings": [],
+        },
+        changed_files=["resources/mobile_es.properties"],
+        input_folder="resources",
+        config=QualityGateConfig(block_on_pipeline_warnings=False),
+    )
+
+    assert report["blocking"] is True
+    assert any("Control-character" in reason for reason in report["blocking_reasons"])
+    assert any("Placeholder parity" in reason for reason in report["blocking_reasons"])
+
+
 def test_pipeline_warnings_are_filtered_to_current_batch():
     report = build_quality_gate_report(
         source_stats=analyze_source_identical_changes(
@@ -529,6 +563,28 @@ def test_missing_validation_summary_loads_empty_summary(tmp_path):
     summary = load_validation_summary(str(tmp_path / "missing.json"))
 
     assert summary == {"files": {}, "pipeline_warnings": []}
+
+
+def test_get_staged_diff_uses_pinned_no_color_diff_options():
+    from localize.translation_quality_gate import get_staged_diff
+
+    completed = MagicMock(returncode=0, stdout="diff", stderr="")
+    with patch("localize.translation_quality_gate.subprocess.run", return_value=completed) as run:
+        diff_text = get_staged_diff("/repo", ["resources/mobile_de.properties"])
+
+    assert diff_text == "diff"
+    command = run.call_args.args[0]
+    assert command[:7] == [
+        "git",
+        "-c",
+        "diff.noprefix=false",
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--cached",
+    ]
+    assert "--no-color" in command
+    assert "--no-ext-diff" in command
 
 
 def test_semantic_qa_blocks_recent_coderabbit_translation_nits(tmp_path):

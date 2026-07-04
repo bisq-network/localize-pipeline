@@ -54,6 +54,7 @@ semantic_quality_rules:
     locales: ["vi"]
     keys: ["mobile.tradeHistory.details.networkAddress.clear"]
     forbidden_target_regex: '^xóa\b'
+    regex_ignorecase: true
     severity: "error"
     source: "bisq-mobile#1478 CodeRabbit"
   - id: "analytics-cta-truncated-reporting"

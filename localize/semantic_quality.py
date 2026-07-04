@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
 from collections.abc import Iterable as IterableABC
 from collections.abc import Mapping as MappingABC
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Pattern, Sequence, Tuple
 
 from localize.localization_adapters import get_localization_adapter
 from localize.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat
 from localize.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout
+from localize.properties_parser import _has_unescaped_trailing_backslash
 
 
 @dataclass(frozen=True)
@@ -34,9 +36,9 @@ class SemanticRule:
     excluded_locales: Tuple[str, ...] = ()
     keys: Tuple[str, ...] = ("*",)
     severity: str = "error"
-    forbidden_target_regex: Optional[str] = None
-    required_target_regex: Optional[str] = None
-    source_regex: Optional[str] = None
+    forbidden_target_regex: Optional[str | Pattern[str]] = None
+    required_target_regex: Optional[str | Pattern[str]] = None
+    source_regex: Optional[str | Pattern[str]] = None
     source: str = "semantic-rule"
 
 
@@ -71,11 +73,7 @@ class SemanticQAStats:
     findings_count: int = 0
     errors_count: int = 0
     warnings_count: int = 0
-    examples: List[Dict[str, str]] = None
-
-    def __post_init__(self) -> None:
-        if self.examples is None:
-            self.examples = []
+    examples: List[Dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_findings(
@@ -87,7 +85,10 @@ class SemanticQAStats:
             findings_count=len(findings),
             errors_count=sum(1 for finding in findings if finding.severity == "error"),
             warnings_count=sum(1 for finding in findings if finding.severity == "warning"),
-            examples=[finding.to_example() for finding in findings[:examples_limit]],
+            examples=[
+                finding.to_example()
+                for finding in sorted(findings, key=lambda item: (item.file, item.key, item.rule_id))[:examples_limit]
+            ],
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -143,17 +144,6 @@ def normalize_value(value: Optional[str]) -> str:
     return (value or "").strip()
 
 
-def source_filename_for_locale_file(filename: str, locale_codes: Sequence[str]) -> Optional[str]:
-    if not JAVA_PROPERTIES_FORMAT.is_supported_file(filename):
-        return None
-    source = SUFFIX_LAYOUT.source_path_for_target(filename, locale_codes, JAVA_PROPERTIES_FORMAT)
-    return source if source != filename else None
-
-
-def locale_code_for_locale_file(filename: str, locale_codes: Sequence[str]) -> Optional[str]:
-    return SUFFIX_LAYOUT.extract_locale(filename, locale_codes, JAVA_PROPERTIES_FORMAT)
-
-
 def _extract_properties_entry(diff_line: str) -> Optional[Tuple[str, str]]:
     stripped = diff_line.strip()
     if not stripped or stripped.startswith(("#", "!")):
@@ -165,22 +155,48 @@ def _extract_properties_entry(diff_line: str) -> Optional[Tuple[str, str]]:
             escaped = not escaped
             continue
         if character in ("=", ":") and not escaped:
-            key = diff_line[:index].strip()
+            key = re.sub(r'\\([:=\s])', r'\1', diff_line[:index].strip())
             value = diff_line[index + 1 :].strip()
             return (key, value) if key else None
         escaped = False
     return None
 
 
-def _matching_translation_keys(key_hint: str, translations: Mapping[str, str]) -> List[str]:
-    if key_hint in translations:
-        return [key_hint]
+def _matching_translation_keys(
+    key_hint: str,
+    translations: Mapping[str, str],
+    expected_value: Optional[str] = None,
+) -> List[str]:
     hint_leaf = key_hint.rsplit("/", 1)[-1]
-    return sorted(
+    candidates = sorted(
         key
         for key in translations
-        if key.rsplit("/", 1)[-1] == hint_leaf
+        if key == key_hint or key.rsplit("/", 1)[-1] == hint_leaf
     )
+    if expected_value is not None:
+        candidates = [
+            key for key in candidates
+            if translations.get(key) == expected_value
+        ]
+    if len(candidates) == 1:
+        return candidates
+    if expected_value is None and key_hint in translations:
+        return [key_hint]
+    return []
+
+
+def _extract_json_added_value_from_diff_line(diff_line: str) -> Optional[str]:
+    match = re.match(
+        r'\s*"(?:\\.|[^"\\])*"\s*:\s*("(?:\\.|[^"\\])*")\s*,?\s*$',
+        diff_line,
+    )
+    if not match:
+        return None
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, str) else None
 
 
 def _extract_changed_entries(
@@ -196,41 +212,11 @@ def _extract_changed_entries(
     key_hint = adapter.extract_changed_key_from_diff_line(diff_line)
     if not key_hint or translations is None:
         return []
-    return [(key, translations[key]) for key in _matching_translation_keys(key_hint, translations)]
-
-
-def iter_added_properties_entries(diff_text: str) -> Iterable[Tuple[str, str, str]]:
-    for change in iter_translation_changes_from_diff(
-        diff_text=diff_text,
-        repo_root=".",
-        input_folder=".",
-        locale_codes=[],
-        localization_format=JAVA_PROPERTIES_FORMAT,
-        localization_layout=SUFFIX_LAYOUT,
-        hydrate_source=False,
-    ):
-        yield change.file, change.key, change.new_value
-
-
-def iter_added_localization_entries(
-    diff_text: str,
-    repo_root: str,
-    input_folder: str,
-    locale_codes: Sequence[str],
-    localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
-    localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
-) -> Iterable[Tuple[str, str, str]]:
-    """Yield added or changed localization entries for the configured format/layout."""
-    for change in iter_translation_changes_from_diff(
-        diff_text=diff_text,
-        repo_root=repo_root,
-        input_folder=input_folder,
-        locale_codes=locale_codes,
-        localization_format=localization_format,
-        localization_layout=localization_layout,
-        hydrate_source=False,
-    ):
-        yield change.file, change.key, change.new_value
+    expected_value = _extract_json_added_value_from_diff_line(diff_line)
+    return [
+        (key, translations[key])
+        for key in _matching_translation_keys(key_hint, translations, expected_value)
+    ]
 
 
 def _relpath(path: str, start: str) -> str:
@@ -238,6 +224,10 @@ def _relpath(path: str, start: str) -> str:
         return os.path.relpath(path, start)
     except ValueError:
         return path
+
+
+def _append_properties_continuation(current: str, next_line: str) -> str:
+    return current[:-1] + next_line.lstrip()
 
 
 def iter_translation_changes_from_diff(
@@ -256,15 +246,21 @@ def iter_translation_changes_from_diff(
     target_cache: Dict[Path, Dict[str, str]] = {}
     current_file: Optional[str] = None
     removed_values: Dict[str, Optional[str]] = {}
+    pending_added_line: Optional[str] = None
+    pending_removed_line: Optional[str] = None
 
     for line in diff_text.splitlines():
         if line.startswith("+++ /dev/null"):
             current_file = None
             removed_values = {}
+            pending_added_line = None
+            pending_removed_line = None
             continue
         if line.startswith("+++ b/"):
             current_file = line[len("+++ b/") :]
             removed_values = {}
+            pending_added_line = None
+            pending_removed_line = None
             continue
         if not current_file or not localization_format.is_supported_file(current_file):
             continue
@@ -278,11 +274,33 @@ def iter_translation_changes_from_diff(
         if line.startswith("---"):
             continue
         if line.startswith("-"):
-            for key, value in _extract_changed_entries(line[1:], localization_format, None):
+            removed_line = line[1:]
+            if localization_format.id == JAVA_PROPERTIES_FORMAT.id:
+                pending_removed_line = (
+                    _append_properties_continuation(pending_removed_line, removed_line)
+                    if pending_removed_line is not None
+                    else removed_line
+                )
+                if _has_unescaped_trailing_backslash(pending_removed_line):
+                    continue
+                removed_line = pending_removed_line
+                pending_removed_line = None
+            for key, value in _extract_changed_entries(removed_line, localization_format, None):
                 removed_values[key] = value
             continue
         if not line.startswith("+"):
             continue
+        added_line = line[1:]
+        if localization_format.id == JAVA_PROPERTIES_FORMAT.id:
+            pending_added_line = (
+                _append_properties_continuation(pending_added_line, added_line)
+                if pending_added_line is not None
+                else added_line
+            )
+            if _has_unescaped_trailing_backslash(pending_added_line):
+                continue
+            added_line = pending_added_line
+            pending_added_line = None
 
         changed_path = repo_root_path / current_file
         target_translations: Optional[Mapping[str, str]] = None
@@ -290,11 +308,14 @@ def iter_translation_changes_from_diff(
             if not changed_path.exists():
                 continue
             if changed_path not in target_cache:
-                _, target_cache[changed_path] = adapter.parse_file(str(changed_path))
+                try:
+                    _, target_cache[changed_path] = adapter.parse_file(str(changed_path))
+                except Exception:
+                    continue
             target_translations = target_cache[changed_path]
 
         changed_entries = _extract_changed_entries(
-            line[1:],
+            added_line,
             localization_format,
             target_translations,
         )
@@ -312,7 +333,10 @@ def iter_translation_changes_from_diff(
             source_path = input_folder_path / source_rel
             if source_path.exists():
                 if source_path not in source_cache:
-                    _, source_cache[source_path] = adapter.parse_file(str(source_path))
+                    try:
+                        _, source_cache[source_path] = adapter.parse_file(str(source_path))
+                    except Exception:
+                        source_cache[source_path] = {}
                 source_translations = source_cache[source_path]
 
         for key, target_value in changed_entries:
@@ -346,9 +370,24 @@ def load_semantic_rules(raw_rules: Iterable[Dict[str, Any]]) -> List[SemanticRul
                 excluded_locales=_as_tuple(raw_rule.get("excluded_locales", []), default=()),
                 keys=_as_tuple(raw_rule.get("keys", ["*"])),
                 severity=severity,
-                forbidden_target_regex=_optional_string(raw_rule.get("forbidden_target_regex")),
-                required_target_regex=_optional_string(raw_rule.get("required_target_regex")),
-                source_regex=_optional_string(raw_rule.get("source_regex")),
+                forbidden_target_regex=_compile_optional_regex(
+                    raw_rule.get("forbidden_target_regex"),
+                    rule_id,
+                    "forbidden_target_regex",
+                    ignorecase=bool(raw_rule.get("regex_ignorecase", False)),
+                ),
+                required_target_regex=_compile_optional_regex(
+                    raw_rule.get("required_target_regex"),
+                    rule_id,
+                    "required_target_regex",
+                    ignorecase=bool(raw_rule.get("regex_ignorecase", False)),
+                ),
+                source_regex=_compile_optional_regex(
+                    raw_rule.get("source_regex"),
+                    rule_id,
+                    "source_regex",
+                    ignorecase=bool(raw_rule.get("regex_ignorecase", False)),
+                ),
                 source=str(raw_rule.get("source", "semantic-rule")),
             )
         )
@@ -371,12 +410,31 @@ def _optional_string(value: Any) -> Optional[str]:
     return text if text else None
 
 
+def _compile_optional_regex(
+    value: Any,
+    rule_id: str,
+    field_name: str,
+    *,
+    ignorecase: bool,
+) -> Optional[Pattern[str]]:
+    pattern = _optional_string(value)
+    if pattern is None:
+        return None
+    flags = re.IGNORECASE if ignorecase else 0
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        raise ValueError(f"Invalid {field_name} for semantic rule '{rule_id}': {exc}") from exc
+
+
 def _matches_any(value: str, patterns: Sequence[str]) -> bool:
     return any(pattern == "*" or fnmatch.fnmatchcase(value, pattern) for pattern in patterns)
 
 
-def _regex_matches(pattern: str, value: Optional[str]) -> bool:
-    return re.search(pattern, value or "", re.IGNORECASE) is not None
+def _regex_matches(pattern: str | Pattern[str], value: Optional[str]) -> bool:
+    if isinstance(pattern, re.Pattern):
+        return pattern.search(value or "") is not None
+    return re.search(pattern, value or "") is not None
 
 
 def evaluate_semantic_rules(
@@ -431,6 +489,7 @@ def evaluate_retained_source_words(
     findings: List[SemanticFinding] = []
     allowlist = normalize_retained_source_word_allowlist(retained_source_word_allowlist or {})
     locale_allowed_words: Dict[str, set[str]] = {}
+    glossary_words = _glossary_words(brand_glossary)
     for change in changes:
         if change.locale_code in {"en", "pcm"}:
             continue
@@ -446,7 +505,7 @@ def evaluate_retained_source_words(
         retained_words = _retained_source_words(
             source_value=change.source_value,
             target_value=change.new_value,
-            brand_glossary=brand_glossary,
+            glossary_words=glossary_words,
             retained_source_word_allowlist=locale_allowed_words[change.locale_code],
         )
         if not retained_words:
@@ -503,10 +562,9 @@ def _allowed_source_words_for_locale(
 def _retained_source_words(
     source_value: str,
     target_value: str,
-    brand_glossary: Iterable[str],
+    glossary_words: set[str],
     retained_source_word_allowlist: Iterable[str] = (),
 ) -> List[str]:
-    glossary_words = _glossary_words(brand_glossary)
     allowed_words = set(_SOURCE_WORD_ALLOWLIST)
     allowed_words.update(_allowlist_words(retained_source_word_allowlist))
     retained: List[str] = []
@@ -585,6 +643,7 @@ def iter_all_translation_entries(
     """Yield every target translation entry for the configured format/layout."""
     input_folder_path = Path(input_folder)
     adapter = get_localization_adapter(localization_format)
+    source_cache: Dict[Path, Dict[str, str]] = {}
 
     for target_path in sorted(input_folder_path.rglob(f"*{localization_format.file_extension}")):
         target_rel_path = _relpath(str(target_path), str(input_folder_path))
@@ -601,8 +660,16 @@ def iter_all_translation_entries(
         source_path = input_folder_path / source_rel_path
         if not source_path.exists():
             continue
-        _, source_translations = adapter.parse_file(str(source_path))
-        _, target_translations = adapter.parse_file(str(target_path))
+        if source_path not in source_cache:
+            try:
+                _, source_cache[source_path] = adapter.parse_file(str(source_path))
+            except Exception:
+                source_cache[source_path] = {}
+        source_translations = source_cache[source_path]
+        try:
+            _, target_translations = adapter.parse_file(str(target_path))
+        except Exception:
+            continue
 
         for key, target_value in target_translations.items():
             yield TranslationChange(

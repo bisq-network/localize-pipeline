@@ -60,6 +60,34 @@ def test_semantic_remediation_skips_suggestions_that_break_placeholders(tmp_path
     assert "hello=Hallo\n" in target_path.read_text(encoding="utf-8")
 
 
+def test_semantic_remediation_skips_suggestions_with_line_breaks(tmp_path):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "messages.properties").write_text("hello=Hello\n", encoding="utf-8")
+    target_path = resources / "messages_de.properties"
+    target_path.write_text("hello=Hallo\n", encoding="utf-8")
+
+    result = apply_semantic_review_suggestions(
+        repo_root=str(tmp_path),
+        input_folder=str(resources),
+        findings=[
+            {
+                "file": "messages_de.properties",
+                "key": "hello",
+                "severity": "error",
+                "suggested_value": "Hallo\rinjected.key=value",
+            }
+        ],
+        locale_codes=["de"],
+        localization_profiles=load_localization_profiles({"localization_format": "java_properties"}),
+        changed_identities={("messages_de.properties", "hello")},
+    )
+
+    assert result.applied_count == 0
+    assert result.skipped[0]["reason"] == "suggestion contains line break characters"
+    assert target_path.read_text(encoding="utf-8") == "hello=Hallo\n"
+
+
 def test_semantic_remediation_applies_json_locale_directory_suggestion(tmp_path):
     resources = tmp_path / "resources"
     source_dir = resources / "en"
