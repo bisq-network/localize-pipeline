@@ -10,9 +10,6 @@ FROM ubuntu:24.04
 # Set SHELL to fail on pipeline errors
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG SKIP_GPG_IMPORT=false
-ARG SKIP_DEPLOY_KEY=false
-
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -93,56 +90,11 @@ RUN TX_VERSION="v1.6.17" && \
     rm "tx-${TX_ARCH}.tar.gz" && \
     tx --version
 
-# Import the GPG key for the appuser using a BuildKit secret mount so the key is
-# never copied into an image layer. This step is skipped for CI builds.
-RUN --mount=type=secret,id=gpg_bot_key,target=/tmp/bot_secret_key.asc,uid=9999,gid=9999,mode=0400,required=false \
-    if [ "$SKIP_GPG_IMPORT" = "true" ]; then \
-      echo "Skipping GPG key import for CI build."; \
-    else \
-      echo "Importing GPG key for appuser..." && \
-      if [ ! -s /tmp/bot_secret_key.asc ]; then \
-        echo "Error: gpg_bot_key build secret is required when SKIP_GPG_IMPORT is false." >&2; \
-        exit 1; \
-      fi && \
-      # Switch to appuser to import the key into its own keyring
-      su - appuser -c "gpg --batch --import /tmp/bot_secret_key.asc" && \
-      \
-      echo "Determining key fingerprint and setting trust..." && \
-      # Programmatically get the fingerprint of the imported key
-      FINGERPRINT=$(su - appuser -c "gpg --list-keys --with-colons | grep '^fpr' | cut -d: -f10 | head -n1") && \
-      if [ -n "$FINGERPRINT" ]; then \
-        # Set ultimate trust on the key
-        su - appuser -c "echo \"$FINGERPRINT:6:\" | gpg --batch --import-ownertrust"; \
-        echo "GPG key import and trust set for fingerprint: $FINGERPRINT"; \
-      else \
-        echo "Error: Could not determine GPG key fingerprint after import." >&2; \
-        exit 1; \
-      fi; \
-    fi
-
-# Make the .ssh directory and set its permissions.
-RUN mkdir -p /home/appuser/.ssh && \
-    chmod 700 /home/appuser/.ssh
-
-# Mount the secret key file and copy it into the .ssh directory.
-# This method ensures the key is not stored in the image layers.
-# This step is skipped in CI builds by checking the SKIP_DEPLOY_KEY build argument.
-RUN --mount=type=secret,id=deploy_key,target=/tmp/deploy_key,required=false \
-    if [ "$SKIP_DEPLOY_KEY" = "true" ]; then \
-      echo "Skipping deploy key setup for CI build."; \
-    else \
-      echo "Setting up deploy key for production build..." && \
-      if [ -f /tmp/deploy_key ]; then \
-        cp /tmp/deploy_key /home/appuser/.ssh/deploy_key && \
-        chmod 600 /home/appuser/.ssh/deploy_key && \
-        chown -R appuser:appuser /home/appuser/.ssh && \
-        echo -e "Host github.com\n\tIdentityFile /home/appuser/.ssh/deploy_key\n\tIdentitiesOnly yes" > /home/appuser/.ssh/config && \
-        chown appuser:appuser /home/appuser/.ssh/config && \
-        chmod 600 /home/appuser/.ssh/config; \
-      else \
-        echo "Warning: Deploy key not found, skipping SSH setup."; \
-      fi; \
-    fi
+# Private deploy and GPG keys are mounted as runtime secrets and installed by
+# docker-entrypoint.sh so they never persist in image layers.
+RUN mkdir -p /home/appuser/.ssh /home/appuser/.gnupg && \
+    chmod 700 /home/appuser/.ssh /home/appuser/.gnupg && \
+    chown -R appuser:appuser /home/appuser/.ssh /home/appuser/.gnupg
 
 WORKDIR /app
 

@@ -5,15 +5,6 @@ services:
     build:
       context: .. # Build context is the project root
       dockerfile: docker/Dockerfile # Path to Dockerfile from project root
-      args:
-        # Pass the deploy key name as a build argument.
-        # This can be set in the .env file or the shell environment.
-        - DEPLOY_KEY_NAME=${DEPLOY_KEY_NAME:-id_ed25519}
-      # Requires DOCKER_BUILDKIT=1 and COMPOSE_DOCKER_CLI_BUILD=1
-      secrets:
-        # Make build-only secrets available without copying them into image layers
-        - gpg_bot_key
-        - deploy_key
     # The entrypoint is defined in the Dockerfile.
     # By default, run the main orchestration script. Can be overridden for debugging.
     command: ["/app/update-translations.sh"]
@@ -35,6 +26,15 @@ services:
       # Pass the absolute path of the config file inside the container to the application.
       # This makes the script's starting location irrelevant for finding its config.
       - TRANSLATOR_CONFIG_FILE=/app/config.yaml
+      - GPG_BOT_KEY_PATH=/run/secrets/gpg_bot_key
+      - DEPLOY_KEY_PATH=/run/secrets/deploy_key
+    secrets:
+      - source: gpg_bot_key
+        target: gpg_bot_key
+        mode: 0400
+      - source: deploy_key
+        target: deploy_key
+        mode: 0400
     # Note: Place the .env file alongside this compose file (docker/.env)
     # with API keys and HOST_UID/GID.
     # An example is provided in docker/.env.example
@@ -47,10 +47,10 @@ volumes:
     # Uncomment if volume is managed outside this compose project
     # external: true
 
-# Define build-time secrets.
-# The deploy key filename can be controlled via the DEPLOY_KEY_NAME environment variable.
+# Define runtime secrets. The files are mounted read-only at /run/secrets/*
+# and copied/imported by docker-entrypoint.sh during container startup.
 secrets:
   gpg_bot_key:
-    file: ../secrets/gpg_bot_key/bot_secret_key.asc
+    file: ${GPG_BOT_KEY_FILE:-../secrets/gpg_bot_key/bot_secret_key.asc}
   deploy_key:
-    file: ../secrets/deploy_key/${DEPLOY_KEY_NAME:-id_ed25519}
+    file: ${DEPLOY_KEY_FILE:-../secrets/deploy_key/id_ed25519}

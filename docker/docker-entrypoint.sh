@@ -43,6 +43,133 @@ fi
 
 # --- Unified Helper Functions ---
 
+run_as_appuser() {
+    local user_home="$1"
+    shift
+
+    if [ "$(id -u)" -eq 0 ] && id -u appuser >/dev/null 2>&1; then
+        HOME="$user_home" gosu appuser "$@"
+    else
+        HOME="$user_home" "$@"
+    fi
+}
+
+ensure_github_identity_config() {
+    local user_home="$1"
+    local config_file="${user_home}/.ssh/config"
+    local marker="# localize-pipeline runtime deploy key"
+
+    touch "$config_file"
+    if grep -Fq "$marker" "$config_file"; then
+        return 0
+    fi
+
+    {
+        if [ -s "$config_file" ]; then
+            printf '\n'
+        fi
+        printf '%s\n' "$marker"
+        printf 'Host github.com\n'
+        printf '\tIdentityFile %s/.ssh/deploy_key\n' "$user_home"
+        printf '\tIdentitiesOnly yes\n'
+        printf '\tBatchMode yes\n'
+    } >> "$config_file"
+}
+
+ensure_insecure_ssh_config() {
+    local user_home="$1"
+    local config_file="${user_home}/.ssh/config"
+    local marker="# localize-pipeline insecure ssh override"
+
+    touch "$config_file"
+    if grep -Fq "$marker" "$config_file"; then
+        return 0
+    fi
+
+    {
+        if [ -s "$config_file" ]; then
+            printf '\n'
+        fi
+        printf '%s\n' "$marker"
+        printf 'Host github.com\n'
+        printf '\tStrictHostKeyChecking no\n'
+        printf '\tUserKnownHostsFile=/dev/null\n'
+    } >> "$config_file"
+}
+
+install_runtime_deploy_key() {
+    local user_home="${APPUSER_HOME:-/home/appuser}"
+    local runtime_deploy_key_path="${DEPLOY_KEY_PATH:-/run/secrets/deploy_key}"
+
+    if [ "${SKIP_DEPLOY_KEY:-false}" = "true" ]; then
+        log "Skipping runtime deploy key setup because SKIP_DEPLOY_KEY=true."
+        return 0
+    fi
+
+    mkdir -p "$user_home/.ssh"
+    if [ ! -s "$runtime_deploy_key_path" ]; then
+        log "Runtime deploy key not found at $runtime_deploy_key_path; SSH clone/push may fail." "WARNING"
+        return 0
+    fi
+
+    cp "$runtime_deploy_key_path" "$user_home/.ssh/deploy_key"
+    chmod 600 "$user_home/.ssh/deploy_key"
+    ensure_github_identity_config "$user_home"
+
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R "${APPUSER_UID}:${APPUSER_GID}" "$user_home/.ssh" \
+          || log "Warning: unable to chown ${user_home}/.ssh" "WARNING"
+    fi
+    log "Runtime deploy key installed for appuser."
+}
+
+import_runtime_gpg_key() {
+    local user_home="${APPUSER_HOME:-/home/appuser}"
+    local runtime_gpg_key_path="${GPG_BOT_KEY_PATH:-/run/secrets/gpg_bot_key}"
+    local gpg_import_file="$runtime_gpg_key_path"
+    local cleanup_gpg_import_file=""
+    local fingerprint
+
+    if [ "${SKIP_GPG_IMPORT:-false}" = "true" ]; then
+        log "Skipping runtime GPG import because SKIP_GPG_IMPORT=true."
+        return 0
+    fi
+
+    if [ ! -s "$runtime_gpg_key_path" ]; then
+        log "Runtime GPG key not found at $runtime_gpg_key_path; commit signing will be disabled." "WARNING"
+        return 0
+    fi
+
+    mkdir -p "$user_home/.gnupg"
+    chmod 700 "$user_home/.gnupg"
+
+    if [ "$(id -u)" -eq 0 ] && id -u appuser >/dev/null 2>&1; then
+        gpg_import_file="$user_home/.gnupg/runtime_gpg_import.asc"
+        cp "$runtime_gpg_key_path" "$gpg_import_file"
+        chown "${APPUSER_UID}:${APPUSER_GID}" "$gpg_import_file" "$user_home/.gnupg"
+        chmod 600 "$gpg_import_file"
+        cleanup_gpg_import_file="$gpg_import_file"
+    fi
+
+    if ! run_as_appuser "$user_home" gpg --batch --import "$gpg_import_file"; then
+        rm -f "$cleanup_gpg_import_file"
+        log "Failed to import runtime GPG key from $runtime_gpg_key_path." "ERROR"
+        return 1
+    fi
+
+    rm -f "$cleanup_gpg_import_file"
+    fingerprint="$(run_as_appuser "$user_home" gpg --list-secret-keys --with-colons \
+        | awk -F: '/^fpr/ {print $10; exit}')"
+    if [ -z "$fingerprint" ]; then
+        log "Runtime GPG key import completed, but no secret-key fingerprint was found." "ERROR"
+        return 1
+    fi
+
+    printf '%s:6:\n' "$fingerprint" \
+        | run_as_appuser "$user_home" gpg --batch --import-ownertrust
+    log "Runtime GPG key imported and trusted for fingerprint: $fingerprint"
+}
+
 # Set up SSH host keys for secure git operations.
 setup_ssh() {
     local user_home="${APPUSER_HOME:-/home/appuser}"
@@ -51,7 +178,7 @@ setup_ssh() {
 
     if [ "${ALLOW_INSECURE_SSH:-false}" = "true" ]; then
         log "WARNING: ALLOW_INSECURE_SSH is true. Host key verification is disabled." "WARNING"
-        echo -e "Host github.com\n\tBatchMode yes\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null" > "${user_home}/.ssh/config"
+        ensure_insecure_ssh_config "$user_home"
     else
         KNOWN_HOSTS_PATH="${PINNED_KNOWN_HOSTS_PATH:-/etc/ssh/ssh_known_hosts}"
         if [ ! -r "$KNOWN_HOSTS_PATH" ] || ! grep -q "github.com" "$KNOWN_HOSTS_PATH"; then
@@ -149,6 +276,8 @@ if [ "$(id -u)" -ne 0 ]; then
 
     # Ensure logs and SSH are configured correctly before proceeding.
     ensure_logs_dir
+    install_runtime_deploy_key
+    import_runtime_gpg_key
     setup_ssh
     export GIT_TERMINAL_PROMPT=0
 
@@ -431,6 +560,8 @@ else
     fi
 
     # Set up SSH. This is done as root to ensure correct ownership of created files.
+    install_runtime_deploy_key
+    import_runtime_gpg_key
     setup_ssh
 
     # Attempt to switch to the appuser.
