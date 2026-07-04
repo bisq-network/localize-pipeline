@@ -47,6 +47,7 @@ from localize.placeholder_rules import (
     restore_placeholders as restore_protected_placeholders,
 )
 from localize.pipeline_core import (
+    RUN_METRIC_KEYS,
     TranslationPipelineOptions,
     TranslationPipelinePaths,
     TranslationPipelineSteps,
@@ -270,15 +271,6 @@ class TranslationMemoryPlan:
     pending_line_indices: List[int]
     pending_keys: List[str]
     pending_positions: List[int]
-
-
-RUN_METRIC_KEYS = (
-    "candidate_keys_count",
-    "model_translation_keys_count",
-    "translation_memory_reused_count",
-    "source_identical_skipped_count",
-    "changed_values_count",
-)
 
 
 def new_run_metrics() -> Dict[str, int]:
@@ -2623,8 +2615,10 @@ def _build_pr_title(
     changed_values: Optional[int] = None,
 ) -> str:
     """Build a concise, descriptive PR title (max 72 chars)."""
-    if changed_values is not None and changed_values > 0:
-        key_segment = f" ({changed_values} changed values)"
+    if changed_values is not None:
+        if not modules and changed_values == 0:
+            return "Update translations"
+        key_segment = f" ({changed_values} changed values)" if changed_values > 0 else ""
     elif not modules and not new_keys and not updated_keys:
         return "Update translations"
     else:

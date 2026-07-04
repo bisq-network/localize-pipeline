@@ -12,6 +12,7 @@ from typing import Awaitable, Callable, Dict, List, Mapping, Optional, Protocol
 
 from localize.pipeline_core import (
     ProcessQueueResult,
+    RUN_METRIC_KEYS,
     TranslationPipelineOptions,
     TranslationPipelinePaths,
     TranslationPipelineResult,
@@ -287,8 +288,8 @@ class FileReporterConnector:
             "new_keys_count": new_keys_count,
             "updated_keys_count": updated_keys_count,
         }
-        if run_metrics:
-            payload.update({key: int(value) for key, value in run_metrics.items()})
+        metrics = {key: int(value) for key, value in (run_metrics or {}).items()}
+        payload.update({key: metrics.get(key, 0) for key in RUN_METRIC_KEYS})
         self._write_json(
             summary_path,
             payload,

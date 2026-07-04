@@ -13,7 +13,11 @@ from localize.connectors import (
     PipelinePublisher,
     PipelinePublishRequest,
 )
-from localize.pipeline_core import TranslationPipelineOptions, TranslationPipelinePaths
+from localize.pipeline_core import (
+    RUN_METRIC_KEYS,
+    TranslationPipelineOptions,
+    TranslationPipelinePaths,
+)
 
 
 @dataclass
@@ -235,7 +239,10 @@ def test_file_reporter_connector_writes_machine_and_human_reports(tmp_path):
     )
 
     assert "placeholder mismatch" in skipped_report.read_text(encoding="utf-8")
-    assert json.loads(summary_path.read_text(encoding="utf-8"))["new_keys_count"] == 2
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["new_keys_count"] == 2
+    for key in RUN_METRIC_KEYS:
+        assert summary[key] == 0
     assert json.loads(validation_path.read_text(encoding="utf-8"))["files"]["messages_de.json"] == {
         "failed_keys": []
     }

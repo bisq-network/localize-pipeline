@@ -149,6 +149,29 @@ class TestTranslationSummary(unittest.TestCase):
         self.assertEqual(summary["translation_memory_reused_count"], 416)
         self.assertEqual(summary["source_identical_skipped_count"], 360)
 
+    def test_summary_title_treats_zero_changed_values_as_metric(self):
+        """Zero changed values should not fall back to candidate-key counts."""
+        summary = self._run_summary(
+            processed_files=[
+                "mobile_de.properties",
+                "mobile_es.properties",
+            ],
+            new_keys=433,
+            updated_keys=0,
+            run_metrics={
+                "changed_values_count": 0,
+                "candidate_keys_count": 433,
+                "model_translation_keys_count": 0,
+                "translation_memory_reused_count": 433,
+                "source_identical_skipped_count": 10,
+            },
+        )
+
+        self.assertNotIn("433 new", summary["title"])
+        self.assertNotIn("new keys", summary["title"])
+        self.assertEqual(summary["changed_values_count"], 0)
+        self.assertEqual(summary["candidate_keys_count"], 433)
+
 
 if __name__ == '__main__':
     unittest.main()
