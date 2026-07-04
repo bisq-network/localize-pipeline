@@ -15,7 +15,7 @@ class TestTranslationSummary(unittest.TestCase):
     """Tests for generate_translation_summary(), which produces a JSON file
     consumed by the shell script to build descriptive PR titles."""
 
-    def _run_summary(self, processed_files, new_keys, updated_keys):
+    def _run_summary(self, processed_files, new_keys, updated_keys, run_metrics=None):
         with tempfile.NamedTemporaryFile(
             mode='w', delete=False, suffix='.json'
         ) as f:
@@ -26,6 +26,7 @@ class TestTranslationSummary(unittest.TestCase):
             new_keys_count=new_keys,
             updated_keys_count=updated_keys,
             supported_codes=SUPPORTED_CODES,
+            run_metrics=run_metrics,
         )
         with open(path, 'r', encoding='utf-8') as f:
             summary = json.load(f)
@@ -120,6 +121,56 @@ class TestTranslationSummary(unittest.TestCase):
 
         self.assertIn("3 new", summary["title"])
         self.assertIn("5 updated", summary["title"])
+
+    def test_summary_title_uses_changed_values_when_available(self):
+        """PR title should describe final diff size, not candidate keys."""
+        summary = self._run_summary(
+            processed_files=[
+                "mobile_de.properties",
+                "mobile_es.properties",
+                "mobile_fr.properties",
+            ],
+            new_keys=433,
+            updated_keys=0,
+            run_metrics={
+                "changed_values_count": 20,
+                "candidate_keys_count": 433,
+                "model_translation_keys_count": 17,
+                "translation_memory_reused_count": 416,
+                "source_identical_skipped_count": 360,
+            },
+        )
+
+        self.assertIn("20 changed values", summary["title"])
+        self.assertNotIn("433 new", summary["title"])
+        self.assertEqual(summary["changed_values_count"], 20)
+        self.assertEqual(summary["candidate_keys_count"], 433)
+        self.assertEqual(summary["model_translation_keys_count"], 17)
+        self.assertEqual(summary["translation_memory_reused_count"], 416)
+        self.assertEqual(summary["source_identical_skipped_count"], 360)
+
+    def test_summary_title_treats_zero_changed_values_as_metric(self):
+        """Zero changed values should not fall back to candidate-key counts."""
+        summary = self._run_summary(
+            processed_files=[
+                "mobile_de.properties",
+                "mobile_es.properties",
+            ],
+            new_keys=433,
+            updated_keys=0,
+            run_metrics={
+                "changed_values_count": 0,
+                "candidate_keys_count": 433,
+                "model_translation_keys_count": 0,
+                "translation_memory_reused_count": 433,
+                "source_identical_skipped_count": 10,
+            },
+        )
+
+        self.assertNotIn("433 new", summary["title"])
+        self.assertNotIn("new keys", summary["title"])
+        self.assertEqual(summary["changed_values_count"], 0)
+        self.assertEqual(summary["candidate_keys_count"], 433)
 
 
 if __name__ == '__main__':

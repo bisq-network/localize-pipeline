@@ -547,6 +547,7 @@ class TestCoreLogic(unittest.TestCase):
         ]
         target_translations = {'key_existing': 'Source Existing'}
         source_translations = {'key_existing': 'Source Existing'}
+        selection_metrics = {}
 
         with self.assertLogs('translation_script', level='INFO') as captured_logs:
             texts, indices, keys = extract_texts_to_translate(
@@ -555,12 +556,14 @@ class TestCoreLogic(unittest.TestCase):
                 target_translations,
                 newly_added_keys=set(),
                 file_ledger_entries={},
-                retranslate_identical_existing=False
+                retranslate_identical_existing=False,
+                selection_metrics=selection_metrics,
             )
 
         self.assertEqual(texts, [])
         self.assertEqual(indices, [])
         self.assertEqual(keys, [])
+        self.assertEqual(selection_metrics["source_identical_skipped_count"], 1)
         joined_logs = "\n".join(captured_logs.output)
         self.assertIn("Skipping key 'key_existing' (source==target)", joined_logs)
         self.assertIn("retranslate_identical_source_strings", joined_logs)

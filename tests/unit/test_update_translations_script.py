@@ -329,3 +329,20 @@ def test_pr_body_includes_token_usage_cost_summary():
     cost_index = script.index("token_usage_summary.json")
     pr_create_index = script.index("gh pr create")
     assert cost_index < pr_create_index
+
+
+def test_pr_body_includes_translation_run_summary_metrics():
+    """The PR description explains candidate, model, memory, and skipped counts."""
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "translation_summary.json" in script
+    assert "Translation run summary" in script
+    assert "changed_values_count" in script
+    assert "candidate_keys_count" in script
+    assert "model_translation_keys_count" in script
+    assert "translation_memory_reused_count" in script
+    assert "source_identical_skipped_count" in script
+
+    summary_index = script.index("Translation run summary")
+    pr_create_index = script.index("gh pr create")
+    assert summary_index < pr_create_index

@@ -873,6 +873,34 @@ stage_and_submit_batch() {
 
 This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT}\` fork and targets the \`$TARGET_BRANCH_FOR_PR\` branch on \`$UPSTREAM_REPO_NAME\`."
 
+    local TRANSLATION_SUMMARY_JSON="$report_dir/translation_summary.json"
+    if [ -s "$TRANSLATION_SUMMARY_JSON" ] && command_exists jq; then
+        local RUN_SUMMARY_MD
+        RUN_SUMMARY_MD=$(jq -r '
+            def n($key): (.[$key] // 0);
+            if (n("changed_values_count") > 0
+                or n("candidate_keys_count") > 0
+                or n("model_translation_keys_count") > 0
+                or n("translation_memory_reused_count") > 0
+                or n("source_identical_skipped_count") > 0) then
+              [
+                "### Translation run summary",
+                "- Output values changed: \(n("changed_values_count"))",
+                "- Candidate keys selected: \(n("candidate_keys_count"))",
+                "- Sent to model: \(n("model_translation_keys_count"))",
+                "- Reused from translation memory: \(n("translation_memory_reused_count"))",
+                "- Source-identical skipped (no ledger baseline): \(n("source_identical_skipped_count"))"
+              ] | join("\n")
+            else
+              empty
+            end
+        ' "$TRANSLATION_SUMMARY_JSON" 2>/dev/null || true)
+        if [ -n "$RUN_SUMMARY_MD" ]; then
+            log "Appending translation run summary to PR description."
+            PR_BODY=$(printf "%s\n\n%s" "$PR_BODY" "$RUN_SUMMARY_MD")
+        fi
+    fi
+
     local SKIPPED_FILES_REPORT="$report_dir/skipped_files_report.log"
     if [ -s "$QUALITY_REPORT_MD" ]; then
         log "Found quality gate report. Prepending to PR description."

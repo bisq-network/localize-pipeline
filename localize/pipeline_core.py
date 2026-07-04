@@ -8,13 +8,33 @@ shape without copying orchestration code.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Tuple
 
 
-ProcessQueueResult = Tuple[int, List[str], Dict[str, List[str]], int]
+RUN_METRIC_KEYS = (
+    "candidate_keys_count",
+    "model_translation_keys_count",
+    "translation_memory_reused_count",
+    "source_identical_skipped_count",
+    "changed_values_count",
+)
+
+RunMetrics = Dict[str, int]
+LegacyProcessQueueResult = Tuple[int, List[str], Dict[str, List[str]], int]
+ProcessQueueResult = LegacyProcessQueueResult
+
+
+def supports_keyword_argument(callable_obj: Callable[..., object], keyword: str) -> bool:
+    """Return whether a callable accepts a named keyword argument."""
+    parameters = inspect.signature(callable_obj).parameters
+    return keyword in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 @dataclass(frozen=True)
@@ -91,6 +111,7 @@ class TranslationPipelineResult:
     processed_filenames: List[str] = field(default_factory=list)
     skipped_files: Dict[str, List[str]] = field(default_factory=dict)
     total_keys_translated: int = 0
+    run_metrics: RunMetrics = field(default_factory=dict)
 
 
 async def run_translation_pipeline(
@@ -130,17 +151,19 @@ async def run_translation_pipeline(
     logger.info("Copied changed files to '%s' for processing.", paths.translation_queue_folder)
 
     validation_files: Dict[str, Dict[str, object]] = {}
-    (
-        processed_files_count,
-        processed_filenames,
-        skipped_files,
-        total_keys_translated,
-    ) = await steps.process_translation_queue(
+    process_result = await steps.process_translation_queue(
         translation_queue_folder=paths.translation_queue_folder,
         translated_queue_folder=paths.translated_queue_folder,
         glossary_file_path=paths.glossary_file_path,
         validation_summary=validation_files,
     )
+    (
+        processed_files_count,
+        processed_filenames,
+        skipped_files,
+        total_keys_translated,
+    ) = process_result
+    run_metrics = getattr(process_result, "run_metrics", {})
 
     if processed_files_count > 0:
         logger.info(
@@ -160,12 +183,14 @@ async def run_translation_pipeline(
     else:
         steps.remove_file_if_exists(paths.skipped_files_report_path)
 
-    steps.generate_translation_summary(
-        paths.translation_summary_path,
-        processed_files=processed_filenames,
-        new_keys_count=total_keys_translated,
-        updated_keys_count=0,
-    )
+    summary_kwargs = {
+        "processed_files": processed_filenames,
+        "new_keys_count": total_keys_translated,
+        "updated_keys_count": 0,
+    }
+    if supports_keyword_argument(steps.generate_translation_summary, "run_metrics"):
+        summary_kwargs["run_metrics"] = run_metrics
+    steps.generate_translation_summary(paths.translation_summary_path, **summary_kwargs)
     logger.info("Wrote translation summary to %s", paths.translation_summary_path)
 
     steps.write_translation_validation_summary(
@@ -194,4 +219,5 @@ async def run_translation_pipeline(
         processed_filenames=processed_filenames,
         skipped_files=skipped_files,
         total_keys_translated=total_keys_translated,
+        run_metrics=run_metrics,
     )

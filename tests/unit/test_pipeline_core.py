@@ -5,11 +5,36 @@ from typing import Dict, List
 import pytest
 
 from localize.pipeline_core import (
+    RUN_METRIC_KEYS,
     TranslationPipelineOptions,
     TranslationPipelinePaths,
     TranslationPipelineSteps,
     run_translation_pipeline,
 )
+
+
+class ProcessResultWithMetrics(tuple):
+    """Legacy four-item process result with attached run metrics."""
+
+    def __new__(
+        cls,
+        processed_files_count,
+        processed_filenames,
+        skipped_files,
+        total_keys_translated,
+        run_metrics,
+    ):
+        obj = super().__new__(
+            cls,
+            (
+                processed_files_count,
+                processed_filenames,
+                skipped_files,
+                total_keys_translated,
+            ),
+        )
+        obj.run_metrics = run_metrics
+        return obj
 
 
 @dataclass
@@ -112,6 +137,22 @@ class FakePipelineSteps:
         self.calls.append(f"cleanup:{translation_queue}:{translated_queue}")
 
 
+class MetricsAwareFakePipelineSteps(FakePipelineSteps):
+    def generate_translation_summary(
+        self,
+        summary_path,
+        *,
+        processed_files,
+        new_keys_count,
+        updated_keys_count,
+        run_metrics=None,
+    ):
+        self.calls.append(
+            "summary:"
+            f"{summary_path}:{processed_files}:{new_keys_count}:{updated_keys_count}:{run_metrics}"
+        )
+
+
 @pytest.fixture
 def pipeline_paths() -> TranslationPipelinePaths:
     return TranslationPipelinePaths(
@@ -184,6 +225,68 @@ async def test_pipeline_runs_core_steps_with_injected_adapters(pipeline_paths):
         "copy_back:/app/translated_queue:/repo/i18n",
         "cleanup:/app/translation_queue:/app/translated_queue",
     ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_passes_run_metrics_to_summary(pipeline_paths):
+    run_metrics = {
+        "changed_values_count": 2,
+        "candidate_keys_count": 5,
+        "model_translation_keys_count": 3,
+        "translation_memory_reused_count": 2,
+        "source_identical_skipped_count": 7,
+    }
+    fake = MetricsAwareFakePipelineSteps(
+        changed_files=["app_de.properties"],
+        process_result=ProcessResultWithMetrics(
+            1,
+            ["app_de.properties"],
+            {},
+            5,
+            run_metrics,
+        ),
+    )
+
+    result = await run_translation_pipeline(
+        paths=pipeline_paths,
+        options=pipeline_options(),
+        steps=fake.as_steps(),
+        logger=logging.getLogger("test_pipeline_core"),
+    )
+
+    assert result.total_keys_translated == 5
+    assert result.run_metrics == run_metrics
+    assert (
+        "summary:/app/logs/translation_summary.json:['app_de.properties']:5:0:"
+        f"{run_metrics}"
+    ) in fake.calls
+
+
+@pytest.mark.asyncio
+async def test_pipeline_omits_run_metrics_for_legacy_summary_reporter(pipeline_paths):
+    run_metrics = {key: 0 for key in RUN_METRIC_KEYS}
+    run_metrics["changed_values_count"] = 1
+    fake = FakePipelineSteps(
+        changed_files=["app_de.properties"],
+        process_result=ProcessResultWithMetrics(
+            1,
+            ["app_de.properties"],
+            {},
+            4,
+            run_metrics,
+        ),
+    )
+
+    result = await run_translation_pipeline(
+        paths=pipeline_paths,
+        options=pipeline_options(),
+        steps=fake.as_steps(),
+        logger=logging.getLogger("test_pipeline_core"),
+    )
+
+    assert result.run_metrics == run_metrics
+    assert "summary:/app/logs/translation_summary.json:['app_de.properties']:4:0" in fake.calls
+    assert not any("changed_values_count" in call for call in fake.calls)
 
 
 @pytest.mark.asyncio
