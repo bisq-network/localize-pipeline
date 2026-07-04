@@ -264,3 +264,42 @@ async def test_holistic_review_completion_limit_scales_with_chunk_size():
     assert result == {"key0": "Wert 0"}
     kwargs = provider.create_chat_completion.await_args.kwargs
     assert kwargs["completion_token_limit"] > 8192
+
+
+@pytest.mark.asyncio
+async def test_holistic_review_retries_empty_content_without_name_error():
+    empty_response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=""))]
+    )
+    valid_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"key1": "Hallo"})
+                )
+            )
+        ]
+    )
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=[empty_response, valid_response])
+    provider.is_retryable_error.return_value = False
+
+    with (
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
+        patch("localize.translate_localization_files._handle_retry", new_callable=AsyncMock) as retry,
+    ):
+        retry.return_value = True
+        result = await holistic_review_async(
+            source_content="key1=Hello",
+            translated_content="key1=Hallo draft",
+            target_language="German",
+            keys_to_review=["key1"],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {"key1": "Hallo"}
+    assert provider.create_chat_completion.await_count == 2
+    retry.assert_awaited_once()

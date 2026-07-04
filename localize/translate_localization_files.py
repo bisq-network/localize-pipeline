@@ -1134,7 +1134,7 @@ async def translate_text_async(
         rate_limiter: AsyncLimiter,
         index: int,
         localization_format: Optional[LocalizationFormat] = None,
-) -> Tuple[int, str]:
+) -> Tuple[int, str, bool]:
     """
     Asynchronously translate a single text with context.
 
@@ -1150,15 +1150,15 @@ async def translate_text_async(
         index (int): The index of the text in the original list.
 
     Returns:
-        Tuple[int, str]: The index and the translated text.
+        Tuple[int, str, bool]: The index, translated text, and whether model translation succeeded.
     """
     if DRY_RUN:
         logger.info(f"[Dry Run] Skipping actual translation for key '{key}'. Returning original text.")
-        return index, text
+        return index, text, True
 
     if MODEL_PROVIDER is None:
         logger.error("Model provider is not configured. Cannot proceed with translation.")
-        return index, text
+        return index, text, False
 
     async with semaphore, rate_limiter:
         # 3) Use language_name_to_code instead of an Enum
@@ -1167,7 +1167,7 @@ async def translate_text_async(
         # If the language isn't recognized, just return original text
         if not language_code:
             logger.warning(f"Unsupported or unrecognized language: {target_language}")
-            return index, text
+            return index, text, False
 
         # Get the glossary for the current language
         language_glossary = glossary.get(language_code, {})
@@ -1238,7 +1238,7 @@ Provide the translation **of the Value only**, following the instructions above.
                 msg_content = response.choices[0].message.content
                 if not msg_content:
                     logger.warning("Empty assistant content for key '%s'; keeping original text.", key)
-                    return index, text
+                    return index, text, False
                 translated_text = msg_content.strip()
 
                 # Restore placeholders in the translated text
@@ -1248,7 +1248,7 @@ Provide the translation **of the Value only**, following the instructions above.
                 translated_text = clean_translated_text(translated_text, text)
 
                 logger.debug(f"Translated key '{key}' successfully.")
-                return index, translated_text
+                return index, translated_text, True
 
             except Exception as general_exc:
                 if MODEL_PROVIDER.is_retryable_error(general_exc):
@@ -1256,16 +1256,16 @@ Provide the translation **of the Value only**, following the instructions above.
                     should_retry = await _handle_retry(attempt, max_retries, base_delay, key, general_exc)
                     if should_retry:
                         continue
-                    return index, text
+                    return index, text, False
                 logger.error(f"An unexpected error occurred: {general_exc}", exc_info=True)
-                return index, text
+                return index, text, False
 
         # Fallback return statement to satisfy linters and ensure explicit return
         logger.warning(
             f"Translation loop for key '{key}' completed without an explicit return within the loop. "
             f"This shouldn't happen with current logic. Returning original text."
         )
-        return index, text
+        return index, text, False
 
 def _build_holistic_review_system_prompt(
         target_language: str,
@@ -1414,6 +1414,7 @@ async def holistic_review_async(
                 msg_content = response.choices[0].message.content
                 if not msg_content or not msg_content.strip():
                     logger.error("Holistic review returned empty content.")
+                    response_text = ""
                     raise json.JSONDecodeError("empty response", "", 0)
                 response_text = msg_content.strip()
 
@@ -2161,6 +2162,19 @@ async def process_translation_queue(
                     )
                     translated_file_path = os.path.join(translated_queue_folder, translation_file)
                     new_file_content = adapter.reassemble_file(parsed_lines)
+                    if not run_post_translation_validation(
+                            new_file_content,
+                            source_translations,
+                            translation_file,
+                            localization_format,
+                            ignore_key_patterns=IGNORE_KEY_PATTERNS,
+                    ):
+                        logger.error(
+                            "Skipping write for '%s' because post-translation validation failed.",
+                            translation_file,
+                        )
+                        skipped_files[translation_file] = ["Post-translation validation failed."]
+                        continue
                     if DRY_RUN:
                         logger.info(f"[Dry Run] Would write ignored-key passthrough content to '{translated_file_path}'.")
                     else:
@@ -2225,7 +2239,10 @@ async def process_translation_queue(
             ]
 
             # Run tasks concurrently with progress indication
-            results = list(memory_plan.cached_results)
+            results: List[Tuple[int, str, bool]] = [
+                (position, value, True)
+                for position, value in memory_plan.cached_results
+            ]
             # The tqdm output is directed to stderr by default, which is ideal.
             # It prevents progress bars from being broken by stdout prints.
             if tasks:
@@ -2235,12 +2252,23 @@ async def process_translation_queue(
                         unit="translation",
                         total=len(tasks)  # Provide the total number of tasks
                 ):
-                    index, result = await coro
-                    results.append((index, result))
+                    index, result, succeeded = await coro
+                    results.append((index, result, succeeded))
 
             # Sort results by index to ensure correct order
             results.sort(key=lambda x: x[0])
-            translations = [result for _, result in results]
+            translations = [result for _, result, _ in results]
+            model_failed_keys = {
+                keys_to_translate[position]
+                for position, _result, succeeded in results
+                if not succeeded and position < len(keys_to_translate)
+            }
+            if model_failed_keys:
+                logger.warning(
+                    "Model translation failed for %d key(s) in '%s'; keeping source fallback and marking failed.",
+                    len(model_failed_keys),
+                    translation_file,
+                )
 
             # Integrate initial translations to create a draft file for review
             draft_lines = integrate_translations(
@@ -2309,7 +2337,19 @@ async def process_translation_queue(
                     for i, (corrected_chunk, key_chunk) in enumerate(zip(review_results, key_chunks)):
                         if corrected_chunk is not None:
                             if corrected_chunk:
-                                final_corrected_translations.update(corrected_chunk)
+                                key_chunk_set = set(key_chunk)
+                                scoped = {
+                                    key: value
+                                    for key, value in corrected_chunk.items()
+                                    if key in key_chunk_set
+                                }
+                                dropped = set(corrected_chunk) - key_chunk_set
+                                if dropped:
+                                    logger.warning(
+                                        "Holistic review returned %d out-of-scope key(s); ignored.",
+                                        len(dropped),
+                                    )
+                                final_corrected_translations.update(scoped)
                             else:
                                 logger.info("Holistic review returned no corrections for this chunk; keeping draft values.")
                                 for key in key_chunk:
@@ -2389,7 +2429,7 @@ async def process_translation_queue(
                 translation_file,
                 ignore_key_patterns=IGNORE_KEY_PATTERNS,
             )
-            failed_keys = list(per_key_summary["failed_keys"])
+            failed_keys = set(per_key_summary["failed_keys"]).union(model_failed_keys)
             increment_run_metric(run_metrics, "model_translation_failed_count", len(failed_keys))
             if validation_summary is not None:
                 validation_summary[translation_file] = per_key_summary
@@ -2418,6 +2458,17 @@ async def process_translation_queue(
 
             translated_file_path = os.path.join(translated_queue_folder, translation_file)
 
+            if not run_post_translation_validation(
+                    new_file_content,
+                    source_translations,
+                    translation_file,
+                    localization_format,
+                    ignore_key_patterns=IGNORE_KEY_PATTERNS,
+            ):
+                logger.error("Skipping write for '%s' because post-translation validation failed.", translation_file)
+                skipped_files[translation_file] = ["Post-translation validation failed."]
+                continue
+
             if DRY_RUN:
                 logger.info(f"[Dry Run] Would write translated content to '{translated_file_path}'.")
             else:
@@ -2430,8 +2481,8 @@ async def process_translation_queue(
             # Update and persist per-file key ledger after successful file processing.
             key_ledger[translation_file] = build_file_key_ledger(
                 source_translations,
-                valid_translations,
-                failed_keys=set(failed_keys)
+                final_output_translations,
+                failed_keys=failed_keys
             )
             save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
             if translation_memory is not None and not DRY_RUN:
@@ -2442,7 +2493,7 @@ async def process_translation_queue(
                     keys_to_translate,
                     locale=language_code,
                     format_id=localization_format.id,
-                    failed_keys=set(failed_keys),
+                    failed_keys=failed_keys,
                 )
                 save_translation_memory(TRANSLATION_MEMORY_FILE_PATH, translation_memory)
 
@@ -2461,7 +2512,6 @@ async def process_translation_queue(
         total_keys_translated,
         run_metrics,
     )
-
 def archive_original_files(
         changed_files: List[str],
         input_folder_path: str,
