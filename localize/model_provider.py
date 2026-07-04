@@ -365,6 +365,17 @@ class AiSuiteProvider(OpenAICompatibleProvider):
     def is_retryable_error(self, exc: Exception) -> bool:
         if super().is_retryable_error(exc):
             return True
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int):
+            if status_code == 429:
+                return True
+            if 400 <= status_code < 500:
+                return False
+            if status_code >= 500:
+                return True
         exc_module = exc.__class__.__module__
         exc_name = exc.__class__.__name__
         return exc_module.startswith("aisuite") or exc_name == "LLMError"
@@ -431,11 +442,12 @@ def _openai_provider_config(
     *,
     api_key: Optional[str],
     api_base_url: Optional[str],
-) -> Dict[str, str]:
-    config: Dict[str, str] = {}
+    existing_config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    config: Dict[str, Any] = dict(existing_config or {})
     if api_key:
         config["api_key"] = api_key
-    elif api_base_url:
+    elif api_base_url and not config.get("api_key"):
         config["api_key"] = _LOCAL_PROVIDER_PLACEHOLDER_KEY
     if api_base_url:
         config["base_url"] = api_base_url
@@ -468,12 +480,10 @@ def create_model_provider(
         openai_config = _openai_provider_config(
             api_key=api_key,
             api_base_url=api_base_url,
+            existing_config=openai_provider_config,
         )
-        if openai_config:
-            provider_configs["openai"] = {
-                **openai_provider_config,
-                **openai_config,
-            }
+        if openai_config != openai_provider_config:
+            provider_configs["openai"] = openai_config
             openai_provider_config = provider_configs["openai"]
         if requires_openai_credentials(
             provider_name=normalized,

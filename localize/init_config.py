@@ -52,6 +52,7 @@ _HEADER = (
     "# Review the detected paths/locales, then run localize check and a dry run.\n"
     "# See config.example.yaml for the full set of optional settings.\n"
 )
+_IGNORED_DISCOVERY_DIRS = {".git", "node_modules", "build", "target"}
 
 
 @dataclass(frozen=True)
@@ -255,7 +256,8 @@ def _is_autodetect_source_file(
 def _discover_localization_roots(target_project_root: str, source_locale: str) -> List[str]:
     roots: set[str] = set()
     formats = tuple(list_localization_formats().values())
-    for root, _dirs, files in os.walk(target_project_root):
+    for root, dirs, files in os.walk(target_project_root):
+        dirs[:] = [directory for directory in dirs if directory not in _IGNORED_DISCOVERY_DIRS]
         file_set = set(files)
         for entry in files:
             path = os.path.join(root, entry)

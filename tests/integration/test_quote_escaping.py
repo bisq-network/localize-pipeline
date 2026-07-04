@@ -74,6 +74,7 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
 
         # 4. Assertions
         mock_pre_validator.assert_called()
+        mock_post_validator.assert_called_once()
         mock_holistic_review.assert_awaited()
         # The AI should be called for the initial translation
         provider.create_chat_completion.assert_awaited()
@@ -143,6 +144,7 @@ class TestQuoteEscaping(unittest.IsolatedAsyncioTestCase):
         with open(output_file_path, 'r', encoding='utf-8') as f:
             output_content = f.read().strip()
 
+        mock_post_validator.assert_called_once()
         self.assertEqual(output_content, "test.key=C''est le choix {0}.")
 
     def test_reassemble_with_single_quotes(self):

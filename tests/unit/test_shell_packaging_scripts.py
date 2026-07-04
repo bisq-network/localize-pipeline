@@ -36,7 +36,9 @@ def test_docker_cleanup_does_not_prune_shared_volumes_or_tagged_images():
 def test_entrypoint_insecure_ssh_preserves_identity_config():
     script = (REPO_ROOT / "docker" / "docker-entrypoint.sh").read_text(encoding="utf-8")
 
-    assert 'cat >> "${user_home}/.ssh/config"' in script
+    assert "ensure_insecure_ssh_config()" in script
+    assert 'ensure_insecure_ssh_config "$user_home"' in script
+    assert "# localize-pipeline insecure ssh override" in script
     assert "StrictHostKeyChecking no" in script
     assert 'echo -e "Host github.com' not in script
 

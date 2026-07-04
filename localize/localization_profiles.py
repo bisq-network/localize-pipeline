@@ -26,6 +26,23 @@ def _profile_format_raw(raw_profile: Any) -> Any:
     if isinstance(raw_profile, str):
         return raw_profile
     if isinstance(raw_profile, Mapping):
+        recognized_keys = (
+            "display_name",
+            "file_extension",
+            "code_fence",
+            "locale_suffix_regex",
+            "format",
+            "localization_format",
+            "id",
+            "layout",
+            "localization_layout",
+            "source_locale",
+        )
+        if not any(key in raw_profile for key in recognized_keys):
+            raise ValueError(
+                "Localization profile mappings must include a recognized format key "
+                "('id', 'format', 'localization_format') or custom format metadata."
+            )
         if any(
             key in raw_profile
             for key in ("display_name", "file_extension", "code_fence", "locale_suffix_regex")
