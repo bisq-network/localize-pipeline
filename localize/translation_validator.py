@@ -14,6 +14,13 @@ def _is_disallowed_control_codepoint(codepoint: int) -> bool:
     )
 
 
+def _line_column_for_offset(text: str, offset: int) -> Tuple[int, int]:
+    line = text.count("\n", 0, offset) + 1
+    previous_newline = text.rfind("\n", 0, offset)
+    column = offset + 1 if previous_newline == -1 else offset - previous_newline
+    return line, column
+
+
 def find_disallowed_control_characters(text: str) -> List[str]:
     """
     Find real or Java-escaped control characters that would render as UI garbage.
@@ -28,12 +35,21 @@ def find_disallowed_control_characters(text: str) -> List[str]:
     for index, character in enumerate(text):
         codepoint = ord(character)
         if _is_disallowed_control_codepoint(codepoint):
-            findings.append(f"U+{codepoint:04X} at character {index + 1}")
+            line, column = _line_column_for_offset(text, index)
+            findings.append(f"U+{codepoint:04X} at line {line}, column {column}")
 
     for match in _UNICODE_ESCAPE_PATTERN.finditer(text):
+        backslash_count = 0
+        index = match.start() - 1
+        while index >= 0 and text[index] == "\\":
+            backslash_count += 1
+            index -= 1
+        if backslash_count % 2 == 1:
+            continue
         codepoint = int(match.group(1), 16)
         if _is_disallowed_control_codepoint(codepoint):
-            findings.append(f"escaped U+{codepoint:04X} at character {match.start() + 1}")
+            line, column = _line_column_for_offset(text, match.start())
+            findings.append(f"escaped U+{codepoint:04X} at line {line}, column {column}")
 
     return findings
 
@@ -57,9 +73,9 @@ def check_key_coverage(base_keys: Set[str], target_keys: Set[str]) -> Tuple[Set[
 
 def check_placeholder_parity(base_string: str, target_string: str) -> bool:
     """
-    Checks if the set of placeholders is identical between a base and a target string.
-    Placeholders are expected to be in the format {<index>}, e.g., {0}, {1}.
-    This function allows for reordering of placeholders.
+    Checks whether placeholder token multisets match between base and target strings.
+    All placeholder token kinds detected by placeholder_rules are compared with
+    Counter semantics, so duplicates must be preserved while ordering may change.
 
     Args:
         base_string: The base English string.

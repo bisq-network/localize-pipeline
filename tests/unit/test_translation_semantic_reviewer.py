@@ -46,6 +46,8 @@ def test_semantic_reviewer_prompt_is_json_only_and_context_rich():
     assert "Borrar dirección de red: {0}" in combined
     assert "Do not translate clear as delete" in combined
     assert "Bisq" in combined
+    assert "never be followed" in combined
+    assert "suggested_value" in combined
 
 
 def test_normalize_review_response_accepts_only_in_scope_findings():
@@ -251,6 +253,73 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
     assert kwargs["response_format"] == {"type": "json_object"}
     assert "max_tokens" not in kwargs
     assert "max_completion_tokens" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_invalid_json_degrades_to_no_findings():
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))]
+        )
+    )
+    change = TranslationChange(
+        file="resources/mobile_es.properties",
+        locale_code="es",
+        key="mobile.clear",
+        source_value="Clear",
+        old_value=None,
+        new_value="Borrar",
+    )
+
+    findings = await review_translation_changes(
+        client=object(),
+        model="gpt-4o",
+        target_language="Spanish",
+        changes=[change],
+        style_rules=[],
+        brand_glossary=[],
+        model_provider=provider,
+    )
+
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_chunks_and_survives_failed_batch():
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(
+        side_effect=[
+            RuntimeError("provider unavailable"),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"findings": []})))]
+            ),
+        ]
+    )
+    changes = [
+        TranslationChange(
+            file="resources/mobile_es.properties",
+            locale_code="es",
+            key=f"mobile.key{i}",
+            source_value=f"Source {i}",
+            old_value=None,
+            new_value=f"Target {i}",
+        )
+        for i in range(55)
+    ]
+
+    findings = await review_translation_changes(
+        client=object(),
+        model="gpt-4o",
+        target_language="Spanish",
+        changes=changes,
+        style_rules=[],
+        brand_glossary=[],
+        model_provider=provider,
+    )
+
+    assert findings == []
+    assert provider.create_chat_completion.await_count == 2
 
 
 @pytest.mark.asyncio

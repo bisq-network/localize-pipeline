@@ -31,13 +31,6 @@ class SemanticRemediationResult:
         return len(self.skipped)
 
     @property
-    def applied_identities(self) -> set[tuple[str, str]]:
-        return {
-            (item["file"], item["key"])
-            for item in self.applied
-        }
-
-    @property
     def applied_finding_signatures(self) -> set[str]:
         return {
             item["finding_signature"]
@@ -145,6 +138,9 @@ def apply_semantic_review_suggestions(
         if not isinstance(suggested_value, str) or not suggested_value:
             _skip(result, finding, "missing suggested_value")
             continue
+        if any(ch in suggested_value for ch in ("\r", "\n")):
+            _skip(result, finding, "suggestion contains line break characters")
+            continue
         file_name = str(finding.get("file") or "")
         key = str(finding.get("key") or "")
         if not file_name or not key:
@@ -166,7 +162,6 @@ def apply_semantic_review_suggestions(
         if identity in seen_candidate_identities:
             _skip(result, finding, "duplicate finding for changed entry")
             continue
-        seen_candidate_identities.add(identity)
 
         profile = _matching_profile(relative_file, locale_codes, localization_profiles)
         if profile is None:
@@ -174,7 +169,11 @@ def apply_semantic_review_suggestions(
             continue
 
         adapter = get_localization_adapter(profile.localization_format)
-        parsed_lines, target_translations = adapter.parse_file(str(target_path))
+        try:
+            parsed_lines, target_translations = adapter.parse_file(str(target_path))
+        except Exception as exc:
+            _skip(result, finding, f"target file could not be parsed: {exc}")
+            continue
         if key not in target_translations:
             _skip(result, finding, "key not found in target file")
             continue
@@ -191,7 +190,11 @@ def apply_semantic_review_suggestions(
         if not source_path.exists():
             _skip(result, finding, "source file not found")
             continue
-        _, source_translations = adapter.parse_file(str(source_path))
+        try:
+            _, source_translations = adapter.parse_file(str(source_path))
+        except Exception as exc:
+            _skip(result, finding, f"source file could not be parsed: {exc}")
+            continue
         source_value = source_translations.get(key)
         if source_value is None:
             _skip(result, finding, "source key not found")
@@ -205,11 +208,14 @@ def apply_semantic_review_suggestions(
             _skip(result, finding, "suggestion does not preserve source placeholders")
             continue
 
-        for line in parsed_lines:
+        for line in reversed(parsed_lines):
             if line.get("type") == "entry" and line.get("key") == key:
                 line["value"] = escaped_value
                 break
-        target_path.write_text(adapter.reassemble_file(parsed_lines), encoding="utf-8")
+        temp_path = target_path.with_name(f".{target_path.name}.tmp")
+        temp_path.write_text(adapter.reassemble_file(parsed_lines), encoding="utf-8")
+        temp_path.replace(target_path)
+        seen_candidate_identities.add(identity)
         result.applied.append({
             "file": relative_file,
             "key": key,

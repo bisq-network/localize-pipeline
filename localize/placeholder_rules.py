@@ -8,15 +8,17 @@ from collections import Counter
 from typing import Dict, Match, Tuple
 
 
-_HTML_TAG = r"<[^<>]+>"
+_HTML_TAG = r"</?[A-Za-z][^<>]*>"
+_PLACEHOLDER_TAG = r"<\{[A-Za-z0-9_][^{}\n]*\}[^<>]*>"
 _I18NEXT_TOKEN = r"\{\{[^{}\n]+\}\}"
 _BRACE_TOKEN = r"\{[A-Za-z0-9_][^{}\n]*\}"
 _PYTHON_NAMED_PRINTF = r"%\([^)]+\)[#0 +\-]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[a-zA-Z]"
-_POSITIONAL_PRINTF = r"%(?:\d+\$)?[#0+\-]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[a-zA-Z@]"
+_POSITIONAL_PRINTF = r"%(?!%)(?:\d+\$)?[#0+\-,(<]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bBhHsScCdoxXeEfgGaAtT%n]"
 
 PLACEHOLDER_PATTERN = re.compile(
     "|".join(
         [
+            _PLACEHOLDER_TAG,
             _HTML_TAG,
             _I18NEXT_TOKEN,
             _BRACE_TOKEN,
@@ -54,8 +56,11 @@ def protect_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
 
 def restore_placeholders(text: str, placeholder_mapping: Dict[str, str]) -> str:
     """Restore placeholders previously replaced by ``protect_placeholders``."""
-    if not text or not placeholder_mapping:
+    if not text:
         return text
-    for token, placeholder in placeholder_mapping.items():
-        text = text.replace(token, placeholder)
+    if placeholder_mapping:
+        for token, placeholder in placeholder_mapping.items():
+            text = text.replace(token, placeholder)
+    if "__PH_" in text:
+        raise ValueError("Unresolved placeholder protection token remains in text.")
     return text
