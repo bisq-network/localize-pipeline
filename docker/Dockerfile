@@ -5,7 +5,7 @@ ENV CGO_ENABLED=0
 
 RUN GOBIN=/out go install github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # Set SHELL to fail on pipeline errors
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -161,5 +161,5 @@ ENTRYPOINT ["/app/docker/docker-entrypoint.sh"]
 COPY docker/ssh_known_hosts /etc/ssh/ssh_known_hosts
 RUN chmod 644 /etc/ssh/ssh_known_hosts
 
-# Default command is now the main python script (can be overridden in docker-compose.yml)
-CMD ["python3", "-m", "localize.translate_localization_files"]
+# Default command is the orchestration script so bare docker run uses PR gating.
+CMD ["/app/update-translations.sh"]

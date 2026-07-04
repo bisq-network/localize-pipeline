@@ -212,8 +212,11 @@ def test_bisq_mobile_profile_packages_sanitized_production_shape():
 def test_docker_compose_mounts_the_selected_profile():
     compose = (PROJECT_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
 
-    assert "../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml:/app/config.yaml:ro" in compose
-    assert "../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json:/app/glossary.json:ro" in compose
+    assert "source: ../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml" in compose
+    assert "target: /app/config.yaml" in compose
+    assert "source: ../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json" in compose
+    assert "target: /app/glossary.json" in compose
+    assert "create_host_path: false" in compose
 
 
 def test_repository_does_not_ship_legacy_systemd_deployment_scripts():

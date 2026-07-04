@@ -51,7 +51,12 @@ setup_ssh() {
 
     if [ "${ALLOW_INSECURE_SSH:-false}" = "true" ]; then
         log "WARNING: ALLOW_INSECURE_SSH is true. Host key verification is disabled." "WARNING"
-        echo -e "Host github.com\n\tBatchMode yes\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null" > "${user_home}/.ssh/config"
+        cat >> "${user_home}/.ssh/config" <<'EOF'
+Host github.com
+    BatchMode yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile=/dev/null
+EOF
     else
         KNOWN_HOSTS_PATH="${PINNED_KNOWN_HOSTS_PATH:-/etc/ssh/ssh_known_hosts}"
         if [ ! -r "$KNOWN_HOSTS_PATH" ] || ! grep -q "github.com" "$KNOWN_HOSTS_PATH"; then
@@ -143,6 +148,8 @@ for bin in git ssh gosu; do
   fi
 done
 
+TARGET_REPO_DIR="${TARGET_REPO_DIR:-/target_repo}"
+
 if [ "$(id -u)" -ne 0 ]; then
     # --- appuser Execution Block ---
     log "Starting entrypoint script as user: $(whoami)"
@@ -151,8 +158,6 @@ if [ "$(id -u)" -ne 0 ]; then
     ensure_logs_dir
     setup_ssh
     export GIT_TERMINAL_PROMPT=0
-
-    TARGET_REPO_DIR="${TARGET_REPO_DIR:-/target_repo}"
 
     # --- Git Configuration ---
     log "Configuring git user..."
@@ -261,7 +266,9 @@ if [ "$(id -u)" -ne 0 ]; then
       fi
 
       # Check for untracked files that might interfere
-      if git ls-files --others --exclude-standard | head -1 | grep -q .; then
+      local local_untracked_probe
+      local_untracked_probe=$(git ls-files --others --exclude-standard 2>/dev/null | awk 'NR == 1 {print; exit}' || true)
+      if [ -n "$local_untracked_probe" ]; then
         log "Repository health check: Untracked files found"
       else
         log "Repository health check: No untracked files"
@@ -342,8 +349,12 @@ if [ "$(id -u)" -ne 0 ]; then
           fi
 
           # Force reset to clean state
-          git reset --hard HEAD 2>/dev/null || true
-          git clean -fd 2>/dev/null || true
+          if ! git reset --hard HEAD; then
+            log "Warning: git reset --hard failed during repository cleanup." "WARNING"
+          fi
+          if ! git clean -fd; then
+            log "Warning: git clean failed during repository cleanup." "WARNING"
+          fi
         fi
       fi
 
@@ -410,31 +421,32 @@ else
           chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo
         else
           find /target_repo -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} +
+          if [ -d "/target_repo/.git" ]; then
+            chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo/.git \
+              || log "Warning: unable to chown /target_repo/.git; continuing" "WARNING"
+          fi
         fi
     fi
 
-    # Fix ownership of the .env file if it exists; do not follow symlinks and don't fail hard.
-    if [ -e "/app/docker/.env" ]; then
-        if [ -L "/app/docker/.env" ]; then
-            log "Refusing to chown symlink /app/docker/.env; not following." "WARNING"
-        else
-            chown -h "${APPUSER_UID}:${APPUSER_GID}" "/app/docker/.env" \
-              || log "Warning: unable to chown /app/docker/.env; continuing" "WARNING"
-            chmod 640 "/app/docker/.env" \
-              || log "Warning: unable to chmod /app/docker/.env; continuing" "WARNING"
-        fi
-    fi
-
-    # When running as root (ALLOW_RUN_AS_ROOT=true), silence Git ownership warnings for /target_repo.
+    # When running as root (ALLOW_RUN_AS_ROOT=true), silence Git ownership warnings.
     if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
-      git config --global --add safe.directory /target_repo || true
+      git config --global --add safe.directory "$TARGET_REPO_DIR" || true
     fi
 
     # Set up SSH. This is done as root to ensure correct ownership of created files.
     setup_ssh
 
-    # Attempt to switch to the appuser.
-    # If this fails (e.g., on Docker for Mac), check the ALLOW_RUN_AS_ROOT flag.
+    if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
+      log "Root execution was requested with ALLOW_RUN_AS_ROOT=true." "WARNING"
+      export HOME=/home/appuser
+      export USER=root
+      if [ "$#" -eq 0 ]; then
+        log "Error: no command provided to exec. Set CMD in Dockerfile or command in docker-compose.yml." "ERROR" >&2
+        exit 1
+      fi
+      exec "$@"
+    fi
+
     log "Permissions fixed. Re-executing as appuser..."
 
     # Set HOME and USER explicitly for gosu to ensure a clean environment for git and other tools.
@@ -443,18 +455,5 @@ else
 
     # Use gosu to drop privileges and re-execute this same script as the appuser.
     # The script will then enter the `if [ "$(id -u)" -ne 0 ]` block.
-    if ! exec gosu appuser "$0" "$@"; then
-        log "Warning: gosu failed to switch to appuser." "WARNING"
-        if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
-            log "ALLOW_RUN_AS_ROOT=true; continuing as root." "WARNING"
-            if [ "$#" -eq 0 ]; then
-              log "Error: no command provided to exec. Set CMD in Dockerfile or command in docker-compose.yml." "ERROR" >&2
-              exit 1
-            fi
-            exec "$@"
-        else
-            log "Refusing to continue as root. Set ALLOW_RUN_AS_ROOT=true to override." "ERROR"
-            exit 1
-        fi
-    fi
+    exec gosu appuser "$0" "$@"
 fi

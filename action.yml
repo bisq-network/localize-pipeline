@@ -116,13 +116,18 @@ runs:
       env:
         PYTHONPATH: ${{ github.action_path }}
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
-        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        LOCALIZE_OPENAI_API_KEY_INPUT: ${{ inputs.openai-api-key }}
         LOCALIZE_API_BASE_URL_INPUT: ${{ inputs.api-base-url }}
         LOCALIZE_REVIEW_MODEL_INPUT: ${{ inputs.review-model }}
         LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
         LOCALIZE_PLUGIN_MODULES: ${{ inputs.plugin-modules }}
       run: |
         set -euo pipefail
+        if [ -n "${LOCALIZE_OPENAI_API_KEY_INPUT:-}" ]; then
+          export OPENAI_API_KEY="$LOCALIZE_OPENAI_API_KEY_INPUT"
+        else
+          unset OPENAI_API_KEY
+        fi
         if [ -n "${LOCALIZE_API_BASE_URL_INPUT:-}" ]; then
           export OPENAI_BASE_URL="$LOCALIZE_API_BASE_URL_INPUT"
         else
@@ -141,7 +146,7 @@ runs:
       env:
         PYTHONPATH: ${{ github.action_path }}
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
-        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        LOCALIZE_OPENAI_API_KEY_INPUT: ${{ inputs.openai-api-key }}
         LOCALIZE_API_BASE_URL_INPUT: ${{ inputs.api-base-url }}
         LOCALIZE_REVIEW_MODEL_INPUT: ${{ inputs.review-model }}
         PROCESS_ALL_FILES: ${{ inputs.process-all-files }}
@@ -150,6 +155,11 @@ runs:
         LOCALIZE_PLUGIN_MODULES: ${{ inputs.plugin-modules }}
       run: |
         set -euo pipefail
+        if [ -n "${LOCALIZE_OPENAI_API_KEY_INPUT:-}" ]; then
+          export OPENAI_API_KEY="$LOCALIZE_OPENAI_API_KEY_INPUT"
+        else
+          unset OPENAI_API_KEY
+        fi
         if [ -n "${LOCALIZE_API_BASE_URL_INPUT:-}" ]; then
           export OPENAI_BASE_URL="$LOCALIZE_API_BASE_URL_INPUT"
         else
@@ -286,6 +296,11 @@ runs:
           exit 0
         fi
 
+        if ! gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push // false' | grep -qx true; then
+          echo "::error::github-token must have contents:write and pull-requests:write permissions to push '$branch' and open or update the translation PR."
+          exit 1
+        fi
+
         body_file="${RUNNER_TEMP:-/tmp}/localize-pr-body.md"
         LOCALIZE_PR_BODY_FILE="$body_file" python - <<'PY'
         import json
@@ -384,6 +399,7 @@ runs:
         PY
 
         git commit "${commit_args[@]}"
+        git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
         git push --force-with-lease origin "$branch"
         if gh pr view "$branch" >/dev/null 2>&1; then
           echo "Pull request already exists for $branch; it now points at the latest push."

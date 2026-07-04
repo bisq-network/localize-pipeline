@@ -35,3 +35,36 @@ def test_entrypoint_keeps_arbitrary_configured_runtime_paths_out_of_root_setup()
     script = _entrypoint_script()
 
     assert 'Skipping configured runtime directory outside /app: $runtime_dir' in script
+
+
+def test_entrypoint_recurses_git_dir_ownership_before_privilege_drop():
+    script = _entrypoint_script()
+
+    assert 'if [ -d "/target_repo/.git" ]; then' in script
+    assert 'chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo/.git' in script
+
+
+def test_entrypoint_root_fallback_is_explicit_before_exec():
+    script = _entrypoint_script()
+
+    assert "if ! exec gosu" not in script
+    assert 'if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then' in script
+    assert 'exec gosu appuser "$0" "$@"' in script
+    assert "Root execution was requested" in script
+
+
+def test_entrypoint_logs_cleanup_failures_and_removes_dead_env_chown():
+    script = _entrypoint_script()
+
+    assert "git reset --hard HEAD 2>/dev/null || true" not in script
+    assert "git clean -fd 2>/dev/null || true" not in script
+    assert 'log "Warning: git reset --hard failed during repository cleanup."' in script
+    assert 'log "Warning: git clean failed during repository cleanup."' in script
+    assert "/app/docker/.env" not in script
+
+
+def test_entrypoint_safe_directory_uses_remote_url_scope():
+    script = _entrypoint_script()
+
+    assert 'git config --global --add safe.directory "$TARGET_REPO_DIR"' in script
+    assert 'git config --global --add safe.directory /target_repo || true' not in script

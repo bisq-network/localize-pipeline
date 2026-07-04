@@ -186,7 +186,7 @@ def test_transifex_pull_is_skipped_when_source_is_git():
     assert "using localization files already in the repository" in script
     # The guard must be evaluated before the tx pull command is constructed.
     guard_index = script.index('"$translation_source" == "git"')
-    tx_pull_index = script.index('TX_PULL_CMD="tx pull')
+    tx_pull_index = script.index("TX_PULL_CMD=(tx pull")
     assert guard_index < tx_pull_index
 
 
@@ -346,3 +346,96 @@ def test_pr_body_includes_translation_run_summary_metrics():
     summary_index = script.index("Translation run summary")
     pr_create_index = script.index("gh pr create")
     assert summary_index < pr_create_index
+
+
+def test_pending_pr_gate_does_not_swallow_gh_failures():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert "if ! MANUAL_BLOCK_PR=$(gh pr list" in script
+    assert "if ! existing_pr_branches=$(gh pr list" in script
+    assert "gh pr list --state open --author \"@me\" --repo \"$UPSTREAM_REPO_NAME\" --search \"in:title $BLOCKING_KEYWORD\" --json number -q '.[0].number' || true" not in script
+    assert "gh pr list --state open --author \"@me\" --repo \"$UPSTREAM_REPO_NAME\" --json headRefName -q '.[].headRefName' | grep" not in script
+    assert "Failed to query manually-blocked PRs" in script
+    assert "Failed to query existing translation PRs" in script
+
+
+def test_publish_adapter_uses_collected_translation_files_for_changes():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    publish_body = script[
+        script.index("publish_translation_changes() {"):
+        script.index("# Go back to original branch")
+    ]
+
+    assert 'mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")' in publish_body
+    assert 'TRANSLATION_CHANGES=$(printf' in publish_body
+    assert "No git-scoped translation file changes detected" in publish_body
+    assert "git status --porcelain | grep -E" not in publish_body
+
+
+def test_shell_helpers_are_local_run_safe_and_nonfatal():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert 'SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)' in script
+    assert 'LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"' in script
+    assert 'LOG_FILE="$LOG_DIR/deployment_log.log"' in script
+    log_cmd_body = script[script.index("log_cmd() {") : script.index("record_pipeline_event()")]
+    assert "local status=${PIPESTATUS[0]}" in log_cmd_body
+    assert "return 0" in log_cmd_body
+
+
+def test_pipeline_events_use_one_key_value_per_argument():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert 'record_pipeline_event "source_files_detected" "count=0" "source=transifex"' in script
+    assert 'record_pipeline_event "source_files_detected" "count=${SOURCE_CHANGE_COUNT:-0}" "source=transifex"' in script
+    assert 'record_pipeline_event "pull_request_created" "url=$PR_URL" "branch=$branch" "files=${#BATCH_FILES[@]}"' in script
+    assert 'record_pipeline_event "translation_files_detected" "count=$TOTAL_FILES" "input_folder=$REL_INPUT_FOLDER"' in script
+    assert '"count=0 source=transifex"' not in script
+
+
+def test_transifex_is_required_only_for_transifex_source_and_times_out():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    tool_loop = script[script.index("for tool in yq git curl jq python3") : script.index("# --- Execution Lock")]
+    assert " tx " not in tool_loop
+    assert "TX_PULL_CMD=(tx pull -t -f --use-git-timestamps)" in script
+    assert "TX_PULL_CMD=(tx pull -s -t -f --use-git-timestamps)" in script
+    assert 'TX_PULL_TIMEOUT_SECONDS="${TX_PULL_TIMEOUT:-3600}"' in script
+    assert 'timeout "$TX_PULL_TIMEOUT_SECONDS" "${TX_PULL_CMD[@]}"' in script
+
+
+def test_publish_flow_preflights_gh_and_caps_pr_body():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    stage = script[script.index("stage_and_submit_batch()") : script.index("publish_translation_changes()")]
+
+    preflight_index = stage.index("Cannot create PR: gh CLI or GITHUB_TOKEN missing.")
+    commit_index = stage.index('if ! commit_staged_changes "$commit_msg"')
+    assert preflight_index < commit_index
+    assert 'PR_BODY_FILE="$report_dir/pr-body-${branch}.md"' in stage
+    assert "max_chars = 60000" in stage
+    assert '--body-file "$PR_BODY_FILE"' in stage
+    assert "cut -c1-140" not in stage
+    assert "| .[:140]" in stage
+
+
+def test_publish_flow_reports_failed_batches():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    publish = script[script.index("publish_translation_changes()") :]
+
+    assert "FAILED_BATCHES=0" in publish
+    assert "FAILED_BATCHES=$((FAILED_BATCHES + 1))" in publish
+    assert 'if [ "$FAILED_BATCHES" -gt 0 ]; then' in publish
+    assert "exit 1" in publish[publish.index('if [ "$FAILED_BATCHES" -gt 0 ]; then') :]
+
+
+def test_git_operations_are_scoped_and_explicit():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    assert 'LOCK_DIR="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"' in script
+    assert 'LOCK_FILE="$LOCK_DIR/translation-${UPSTREAM_REPO_NAME//\\//-}.lock"' in script
+    config_body = script[script.index("get_config_value()") : script.index("prepare_translation_source()")]
+    assert "local val" in config_body
+    assert "ABSOLUTE_INPUT_FOLDER=$(echo" not in script
+    assert "git config --type=bool --get commit.gpgsign" in script
+    assert 'git rm --ignore-unmatch -- "$bf"' in script
+    assert "Warning: failed to remove deleted translation file" in script

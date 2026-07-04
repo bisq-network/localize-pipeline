@@ -5,8 +5,7 @@
 # This script safely removes:
 # - Stopped containers older than 24 hours
 # - Dangling images (untagged from builds)
-# - Unused images older than 7 days (keeps recent builds for rollback)
-# - Unused Docker volumes
+# - Dangling images older than 7 days
 # - Build cache older than 7 days
 #
 # Safety features:
@@ -25,8 +24,7 @@
 #   3. Test manually: ./docker-cleanup.sh
 #   4. Add to cron: see docs/maintenance/disk-space-management.md
 
-set -e
-set -o pipefail  # Ensure pipe failures are detected
+set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,15 +66,11 @@ docker container prune -f --filter "until=24h" 2>&1 | tee -a "$LOG_FILE"
 
 # Remove dangling images (untagged images from builds)
 echo "[$DATE] Removing dangling images..." | tee -a "$LOG_FILE"
-docker image prune -f 2>&1 | tee -a "$LOG_FILE"
+docker image prune -f --filter "dangling=true" 2>&1 | tee -a "$LOG_FILE"
 
-# Remove unused images older than 7 days (keeps recent builds)
-echo "[$DATE] Removing unused images older than 7 days..." | tee -a "$LOG_FILE"
-docker image prune -a -f --filter "until=168h" 2>&1 | tee -a "$LOG_FILE"
-
-# Remove unused volumes
-echo "[$DATE] Removing unused volumes..." | tee -a "$LOG_FILE"
-docker volume prune -f 2>&1 | tee -a "$LOG_FILE"
+# Remove older dangling images while preserving tagged images used for rollback.
+echo "[$DATE] Removing dangling images older than 7 days..." | tee -a "$LOG_FILE"
+docker image prune -f --filter "dangling=true" --filter "until=168h" 2>&1 | tee -a "$LOG_FILE"
 
 # Remove build cache older than 7 days
 echo "[$DATE] Removing old build cache..." | tee -a "$LOG_FILE"

@@ -36,8 +36,9 @@ FORK_REPO_NAME=${FORK_REPO_NAME:-hiciefte/bisq2}
 UPSTREAM_REPO_NAME=${UPSTREAM_REPO_NAME:-bisq-network/bisq2} 
 TARGET_BRANCH_FOR_PR=${TARGET_BRANCH_FOR_PR:-main}
 
-# Log file
-LOG_DIR="/app/logs"
+# Log file. Default to a path next to this script so local runs do not need /app.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 LOG_FILE="$LOG_DIR/deployment_log.log"
 
 # Ensure log directory exists
@@ -58,7 +59,14 @@ log() {
 # Run a command, prefix with '+', and tee its output to the log.
 log_cmd() {
   log "+ $*" "DEBUG"
+  set +e
   "$@" 2>&1 | sed 's/^/| /' | tee -a "$LOG_FILE"
+  local status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -ne 0 ]; then
+    log "Command failed with exit $status: $*" "WARNING"
+  fi
+  return 0
 }
 
 record_pipeline_event() {
@@ -387,8 +395,9 @@ check_and_exit_if_blocked() {
     exit 0 # Exit cleanly to prevent cron from flagging it as a failure
 }
 
-# Check for required tools
-for tool in yq git tx curl jq python3; do
+# Check for required tools. The tx CLI is required only for transifex sources and
+# is validated where that source is prepared.
+for tool in yq git curl jq python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         log "Required tool '$tool' is not installed." "ERROR"
         exit 1
@@ -397,7 +406,9 @@ done
 
 # --- Execution Lock and Logging ---
 # Lock file to prevent concurrent executions for the same repository
-LOCK_FILE="/tmp/translation-${UPSTREAM_REPO_NAME//\//-}.lock"
+LOCK_DIR="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"
+mkdir -p "$LOCK_DIR"
+LOCK_FILE="$LOCK_DIR/translation-${UPSTREAM_REPO_NAME//\//-}.lock"
 EXECUTION_LOG="${LOG_DIR}/translation-executions.log"
 GIT_SOURCE_BASELINE_FILE=""
 GIT_SOURCE_CURRENT_HEAD=""
@@ -455,7 +466,10 @@ fi
 if command_exists gh && [ -n "${GITHUB_TOKEN:-}" ]; then
   # Use the 'search' flag to query PR titles on the upstream repo.
   # Filter by '@me' which gh resolves to the currently authenticated user.
-  MANUAL_BLOCK_PR=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --search "in:title $BLOCKING_KEYWORD" --json number -q '.[0].number' || true)
+  if ! MANUAL_BLOCK_PR=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --search "in:title $BLOCKING_KEYWORD" --json number -q '.[0].number'); then
+      log "Failed to query manually-blocked PRs on repo '$UPSTREAM_REPO_NAME'." "ERROR"
+      exit 1
+  fi
   if [ -n "$MANUAL_BLOCK_PR" ]; then
       check_and_exit_if_blocked "Found manually-blocking PR #${MANUAL_BLOCK_PR} authored by the bot's account"
   fi
@@ -467,7 +481,11 @@ fi
 if command_exists gh && [ -n "${GITHUB_TOKEN:-}" ]; then
   log "Checking for existing open translation PRs on repo '$UPSTREAM_REPO_NAME'..."
   # Note: The 'gh pr list' command requires GITHUB_TOKEN to be in the environment.
-  EXISTING_PR_BRANCH=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --json headRefName -q '.[].headRefName' | grep "^${TRANSLATION_BRANCH_PREFIX}" | head -n 1 || true)
+  if ! existing_pr_branches=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --json headRefName -q '.[].headRefName'); then
+      log "Failed to query existing translation PRs on repo '$UPSTREAM_REPO_NAME'." "ERROR"
+      exit 1
+  fi
+  EXISTING_PR_BRANCH=$(printf '%s\n' "$existing_pr_branches" | grep "^${TRANSLATION_BRANCH_PREFIX}" | head -n 1 || true)
   if [ -n "$EXISTING_PR_BRANCH" ]; then
       check_and_exit_if_blocked "Found existing open translation PR from branch: $EXISTING_PR_BRANCH"
   fi
@@ -488,8 +506,9 @@ log "Using configuration file: $CONFIG_FILE"
 get_config_value() {
     local key="$1"
     local config_file="$2"
+    local val
     if ! command -v yq >/dev/null 2>&1; then
-        log "Error: 'yq' is required but not found in PATH."
+        printf "Error: 'yq' is required but not found in PATH.\n" >&2
         exit 1
     fi
     # Use yq to safely read the value. `// "__MISSING__"` provides a default for missing keys.
@@ -528,13 +547,18 @@ prepare_translation_source() {
 
             # Pull translations with -t option.
             # The --force (-f) flag ensures local files are overwritten with remote changes.
-            TX_PULL_CMD="tx pull -t -f --use-git-timestamps"
+            TX_PULL_CMD=(tx pull -t -f --use-git-timestamps)
             if [[ "$pull_source_files" == "true" ]]; then
                 log "Configuration directs to pull source files as well. Modifying tx command."
-                TX_PULL_CMD="tx pull -s -t -f --use-git-timestamps"
+                TX_PULL_CMD=(tx pull -s -t -f --use-git-timestamps)
+            fi
+            TX_PULL_TIMEOUT_SECONDS="${TX_PULL_TIMEOUT:-3600}"
+            if [[ ! "$TX_PULL_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+                log "Invalid TX_PULL_TIMEOUT '$TX_PULL_TIMEOUT_SECONDS'; using 3600 seconds." "WARNING"
+                TX_PULL_TIMEOUT_SECONDS=3600
             fi
 
-            log "Using tx command: $TX_PULL_CMD"
+            log "Using tx command: ${TX_PULL_CMD[*]} (timeout: ${TX_PULL_TIMEOUT_SECONDS}s)"
             log "Listing permissions for current directory ($(pwd)) before tx pull:"
             log_cmd ls -la .
             log "Listing permissions for input folder '${ABSOLUTE_INPUT_FOLDER}' before tx pull:"
@@ -551,7 +575,7 @@ prepare_translation_source() {
 
             # Execute and filter output, but preserve original tx exit code.
             set +e
-            { $TX_PULL_CMD 2>&1 | grep -v -E 'Pulling file|Creating download job|File was not found locally'; }
+            { timeout "$TX_PULL_TIMEOUT_SECONDS" "${TX_PULL_CMD[@]}" 2>&1 | grep -v -E 'Pulling file|Creating download job|File was not found locally'; }
             TX_STATUS=${PIPESTATUS[0]}
             set -e
 
@@ -572,14 +596,14 @@ prepare_translation_source() {
             # Match translation files even when staged for deletion (D prefix) or renames (-> suffix)
             if ! git status --porcelain | grep -qE "$(translation_file_change_regex)"; then
                 log "Transifex pull completed successfully, but no translation files were modified. This is normal when there are no new translation keys." "INFO"
-                record_pipeline_event "source_files_detected" "count=0 source=transifex"
+                record_pipeline_event "source_files_detected" "count=0" "source=transifex"
                 log "No further processing needed. Exiting gracefully."
                 send_heartbeat_if_configured "no_source_changes"
                 exit 0
             fi
 
             SOURCE_CHANGE_COUNT=$(git status --porcelain | grep -E "$(translation_file_change_regex)" | wc -l | tr -d '[:space:]')
-            record_pipeline_event "source_files_detected" "count=${SOURCE_CHANGE_COUNT:-0} source=transifex"
+            record_pipeline_event "source_files_detected" "count=${SOURCE_CHANGE_COUNT:-0}" "source=transifex"
             log "Transifex pull successfully updated translation files. Starting AI translation processing..." "INFO"
 
         else
@@ -638,7 +662,9 @@ else
     ABSOLUTE_INPUT_FOLDER="$TARGET_PROJECT_ROOT/$INPUT_FOLDER"
 fi
 # Remove any double slashes that might occur
-ABSOLUTE_INPUT_FOLDER=$(echo "$ABSOLUTE_INPUT_FOLDER" | sed 's_//_/_g')
+while [[ "$ABSOLUTE_INPUT_FOLDER" == *"//"* ]]; do
+    ABSOLUTE_INPUT_FOLDER="${ABSOLUTE_INPUT_FOLDER//\/\//\/}"
+done
 
 log "Absolute input folder: \"$ABSOLUTE_INPUT_FOLDER\""
 
@@ -761,7 +787,7 @@ fi
 
 commit_staged_changes() {
     local msg="$1"
-    if git config --get commit.gpgsign >/dev/null 2>&1 && git config --get user.signingkey >/dev/null 2>&1; then
+    if [ "$(git config --type=bool --get commit.gpgsign 2>/dev/null || echo false)" = "true" ] && git config --get user.signingkey >/dev/null 2>&1; then
       log "Committing with GPG signing"
       if ! git commit -S -m "$msg"; then
         log "GPG signing failed; retrying unsigned." "WARNING"
@@ -783,13 +809,20 @@ stage_and_submit_batch() {
     local pr_title="$3"
     local app_root="${APP_ROOT:-/app}"
 
+    if ! command_exists gh || [ -z "${GITHUB_TOKEN:-}" ]; then
+        log "Cannot create PR: gh CLI or GITHUB_TOKEN missing." "ERROR"
+        return 1
+    fi
+
+    git fetch "$REMOTE" "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/${REMOTE}/${DEFAULT_BRANCH}" \
+      || log "Warning: failed to fetch $REMOTE/$DEFAULT_BRANCH before branch checkout." "WARNING"
     git checkout -B "$branch" "${REMOTE}/${DEFAULT_BRANCH}"
 
     for bf in "${BATCH_FILES[@]}"; do
         if [ -f "$bf" ]; then
             git add -- "$bf"
         else
-            git rm -- "$bf" 2>/dev/null || true
+            git rm --ignore-unmatch -- "$bf" || log "Warning: failed to remove deleted translation file '$bf' from git index." "WARNING"
         fi
     done
 
@@ -819,7 +852,7 @@ stage_and_submit_batch() {
         if [ -f "$bf" ]; then
             git add -- "$bf"
         else
-            git rm -- "$bf" 2>/dev/null || true
+            git rm --ignore-unmatch -- "$bf" || log "Warning: failed to remove deleted translation file '$bf' from git index." "WARNING"
         fi
     done
 
@@ -861,11 +894,6 @@ stage_and_submit_batch() {
 
     if ! git push origin "$branch"; then
         log "Failed to push branch '$branch' to origin." "ERROR"
-        return 1
-    fi
-
-    if ! command_exists gh || [ -z "${GITHUB_TOKEN:-}" ]; then
-        log "Cannot create PR: gh CLI or GITHUB_TOKEN missing." "ERROR"
         return 1
     fi
 
@@ -934,16 +962,32 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
         fi
     fi
 
+    local PR_BODY_FILE="$report_dir/pr-body-${branch}.md"
+    printf '%s\n' "$PR_BODY" > "$PR_BODY_FILE"
+    python3 - "$PR_BODY_FILE" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+max_chars = 60000
+text = path.read_text(encoding="utf-8")
+if len(text) > max_chars:
+    path.write_text(
+        text[:max_chars] + "\n\n<!-- PR body truncated by localize-pipeline to fit GitHub limits. -->\n",
+        encoding="utf-8",
+    )
+PY
+
     log "Attempting to create PR: $FORK_REPO_NAME:$branch -> $UPSTREAM_REPO_NAME:$TARGET_BRANCH_FOR_PR"
     local PR_URL
     if PR_URL=$(gh pr create \
         --title "$pr_title" \
-        --body "$PR_BODY" \
+        --body-file "$PR_BODY_FILE" \
         --repo "$UPSTREAM_REPO_NAME" \
         --base "$TARGET_BRANCH_FOR_PR" \
         --head "${FORK_OWNER}:$branch"); then
         log "Successfully created pull request: $PR_URL"
-        record_pipeline_event "pull_request_created" "url=$PR_URL branch=$branch files=${#BATCH_FILES[@]}"
+        record_pipeline_event "pull_request_created" "url=$PR_URL" "branch=$branch" "files=${#BATCH_FILES[@]}"
     else
         log "Error: Failed to create pull request. Check gh cli auth and GITHUB_TOKEN." "ERROR"
         return 1
@@ -953,7 +997,7 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
     local quality_description
     local status_repo
     quality_state=$(jq -r '.status_state // "success"' "$QUALITY_REPORT_JSON")
-    quality_description=$(jq -r '.status_description // "Translation quality gate passed."' "$QUALITY_REPORT_JSON" | cut -c1-140)
+    quality_description=$(jq -r '(.status_description // "Translation quality gate passed.") | .[:140]' "$QUALITY_REPORT_JSON")
     status_repo="${FORK_OWNER}/${FORK_REPO_NAME_SHORT}"
     if ! gh api "repos/$status_repo/statuses/$commit_sha" \
         -f state="$quality_state" \
@@ -991,7 +1035,15 @@ This PR is from branch \`$branch\` on the \`${FORK_OWNER}/${FORK_REPO_NAME_SHORT
 
 publish_translation_changes() {
 TRANSLATION_CHANGES_CREATED=false
-TRANSLATION_CHANGES=$(git status --porcelain | grep -E "$(translation_file_status_regex)" || true)
+target_root_prefix="${TARGET_PROJECT_ROOT%/}"
+REL_INPUT_FOLDER="${ABSOLUTE_INPUT_FOLDER#"$target_root_prefix"/}"
+if [ "$REL_INPUT_FOLDER" = "$ABSOLUTE_INPUT_FOLDER" ]; then
+    REL_INPUT_FOLDER="${INPUT_FOLDER:-$ABSOLUTE_INPUT_FOLDER}"
+fi
+
+# Collect only git-changed translation files (not the entire tree).
+mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")
+TRANSLATION_CHANGES=$(printf '%s\n' "${ALL_FILES[@]}")
 
 if [ -n "$TRANSLATION_CHANGES" ]; then
     TRANSLATION_CHANGES_CREATED=true
@@ -1025,16 +1077,12 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
         fi
         log "Fork identity: $FORK_OWNER/$FORK_REPO_NAME_SHORT"
 
-        REL_INPUT_FOLDER="${ABSOLUTE_INPUT_FOLDER#"$TARGET_PROJECT_ROOT/"}"
-
-        # Collect only git-changed translation files (not the entire tree).
-        mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")
         TOTAL_FILES=${#ALL_FILES[@]}
         log "Total translation files to commit: $TOTAL_FILES (split threshold: $MAX_FILES_PER_PR)"
-        record_pipeline_event "translation_files_detected" "count=$TOTAL_FILES input_folder=$REL_INPUT_FOLDER"
+        record_pipeline_event "translation_files_detected" "count=$TOTAL_FILES" "input_folder=$REL_INPUT_FOLDER"
 
         # Read the descriptive PR title from the Python-generated summary.
-        TRANSLATION_SUMMARY="/app/logs/translation_summary.json"
+        TRANSLATION_SUMMARY="$app_root/logs/translation_summary.json"
         BASE_PR_TITLE=""
         if [ -s "$TRANSLATION_SUMMARY" ] && command_exists jq; then
             BASE_PR_TITLE=$(jq -r '.title // empty' "$TRANSLATION_SUMMARY")
@@ -1052,6 +1100,7 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
             log "File count ($TOTAL_FILES) exceeds MAX_FILES_PER_PR ($MAX_FILES_PER_PR). Splitting into batches."
 
             BATCH_NUM=0
+            FAILED_BATCHES=0
             BATCH_FILES=()
             TIMESTAMP=$(date +%Y-%m-%d-%H%M%S)
             TOTAL_BATCHES=$(( (TOTAL_FILES + MAX_FILES_PER_PR - 1) / MAX_FILES_PER_PR ))
@@ -1065,6 +1114,7 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
                         "Automated translation update (batch $BATCH_NUM/$TOTAL_BATCHES)" \
                         "$BASE_PR_TITLE (batch $BATCH_NUM/$TOTAL_BATCHES)"; then
                         log "Batch $BATCH_NUM/$TOTAL_BATCHES failed; continuing with remaining batches." "WARNING"
+                        FAILED_BATCHES=$((FAILED_BATCHES + 1))
                     fi
                     BATCH_FILES=()
                 fi
@@ -1077,12 +1127,18 @@ if [ -n "$TRANSLATION_CHANGES" ]; then
                     "Automated translation update (batch $BATCH_NUM/$TOTAL_BATCHES)" \
                     "$BASE_PR_TITLE (batch $BATCH_NUM/$TOTAL_BATCHES)"; then
                     log "Batch $BATCH_NUM/$TOTAL_BATCHES failed." "WARNING"
+                    FAILED_BATCHES=$((FAILED_BATCHES + 1))
                 fi
+            fi
+
+            if [ "$FAILED_BATCHES" -gt 0 ]; then
+                log "$FAILED_BATCHES translation PR batch(es) failed." "ERROR"
+                exit 1
             fi
         fi
     fi
 else
-    log "No translation changes to commit"
+    log "No git-scoped translation file changes detected; nothing to commit"
 fi
 }
 
