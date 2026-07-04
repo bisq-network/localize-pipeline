@@ -228,6 +228,37 @@ def test_bootstrap_pr_restores_branch_after_generation_failure(monkeypatch, tmp_
     assert "localize/failing-onboarding" not in _git(repo, "branch", "--list", "localize/failing-onboarding")
 
 
+def test_bootstrap_pr_restores_tracked_files_after_late_failure(tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+    original_config = "dry_run: true\n"
+    (repo / "config.yaml").write_text(original_config, encoding="utf-8")
+    _git(repo, "add", "config.yaml")
+    _git(repo, "commit", "-m", "Add existing config")
+
+    with pytest.raises(RuntimeError, match="Command failed"):
+        create_bootstrap_pr(
+            BootstrapPrOptions(
+                target_project_root=repo,
+                branch_name="localize/late-failing-onboarding",
+                overwrite=True,
+                push=True,
+            )
+        )
+
+    assert _git(repo, "branch", "--show-current") == "main"
+    assert _git(repo, "status", "--porcelain") == ""
+    assert (repo / "config.yaml").read_text(encoding="utf-8") == original_config
+    assert not (repo / "glossary.json").exists()
+    assert not (repo / ".github/workflows/translate.yml").exists()
+    assert "localize/late-failing-onboarding" not in _git(
+        repo,
+        "branch",
+        "--list",
+        "localize/late-failing-onboarding",
+    )
+
+
 def test_bootstrap_pr_subprocess_errors_include_stderr(tmp_path):
     repo = tmp_path / "target"
     _init_repo(repo)

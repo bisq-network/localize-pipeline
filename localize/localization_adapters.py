@@ -15,6 +15,8 @@ from localize.localization_formats import (
 )
 from localize.properties_parser import (
     _has_unescaped_trailing_backslash,
+    _split_property_line,
+    _unescape_key,
     parse_properties_file,
     reassemble_file as reassemble_properties_file,
 )
@@ -58,15 +60,6 @@ def _lint_comment_syntax(line: str, line_number: int) -> Optional[str]:
     return None
 
 
-def _is_escaped_separator(line: str, index: int) -> bool:
-    count = 0
-    cursor = index - 1
-    while cursor >= 0 and line[cursor] == "\\":
-        count += 1
-        cursor -= 1
-    return count % 2 == 1
-
-
 def lint_properties_file(file_path: str) -> List[str]:
     """Lint a Java properties file for common syntax mistakes."""
     errors = []
@@ -91,17 +84,10 @@ def lint_properties_file(file_path: str) -> List[str]:
                     in_continuation = False
                     continue
 
-                if '=' in line or ':' in line:
-                    sep_idx = -1
-                    for j, ch in enumerate(line):
-                        if ch in ('=', ':') and not _is_escaped_separator(line, j):
-                            sep_idx = j
-                            break
-                    if sep_idx == -1:
-                        in_continuation = _has_unescaped_trailing_backslash(raw_line)
-                        continue
-                    key, value = line[:sep_idx], line[sep_idx + 1:]
-                    key = key.strip()
+                split_line = _split_property_line(raw_line)
+                if split_line is not None:
+                    raw_key, _separator_group, value = split_line
+                    key = _unescape_key(raw_key)
 
                     if '..' in key:
                         errors.append(f"Linter Error: Malformed key '{key}' with double dots found on line {i}.")

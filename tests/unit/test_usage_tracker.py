@@ -34,8 +34,11 @@ def test_cost_calculation():
 
 
 def test_default_prices_cover_configured_gpt5_models():
-    assert DEFAULT_PRICES["gpt-5.4-mini"] == {"input": 0.375, "output": 2.25}
-    assert DEFAULT_PRICES["gpt-5.4"]["input"] == 1.25
+    assert DEFAULT_PRICES["gpt-5.5"] == {"input": 5.00, "output": 30.00}
+    assert DEFAULT_PRICES["gpt-5.4"] == {"input": 2.50, "output": 15.00}
+    assert DEFAULT_PRICES["gpt-5.4-mini"] == {"input": 0.75, "output": 4.50}
+    assert DEFAULT_PRICES["gpt-5.4-nano"] == {"input": 0.20, "output": 1.25}
+    assert DEFAULT_PRICES["gpt-5.4-pro"] == {"input": 30.00, "output": 180.00}
 
 
 def test_multiple_models_aggregate():

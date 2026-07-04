@@ -220,6 +220,22 @@ class TestValidationLogic(unittest.TestCase):
 
         self.assertEqual(findings, [])
 
+    def test_linting_checks_whitespace_separated_entries(self):
+        content = r"key..bad C:\Users\Name" "\n"
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.properties', encoding='utf-8') as f:
+            f.write(content)
+            temp_path = f.name
+
+        try:
+            findings = lint_properties_file(temp_path)
+        finally:
+            os.remove(temp_path)
+
+        self.assertEqual(len(findings), 2)
+        self.assertTrue(any("Malformed key 'key..bad'" in finding for finding in findings))
+        self.assertTrue(any("Unknown escape sequence" in finding for finding in findings))
+
 
 if __name__ == '__main__':
     unittest.main()

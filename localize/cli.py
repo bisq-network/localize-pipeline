@@ -7,7 +7,6 @@ import asyncio
 import importlib
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -245,7 +244,7 @@ def _cmd_bootstrap_pr(args: argparse.Namespace) -> int:
                 open_pr=args.open_pr,
             )
         )
-    except (FileExistsError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (FileExistsError, OSError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"Created onboarding commit {result.commit_sha} on branch {result.branch_name}")

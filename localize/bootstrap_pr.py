@@ -150,12 +150,16 @@ def _detect_default_branch(repo: Path) -> str:
 def _cleanup_created_paths(repo: Path, relative_paths: Iterable[str]) -> None:
     for relative_path in relative_paths:
         path = repo / relative_path
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except IsADirectoryError:
-            pass
+        tracked = _git(repo, "ls-files", "--error-unmatch", "--", relative_path, check=False)
+        if tracked.returncode == 0:
+            _git(repo, "restore", "--staged", "--worktree", "--", relative_path)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except IsADirectoryError:
+                pass
 
         parent = path.parent
         while parent != repo and parent.exists():
@@ -164,6 +168,20 @@ def _cleanup_created_paths(repo: Path, relative_paths: Iterable[str]) -> None:
             except OSError:
                 break
             parent = parent.parent
+
+
+def _record_rollback_step(
+    failures: list[str],
+    description: str,
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout or "").strip()
+    if detail:
+        failures.append(f"{description} failed ({result.returncode}): {detail}")
+    else:
+        failures.append(f"{description} failed ({result.returncode})")
 
 
 def _assert_can_write(repo: Path, relative_paths: Iterable[str], *, overwrite: bool) -> None:
@@ -453,13 +471,30 @@ def create_bootstrap_pr(options: BootstrapPrOptions) -> BootstrapPrResult:
                 cwd=repo,
             )
             opened_pr = True
-    except Exception:
+    except Exception as exc:
+        rollback_failures: list[str] = []
         if not branch_preexisted:
-            _cleanup_created_paths(repo, created_files)
+            try:
+                _cleanup_created_paths(repo, created_files)
+            except Exception as rollback_exc:
+                rollback_failures.append(f"cleanup generated files failed: {rollback_exc}")
         if original_branch:
-            _git(repo, "checkout", original_branch, check=False)
+            checkout_result = _git(repo, "checkout", original_branch, check=False)
+            _record_rollback_step(
+                rollback_failures,
+                f"checkout {original_branch}",
+                checkout_result,
+            )
         if not branch_preexisted:
-            _git(repo, "branch", "-D", options.branch_name, check=False)
+            delete_result = _git(repo, "branch", "-D", options.branch_name, check=False)
+            _record_rollback_step(
+                rollback_failures,
+                f"delete branch {options.branch_name}",
+                delete_result,
+            )
+        if rollback_failures:
+            details = "\n".join(rollback_failures)
+            raise RuntimeError(f"{exc}\nRollback failed:\n{details}") from exc
         raise
 
     return BootstrapPrResult(

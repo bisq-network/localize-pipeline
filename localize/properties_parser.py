@@ -43,8 +43,21 @@ def _is_escaped(text: str, index: int) -> bool:
     return _backslash_count_before(text, index) % 2 == 1
 
 
+def _strip_unescaped_boundary_whitespace(raw_key: str) -> str:
+    start = 0
+    while start < len(raw_key) and raw_key[start].isspace() and not _is_escaped(raw_key, start):
+        start += 1
+
+    end = len(raw_key)
+    while end > start and raw_key[end - 1].isspace() and not _is_escaped(raw_key, end - 1):
+        end -= 1
+
+    return raw_key[start:end]
+
+
 def _unescape_key(raw_key: str) -> str:
-    return re.sub(r'\\([:=\s\\])', r'\1', raw_key.strip())
+    stripped_key = _strip_unescaped_boundary_whitespace(raw_key)
+    return re.sub(r'\\([:=\s\\])', r'\1', stripped_key)
 
 
 def _escape_key(key: str) -> str:
@@ -61,29 +74,44 @@ def _split_property_line(line: str) -> Tuple[str, str, str] | None:
     first_non_space = len(line) - len(line.lstrip())
 
     for index in range(first_non_space, len(line)):
-        if line[index] in (':', '=') and not _is_escaped(line, index):
-            start_sep_group = index
-            while start_sep_group > first_non_space and line[start_sep_group - 1].isspace():
-                start_sep_group -= 1
-
-            end_sep_group = index
-            while end_sep_group < len(line) - 1 and line[end_sep_group + 1].isspace():
+        char = line[index]
+        if char.isspace() and not _is_escaped(line, index):
+            end_sep_group = index + 1
+            while (
+                end_sep_group < len(line)
+                and line[end_sep_group].isspace()
+                and not _is_escaped(line, end_sep_group)
+            ):
                 end_sep_group += 1
+            if (
+                end_sep_group < len(line)
+                and line[end_sep_group] in (':', '=')
+                and not _is_escaped(line, end_sep_group)
+            ):
+                end_sep_group += 1
+                while (
+                    end_sep_group < len(line)
+                    and line[end_sep_group].isspace()
+                    and not _is_escaped(line, end_sep_group)
+                ):
+                    end_sep_group += 1
             return (
-                line[:start_sep_group],
-                line[start_sep_group:end_sep_group + 1],
-                line[end_sep_group + 1:],
+                line[:index],
+                line[index:end_sep_group],
+                line[end_sep_group:],
             )
-
-    for index in range(first_non_space, len(line)):
-        if line[index].isspace() and not _is_escaped(line, index):
-            end_sep_group = index
-            while end_sep_group < len(line) - 1 and line[end_sep_group + 1].isspace():
+        if char in (':', '=') and not _is_escaped(line, index):
+            end_sep_group = index + 1
+            while (
+                end_sep_group < len(line)
+                and line[end_sep_group].isspace()
+                and not _is_escaped(line, end_sep_group)
+            ):
                 end_sep_group += 1
             return (
                 line[:index],
-                line[index:end_sep_group + 1],
-                line[end_sep_group + 1:],
+                line[index:end_sep_group],
+                line[end_sep_group:],
             )
 
     return None
