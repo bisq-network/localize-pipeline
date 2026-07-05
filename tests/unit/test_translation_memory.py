@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 os.environ.setdefault("OPENAI_API_KEY", "DUMMY_KEY_FOR_TESTING")
 
 from localize.translation_memory import (
@@ -116,7 +118,7 @@ def test_save_translation_memory_is_best_effort(monkeypatch, tmp_path):
     save_translation_memory(tmp_path / "translation_memory.json", memory)
 
 
-def test_save_translation_memory_catches_non_os_errors(monkeypatch, tmp_path):
+def test_save_translation_memory_reraises_non_os_errors(monkeypatch, tmp_path):
     memory = TranslationMemory()
     memory.record("Save", "Speichern", locale="de", format_id="json")
 
@@ -125,7 +127,8 @@ def test_save_translation_memory_catches_non_os_errors(monkeypatch, tmp_path):
 
     monkeypatch.setattr("localize.translation_memory.write_translation_memory", fail_write)
 
-    save_translation_memory(tmp_path / "translation_memory.json", memory)
+    with pytest.raises(RuntimeError, match="json encoder failed"):
+        save_translation_memory(tmp_path / "translation_memory.json", memory)
 
 
 def test_translation_memory_stats_counts_active_conflict_locale_and_format():

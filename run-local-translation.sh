@@ -10,21 +10,34 @@ set -euo pipefail
 # If no config file path is provided, it defaults to 'config.yaml'.
 
 # --- Configuration & Path Setup ---
-# The script determines the project root and changes into it.
+CALLER_CWD=$(pwd)
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+
+resolve_to_absolute() {
+    local path="$1"
+    if [[ "$path" != /* ]]; then
+        path="$CALLER_CWD/$path"
+    fi
+    printf '%s\n' "$path"
+}
+
+# Use the first argument as the config file path, a pre-set environment value,
+# or default to 'config.yaml'. Resolve relative arguments before changing dirs.
+if [ -n "${1:-}" ]; then
+    CONFIG_FILE_PATH=$(resolve_to_absolute "$1")
+elif [ -n "${TRANSLATOR_CONFIG_FILE:-}" ]; then
+    CONFIG_FILE_PATH=$(resolve_to_absolute "$TRANSLATOR_CONFIG_FILE")
+else
+    CONFIG_FILE_PATH="$PROJECT_ROOT/config.yaml"
+fi
+export TRANSLATOR_CONFIG_FILE="$CONFIG_FILE_PATH"
+
+# The script determines the project root and changes into it.
 cd "$PROJECT_ROOT"
 
 VENV_DIR="$PROJECT_ROOT/venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 PIP_SYNC_BIN="$VENV_DIR/bin/pip-sync"
-
-# Use the first argument as the config file path, or default to 'config.yaml'.
-CONFIG_FILE_PATH="${1:-config.yaml}"
-
-# Make the config file path available; respect pre-set env.
-export TRANSLATOR_CONFIG_FILE="${TRANSLATOR_CONFIG_FILE:-$CONFIG_FILE_PATH}"
-# Use a single source of truth for reads below.
-CONFIG_FILE_PATH="${TRANSLATOR_CONFIG_FILE}"
 
 echo "[info] Using configuration file: $CONFIG_FILE_PATH"
 
@@ -54,18 +67,18 @@ fi
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "[error] Python virtual environment not found at '$VENV_DIR'."
-    echo "[info] Please run the setup script first: ./setup.sh"
+    echo "[info] Create it with: python3.11 -m venv venv && venv/bin/pip install -r requirements-dev.txt"
     exit 1
 fi
 
 # Ensure Python dependencies are in sync
 echo "[info] Verifying Python dependencies..."
 if [ ! -x "$PIP_SYNC_BIN" ]; then
-    echo "[error] pip-sync not found at '$PIP_SYNC_BIN'. Please run './setup.sh' first."
+    echo "[error] pip-sync not found at '$PIP_SYNC_BIN'. Install development dependencies from requirements-dev.txt."
     exit 1
 fi
 if ! "$PIP_SYNC_BIN" requirements-dev.txt --quiet; then
-    echo "[error] Dependency sync failed. Please run './setup.sh' again."
+    echo "[error] Dependency sync failed. Refresh the virtual environment from requirements-dev.txt."
     exit 1
 fi
 
@@ -87,4 +100,3 @@ fi
 # --- Script Execution ---
 echo "[info] Starting translation process..."
 exec "$VENV_PYTHON" -m localize.cli run --config "$CONFIG_FILE_PATH"
-

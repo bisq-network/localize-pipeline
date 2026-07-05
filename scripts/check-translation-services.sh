@@ -23,12 +23,15 @@ fi
 GITHUB_TOKEN=""
 for env_file in "$INSTALL_ROOT/docker/.env" "$MOBILE_INSTALL_ROOT/docker/.env"; do
     if [ -z "$GITHUB_TOKEN" ] && [ -f "$env_file" ]; then
-        GITHUB_TOKEN=$(sed -n 's/^GITHUB_TOKEN=//p' "$env_file" 2>/dev/null | tail -n1 || true)
+        GITHUB_TOKEN=$(sed -n 's/^GITHUB_TOKEN=//p' "$env_file" 2>/dev/null | tail -n1 | tr -d '\r"' | tr -d "'" || true)
     fi
 done
 
 log_alert() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] ALERT: $1" | tee -a "$ALERT_FILE"
+    local line
+    line="[$(date +'%Y-%m-%d %H:%M:%S')] ALERT: $1"
+    printf '%s\n' "$line" >&2
+    printf '%s\n' "$line" >> "$ALERT_FILE" 2>/dev/null || true
 }
 
 log_ok() {
@@ -89,7 +92,13 @@ cron_log_files() {
     log_dir=$(dirname "$log_file")
     log_name=$(basename "$log_file")
 
-    find "$log_dir" -maxdepth 1 -type f -name "${log_name}-*" 2>/dev/null | sort
+    if [ -d "$log_dir" ]; then
+        find "$log_dir" -maxdepth 1 -type f -name "${log_name}-*" -printf '%T@ %p\0' 2>/dev/null \
+          | sort -z -n \
+          | while IFS= read -r -d '' entry; do
+                printf '%s\n' "${entry#* }"
+            done
+    fi
     if [ -f "$log_file" ]; then
         printf '%s\n' "$log_file"
     fi
@@ -143,7 +152,11 @@ check_cron_log() {
     if [ -n "$status_segment" ]; then
         local status_ts status_epoch now_epoch status_age_sec
         status_ts=$(sed -n 's/^\[\([^]]*\)\].*/\1/p' <<<"$status_segment")
-        status_epoch=$(date -d "$status_ts" +%s 2>/dev/null || echo 0)
+        if ! status_epoch=$(date -d "$status_ts" +%s 2>/dev/null); then
+            log_alert "$label cron job could not parse timestamp '$status_ts' - check $log_file"
+            rm -f "$combined_log"
+            return
+        fi
         now_epoch=$(date +%s)
         status_age_sec=$((now_epoch - status_epoch))
 
@@ -175,7 +188,11 @@ check_cron_log() {
 
     local now_epoch start_epoch age_sec
     now_epoch=$(date +%s)
-    start_epoch=$(date -d "$start_ts" +%s 2>/dev/null || echo 0)
+    if ! start_epoch=$(date -d "$start_ts" +%s 2>/dev/null); then
+        log_alert "$label cron job could not parse timestamp '$start_ts' - check $log_file"
+        rm -f "$combined_log"
+        return
+    fi
     age_sec=$((now_epoch - start_epoch))
 
     if [ "$start_epoch" -gt 0 ] && [ "$age_sec" -lt "$MAX_RUNNING_AGE_SECONDS" ]; then
@@ -217,8 +234,12 @@ check_cron_log "Main service" "$main_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"
 check_cron_log "Mobile app service" "$mobile_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"
 
 # Check 4: Disk space for Docker volumes
-disk_usage=$(df -h /var/lib/docker | tail -1 | awk '{print $5}' | sed 's/%//' )
-if [ "$disk_usage" -gt 85 ]; then
+if [ -d "/var/lib/docker" ]; then
+    disk_usage=$(df -P /var/lib/docker | awk 'NR == 2 {gsub(/%/, "", $5); print $5}')
+else
+    disk_usage=$(df -P / | awk 'NR == 2 {gsub(/%/, "", $5); print $5}')
+fi
+if [ "${disk_usage:-0}" -gt 85 ]; then
     log_alert "Docker volume disk usage high: ${disk_usage}%"
 else
     log_ok "Docker volume disk usage: ${disk_usage}%"

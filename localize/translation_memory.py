@@ -345,9 +345,15 @@ def save_translation_memory(path: str | Path, memory: TranslationMemory) -> None
     temp_path = memory_path.with_suffix(f"{memory_path.suffix}.tmp")
     try:
         write_translation_memory(memory_path, memory)
-    except Exception as exc:
+    except OSError as exc:
         logger.warning("Could not save translation memory to '%s': %s", memory_path, exc)
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise

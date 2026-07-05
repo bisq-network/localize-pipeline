@@ -174,3 +174,36 @@ def test_generated_pr_uses_summary_body_and_uploads_artifacts(action):
     assert "token_usage_summary.json" in paths
     assert "skipped_files_report.log" in paths
     assert upload["with"]["if-no-files-found"] == "ignore"
+
+
+def test_open_pr_fetches_force_with_lease_baseline(action):
+    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    run = pr_step["run"]
+
+    baseline_index = run.index('expected_remote_sha="$(git ls-remote --heads origin "$branch"')
+    fetch_index = run.index('git fetch origin "+$remote_ref:refs/remotes/origin/$branch" || true')
+    push_index = run.index('git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"')
+    assert baseline_index < fetch_index < push_index
+    assert 'git push --force-with-lease origin "$branch"' not in run
+
+
+def test_open_pr_checks_token_permissions_before_push(action):
+    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    run = pr_step["run"]
+
+    preflight_index = run.index('gh api "repos/${GITHUB_REPOSITORY}" --jq')
+    push_index = run.index('git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"')
+    assert preflight_index < push_index
+    assert "contents:write permission" in run
+    assert "pull-requests:write permissions to push" not in run
+
+
+def test_action_uses_neutral_openai_key_env(action):
+    rendered = ACTION.read_text(encoding="utf-8")
+    for step in action["runs"]["steps"]:
+        env = step.get("env", {})
+        if step["name"] in {"Check localization setup", "Translate changed strings"}:
+            assert "OPENAI_API_KEY" not in env
+            assert env["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
+            assert 'export OPENAI_API_KEY="$LOCALIZE_OPENAI_API_KEY_INPUT"' in step["run"]
+    assert "LOCALIZE_OPENAI_API_KEY_INPUT" in rendered

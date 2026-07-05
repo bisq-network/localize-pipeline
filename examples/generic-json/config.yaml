@@ -1,6 +1,6 @@
 # Generic JSON example profile.
 
-target_project_root: "examples/generic-json"
+target_project_root: "."
 input_folder: "resources"
 localization_format: "json"
 localization_layout:

@@ -1,8 +1,10 @@
 import os
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 import tempfile
 import textwrap
+
+from openai import OpenAIError
 
 # Set a dummy API key before importing the main script.
 # This prevents the OpenAI client from failing in a test environment
@@ -24,6 +26,8 @@ from localize.translate_localization_files import (
     run_per_key_validation_with_summary,
     run_pre_translation_validation,
     validate_paths,
+    write_skipped_files_report,
+    _handle_retry,
 )
 from localize.ignore_keys import compile_ignore_key_patterns
 from localize.properties_parser import parse_properties_file, reassemble_file
@@ -277,6 +281,44 @@ class TestCoreLogic(unittest.TestCase):
         self.assertEqual(normalize_value("  hello   world  "), "hello world")
         self.assertEqual(normalize_value("hello\\nworld"), "hello<newline>world")
         self.assertEqual(normalize_value(None), "")
+
+    def test_write_skipped_files_report_escapes_markdown_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = os.path.join(temp_dir, "skipped.md")
+            write_skipped_files_report(
+                report_path,
+                {
+                    "bad`file<script>.properties": [
+                        "placeholder <script>alert(1)</script> `code`"
+                    ]
+                },
+            )
+
+            with open(report_path, "r", encoding="utf-8") as report_file:
+                content = report_file.read()
+
+        self.assertIn("bad\\`file&lt;script&gt;.properties", content)
+        self.assertIn("placeholder &lt;script&gt;alert(1)&lt;/script&gt; \\`code\\`", content)
+        self.assertNotIn("<script>", content)
+
+
+class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
+
+    async def test_handle_retry_accepts_float_retry_after_seconds(self):
+        exc = OpenAIError("rate limited")
+        exc.headers = {"Retry-After": "1.5"}
+
+        with patch("localize.translate_localization_files.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            should_retry = await _handle_retry(
+                attempt=1,
+                max_retries=2,
+                base_delay=1,
+                key="key.one",
+                api_exc=exc,
+            )
+
+        self.assertTrue(should_retry)
+        sleep.assert_awaited_once_with(1.5)
 
     def test_extract_texts_to_translate_logic(self):
         """Tests the logic of `extract_texts_to_translate`."""
@@ -929,6 +971,20 @@ class TestFileDetectionLogic(unittest.TestCase):
         changed_basenames = [os.path.basename(f) for f in changed_files]
         self.assertNotIn("mobile_de.properties", changed_basenames)
         self.assertIn("mobile_es.properties", changed_basenames)
+
+    @patch('subprocess.run')
+    def test_get_changed_files_diff_base_accepts_typechanges(self, mock_subprocess_run):
+        """Typechange entries should be processed like modified locale files."""
+        from localize.translate_localization_files import get_changed_translation_files
+
+        diff_output = "T\ti18n/resources/mobile_de.properties\n"
+        mock_subprocess_run.return_value = MagicMock(stdout=diff_output, stderr="", check_returncode=MagicMock())
+
+        with patch.dict('os.environ', {'TRANSLATION_DIFF_BASE': 'origin/main'}):
+            changed_files = get_changed_translation_files("/fake/repo/i18n/resources", "/fake/repo")
+
+        changed_basenames = [os.path.basename(f) for f in changed_files]
+        self.assertIn("mobile_de.properties", changed_basenames)
 
     @patch('subprocess.run')
     def test_get_changed_files_detects_hyphenated_locales(self, mock_subprocess_run):

@@ -18,6 +18,7 @@ from typing import Awaitable, Callable, Dict, List, Tuple
 RUN_METRIC_KEYS = (
     "candidate_keys_count",
     "model_translation_keys_count",
+    "model_translation_failed_count",
     "translation_memory_reused_count",
     "source_identical_skipped_count",
     "changed_values_count",
@@ -140,6 +141,16 @@ async def run_translation_pipeline(
 
     logger.info("Detected %d translation file(s) to process.", len(changed_files))
 
+    if not options.preserve_queues_for_debug:
+        steps.cleanup_queue_folders(paths.translation_queue_folder, paths.translated_queue_folder)
+        steps.validate_paths(
+            paths.input_folder,
+            paths.translation_queue_folder,
+            paths.translated_queue_folder,
+            paths.repo_root,
+        )
+        logger.info("Cleared stale translation queue folders before enqueueing files.")
+
     steps.archive_original_files(changed_files, paths.input_folder, paths.archive_folder_path)
     logger.info("Successfully archived original files to '%s'.", paths.archive_folder_path)
 
@@ -185,7 +196,9 @@ async def run_translation_pipeline(
 
     summary_kwargs = {
         "processed_files": processed_filenames,
-        "new_keys_count": total_keys_translated,
+        "new_keys_count": 0
+        if supports_keyword_argument(steps.generate_translation_summary, "run_metrics")
+        else total_keys_translated,
         "updated_keys_count": 0,
     }
     if supports_keyword_argument(steps.generate_translation_summary, "run_metrics"):

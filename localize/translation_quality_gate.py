@@ -71,14 +71,8 @@ class SourceIdenticalStats:
     unexpected_source_identical_count: int = 0
     unexpected_source_identical_ratio: float = 0.0
     control_character_findings_count: int = 0
-    examples: List[Dict[str, str]] = None
-    control_character_examples: List[Dict[str, str]] = None
-
-    def __post_init__(self) -> None:
-        if self.examples is None:
-            self.examples = []
-        if self.control_character_examples is None:
-            self.control_character_examples = []
+    examples: List[Dict[str, str]] = field(default_factory=list)
+    control_character_examples: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -106,13 +100,6 @@ def is_expected_source_identical(key: str, value: str, brand_glossary: Iterable[
     if not any(character.isalpha() for character in normalized):
         return True
     return any(pattern.match(normalized) for pattern in _TOKEN_PATTERNS)
-
-
-def _relpath(path: str, start: str) -> str:
-    try:
-        return os.path.relpath(path, start)
-    except ValueError:
-        return path
 
 
 def analyze_source_identical_changes(
@@ -216,9 +203,9 @@ def _analyze_source_identical_translation_changes(
 
 def _deduplicate_translation_changes(changes: Iterable[TranslationChange]) -> List[TranslationChange]:
     unique_changes: List[TranslationChange] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
     for change in changes:
-        identity = (change.file, change.locale_code, change.key)
+        identity = (change.file, change.key)
         if identity in seen:
             continue
         seen.add(identity)
@@ -389,10 +376,13 @@ def load_quality_gate_config(
 
     quality_gate = raw_config.get("quality_gate", {}) or {}
     locales = [
-        locale["code"]
+        str(locale.get("code") if isinstance(locale, dict) else locale)
         for locale in raw_config.get("supported_locales", [])
-        if isinstance(locale, dict) and locale.get("code")
+        if (isinstance(locale, dict) and locale.get("code")) or isinstance(locale, str)
     ]
+    semantic_qa_audit_scope = str(quality_gate.get("semantic_qa_audit_scope", "changed"))
+    if semantic_qa_audit_scope not in {"changed", "all"}:
+        raise ValueError("quality_gate.semantic_qa_audit_scope must be 'changed' or 'all'.")
     brand_glossary = [str(term) for term in raw_config.get("brand_technical_glossary", [])]
     return (
         QualityGateConfig(
@@ -408,9 +398,7 @@ def load_quality_gate_config(
             block_on_semantic_qa_warnings=bool(
                 quality_gate.get("block_on_semantic_qa_warnings", False)
             ),
-            semantic_qa_audit_scope=str(
-                quality_gate.get("semantic_qa_audit_scope", "changed")
-            ),
+            semantic_qa_audit_scope=semantic_qa_audit_scope,
             retained_source_word_allowlist=normalize_retained_source_word_allowlist(
                 quality_gate.get("retained_source_word_allowlist", {})
             ),
@@ -465,12 +453,11 @@ def _changed_files_relative_to_input(changed_files: Sequence[str], input_folder:
     for changed_file in changed_files:
         changed_path = Path(changed_file)
         result.add(changed_path.as_posix())
-        result.add(changed_path.name)
         if changed_path.is_absolute():
             try:
                 result.add(changed_path.relative_to(input_path).as_posix())
             except ValueError:
-                result.add(changed_path.name)
+                result.add(changed_path.as_posix())
         else:
             input_folder_name = input_path.name
             parts = changed_path.parts
@@ -482,7 +469,7 @@ def _changed_files_relative_to_input(changed_files: Sequence[str], input_folder:
 
 def _file_matches_changed_files(filename: str, changed_relative_files: set[str]) -> bool:
     path = Path(filename)
-    return path.as_posix() in changed_relative_files or path.name in changed_relative_files
+    return path.as_posix() in changed_relative_files
 
 
 def _aggregate_validation(
@@ -642,6 +629,11 @@ def build_quality_gate_report(
 
     if config.block_on_pipeline_warnings and pipeline_warnings:
         blocking_reasons.append("Translation pipeline warnings require manual resolution.")
+
+    if source_stats.control_character_findings_count or validation_totals["control_character_findings_count"]:
+        blocking_reasons.append("Control-character artifacts require manual resolution.")
+    if validation_totals["placeholder_failures_count"]:
+        blocking_reasons.append("Placeholder parity failures require manual resolution.")
 
     if config.block_on_semantic_qa_findings and semantic_stats.errors_count:
         blocking_reasons.append("Semantic translation QA findings require manual resolution.")
@@ -833,7 +825,20 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
 
 def get_staged_diff(repo_root: str, changed_files: Sequence[str]) -> str:
     result = subprocess.run(
-        ["git", "diff", "--cached", "--unified=0", "--", *changed_files],
+        [
+            "git",
+            "-c",
+            "diff.noprefix=false",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--cached",
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--",
+            *changed_files,
+        ],
         cwd=repo_root,
         text=True,
         stdout=subprocess.PIPE,
@@ -849,6 +854,7 @@ def write_report(report: Dict[str, Any], output_json: str, output_markdown: str)
     Path(output_json).parent.mkdir(parents=True, exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as file:
         json.dump(report, file, ensure_ascii=False, indent=2)
+    Path(output_markdown).parent.mkdir(parents=True, exist_ok=True)
     with open(output_markdown, "w", encoding="utf-8") as file:
         file.write(render_quality_gate_markdown(report))
 

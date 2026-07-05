@@ -43,6 +43,135 @@ fi
 
 # --- Unified Helper Functions ---
 
+run_as_appuser() {
+    local user_home="$1"
+    shift
+
+    if [ "$(id -u)" -eq 0 ] && id -u appuser >/dev/null 2>&1; then
+        HOME="$user_home" gosu appuser "$@"
+    else
+        HOME="$user_home" "$@"
+    fi
+}
+
+ensure_github_identity_config() {
+    local user_home="$1"
+    local config_file="${user_home}/.ssh/config"
+    local marker="# localize-pipeline runtime deploy key"
+
+    touch "$config_file"
+    if grep -Fq "$marker" "$config_file"; then
+        return 0
+    fi
+
+    {
+        if [ -s "$config_file" ]; then
+            printf '\n'
+        fi
+        printf '%s\n' "$marker"
+        printf 'Host github.com\n'
+        printf '\tIdentityFile %s/.ssh/deploy_key\n' "$user_home"
+        printf '\tIdentitiesOnly yes\n'
+        printf '\tBatchMode yes\n'
+    } >> "$config_file"
+}
+
+ensure_insecure_ssh_config() {
+    local user_home="$1"
+    local config_file="${user_home}/.ssh/config"
+    local marker="# localize-pipeline insecure ssh override"
+
+    touch "$config_file"
+    if grep -Fq "$marker" "$config_file"; then
+        return 0
+    fi
+
+    {
+        if [ -s "$config_file" ]; then
+            printf '\n'
+        fi
+        printf '%s\n' "$marker"
+        printf 'Host github.com\n'
+        printf '\tStrictHostKeyChecking no\n'
+        printf '\tUserKnownHostsFile=/dev/null\n'
+    } >> "$config_file"
+}
+
+install_runtime_deploy_key() {
+    local user_home="${APPUSER_HOME:-/home/appuser}"
+    local runtime_deploy_key_path="${DEPLOY_KEY_PATH:-/run/secrets/deploy_key}"
+
+    if [ "${SKIP_DEPLOY_KEY:-false}" = "true" ]; then
+        log "Skipping runtime deploy key setup because SKIP_DEPLOY_KEY=true."
+        return 0
+    fi
+
+    mkdir -p "$user_home/.ssh"
+    if [ ! -s "$runtime_deploy_key_path" ]; then
+        log "Runtime deploy key not found at $runtime_deploy_key_path; SSH clone/push may fail." "WARNING"
+        return 0
+    fi
+
+    cp "$runtime_deploy_key_path" "$user_home/.ssh/deploy_key"
+    chmod 600 "$user_home/.ssh/deploy_key"
+    ensure_github_identity_config "$user_home"
+
+    if [ "$(id -u)" -eq 0 ]; then
+        chown -R "${APPUSER_UID}:${APPUSER_GID}" "$user_home/.ssh" \
+          || log "Warning: unable to chown ${user_home}/.ssh" "WARNING"
+    fi
+    log "Runtime deploy key installed for appuser."
+}
+
+import_runtime_gpg_key() {
+    local user_home="${APPUSER_HOME:-/home/appuser}"
+    local runtime_gpg_key_path="${GPG_BOT_KEY_PATH:-/run/secrets/gpg_bot_key}"
+    local gpg_import_file="$runtime_gpg_key_path"
+    local cleanup_gpg_import_file=""
+    local fingerprint
+
+    if [ "${SKIP_GPG_IMPORT:-false}" = "true" ]; then
+        log "Skipping runtime GPG import because SKIP_GPG_IMPORT=true."
+        return 0
+    fi
+
+    if [ ! -s "$runtime_gpg_key_path" ]; then
+        log "Runtime GPG key not found at $runtime_gpg_key_path; commit signing will be disabled." "WARNING"
+        return 0
+    fi
+
+    mkdir -p "$user_home/.gnupg"
+    chmod 700 "$user_home/.gnupg"
+
+    if [ "$(id -u)" -eq 0 ] && id -u appuser >/dev/null 2>&1; then
+        gpg_import_file="$user_home/.gnupg/runtime_gpg_import.asc"
+        cp "$runtime_gpg_key_path" "$gpg_import_file"
+        chown "${APPUSER_UID}:${APPUSER_GID}" "$gpg_import_file" "$user_home/.gnupg"
+        chmod 600 "$gpg_import_file"
+        cleanup_gpg_import_file="$gpg_import_file"
+    fi
+
+    fingerprint="$(run_as_appuser "$user_home" gpg --import-options show-only --with-colons "$gpg_import_file" \
+        | awk -F: '/^fpr/ {print $10; exit}')"
+    if [ -z "$fingerprint" ]; then
+        rm -f "$cleanup_gpg_import_file"
+        log "Runtime GPG key source did not expose a secret-key fingerprint." "ERROR"
+        return 1
+    fi
+
+    if ! run_as_appuser "$user_home" gpg --batch --import "$gpg_import_file"; then
+        rm -f "$cleanup_gpg_import_file"
+        log "Failed to import runtime GPG key from $runtime_gpg_key_path." "ERROR"
+        return 1
+    fi
+
+    rm -f "$cleanup_gpg_import_file"
+
+    printf '%s:6:\n' "$fingerprint" \
+        | run_as_appuser "$user_home" gpg --batch --import-ownertrust
+    log "Runtime GPG key imported and trusted for fingerprint: $fingerprint"
+}
+
 # Set up SSH host keys for secure git operations.
 setup_ssh() {
     local user_home="${APPUSER_HOME:-/home/appuser}"
@@ -51,7 +180,7 @@ setup_ssh() {
 
     if [ "${ALLOW_INSECURE_SSH:-false}" = "true" ]; then
         log "WARNING: ALLOW_INSECURE_SSH is true. Host key verification is disabled." "WARNING"
-        echo -e "Host github.com\n\tBatchMode yes\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null" > "${user_home}/.ssh/config"
+        ensure_insecure_ssh_config "$user_home"
     else
         KNOWN_HOSTS_PATH="${PINNED_KNOWN_HOSTS_PATH:-/etc/ssh/ssh_known_hosts}"
         if [ ! -r "$KNOWN_HOSTS_PATH" ] || ! grep -q "github.com" "$KNOWN_HOSTS_PATH"; then
@@ -143,16 +272,18 @@ for bin in git ssh gosu; do
   fi
 done
 
+TARGET_REPO_DIR="${TARGET_REPO_DIR:-/target_repo}"
+
 if [ "$(id -u)" -ne 0 ]; then
     # --- appuser Execution Block ---
     log "Starting entrypoint script as user: $(whoami)"
 
     # Ensure logs and SSH are configured correctly before proceeding.
     ensure_logs_dir
+    install_runtime_deploy_key
+    import_runtime_gpg_key
     setup_ssh
     export GIT_TERMINAL_PROMPT=0
-
-    TARGET_REPO_DIR="${TARGET_REPO_DIR:-/target_repo}"
 
     # --- Git Configuration ---
     log "Configuring git user..."
@@ -261,7 +392,9 @@ if [ "$(id -u)" -ne 0 ]; then
       fi
 
       # Check for untracked files that might interfere
-      if git ls-files --others --exclude-standard | head -1 | grep -q .; then
+      local local_untracked_probe
+      local_untracked_probe=$(git ls-files --others --exclude-standard 2>/dev/null | awk 'NR == 1 {print; exit}' || true)
+      if [ -n "$local_untracked_probe" ]; then
         log "Repository health check: Untracked files found"
       else
         log "Repository health check: No untracked files"
@@ -342,8 +475,12 @@ if [ "$(id -u)" -ne 0 ]; then
           fi
 
           # Force reset to clean state
-          git reset --hard HEAD 2>/dev/null || true
-          git clean -fd 2>/dev/null || true
+          if ! git reset --hard HEAD; then
+            log "Warning: git reset --hard failed during repository cleanup." "WARNING"
+          fi
+          if ! git clean -fd; then
+            log "Warning: git clean failed during repository cleanup." "WARNING"
+          fi
         fi
       fi
 
@@ -404,37 +541,42 @@ else
     ensure_configured_runtime_dirs
 
     # Fix permissions on the target repository if it's a mounted volume
-    if [ -d "/target_repo" ]; then
+    if [ -d "$TARGET_REPO_DIR" ]; then
         # Only fix entries with mismatched ownership; don't follow symlinks.
         if [ "${CHOWN_TARGET_REPO_RECURSIVE:-false}" = "true" ]; then
-          chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo
+          chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR" \
+            || log "Warning: unable to recursively chown ${TARGET_REPO_DIR}; continuing" "WARNING"
         else
-          find /target_repo -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} +
+          find "$TARGET_REPO_DIR" -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} + \
+            || log "Warning: unable to chown entries in ${TARGET_REPO_DIR}; continuing" "WARNING"
+          if [ -d "$TARGET_REPO_DIR/.git" ]; then
+            chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR/.git" \
+              || log "Warning: unable to chown ${TARGET_REPO_DIR}/.git; continuing" "WARNING"
+          fi
         fi
     fi
 
-    # Fix ownership of the .env file if it exists; do not follow symlinks and don't fail hard.
-    if [ -e "/app/docker/.env" ]; then
-        if [ -L "/app/docker/.env" ]; then
-            log "Refusing to chown symlink /app/docker/.env; not following." "WARNING"
-        else
-            chown -h "${APPUSER_UID}:${APPUSER_GID}" "/app/docker/.env" \
-              || log "Warning: unable to chown /app/docker/.env; continuing" "WARNING"
-            chmod 640 "/app/docker/.env" \
-              || log "Warning: unable to chmod /app/docker/.env; continuing" "WARNING"
-        fi
-    fi
-
-    # When running as root (ALLOW_RUN_AS_ROOT=true), silence Git ownership warnings for /target_repo.
+    # When running as root (ALLOW_RUN_AS_ROOT=true), silence Git ownership warnings.
     if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
-      git config --global --add safe.directory /target_repo || true
+      git config --global --add safe.directory "$TARGET_REPO_DIR" || true
     fi
 
     # Set up SSH. This is done as root to ensure correct ownership of created files.
+    install_runtime_deploy_key
+    import_runtime_gpg_key
     setup_ssh
 
-    # Attempt to switch to the appuser.
-    # If this fails (e.g., on Docker for Mac), check the ALLOW_RUN_AS_ROOT flag.
+    if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
+      log "Root execution was requested with ALLOW_RUN_AS_ROOT=true." "WARNING"
+      export HOME=/home/appuser
+      export USER=root
+      if [ "$#" -eq 0 ]; then
+        log "Error: no command provided to exec. Set CMD in Dockerfile or command in docker-compose.yml." "ERROR" >&2
+        exit 1
+      fi
+      exec "$@"
+    fi
+
     log "Permissions fixed. Re-executing as appuser..."
 
     # Set HOME and USER explicitly for gosu to ensure a clean environment for git and other tools.
@@ -443,18 +585,5 @@ else
 
     # Use gosu to drop privileges and re-execute this same script as the appuser.
     # The script will then enter the `if [ "$(id -u)" -ne 0 ]` block.
-    if ! exec gosu appuser "$0" "$@"; then
-        log "Warning: gosu failed to switch to appuser." "WARNING"
-        if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
-            log "ALLOW_RUN_AS_ROOT=true; continuing as root." "WARNING"
-            if [ "$#" -eq 0 ]; then
-              log "Error: no command provided to exec. Set CMD in Dockerfile or command in docker-compose.yml." "ERROR" >&2
-              exit 1
-            fi
-            exec "$@"
-        else
-            log "Refusing to continue as root. Set ALLOW_RUN_AS_ROOT=true to override." "ERROR"
-            exit 1
-        fi
-    fi
+    exec gosu appuser "$0" "$@"
 fi

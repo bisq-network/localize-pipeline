@@ -165,6 +165,36 @@ def test_cli_check_alias_runs_preflight_validation(tmp_path, capsys):
     assert "Preflight OK" in captured.out
 
 
+def test_cli_validate_loads_project_dotenv_before_checking_key(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "target_project_root": str(repo),
+            "input_folder": str(i18n),
+            "dry_run": False,
+            "model_provider": "openai_compatible",
+            "supported_locales": [{"code": "de", "name": "German"}],
+        }),
+        encoding="utf-8",
+    )
+
+    with patch("localize.cli._load_dotenv_files") as load_dotenv_files:
+        load_dotenv_files.side_effect = lambda _project_root: os.environ.__setitem__(
+            "OPENAI_API_KEY",
+            "sk-from-dotenv",
+        )
+        exit_code = cli.main(["validate", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Configuration OK" in captured.out
+    load_dotenv_files.assert_called()
+
+
 def test_cli_doctor_prints_redacted_effective_config(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value")
     repo = tmp_path / "repo"

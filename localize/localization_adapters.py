@@ -96,6 +96,9 @@ def lint_properties_file(file_path: str) -> List[str]:
                     trailing_backslashes = re.search(r'(\\+)$', value_to_check)
                     if trailing_backslashes and (len(trailing_backslashes.group(1)) % 2 == 1):
                         value_to_check = value_to_check[:-1]
+                        in_continuation = True
+                    else:
+                        in_continuation = False
 
                     if re.search(r'\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])', value_to_check):
                         errors.append(
@@ -110,8 +113,6 @@ def lint_properties_file(file_path: str) -> List[str]:
                             f"Linter Error: Disallowed control character artifact in value for key "
                             f"'{key}' on line {i}: {preview}{suffix}."
                         )
-
-                in_continuation = _has_unescaped_trailing_backslash(raw_line)
 
     except (IOError, OSError, UnicodeDecodeError) as e:
         errors.append(f"Linter Error: Could not read or process file {file_path}. Reason: {e}")
