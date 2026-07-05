@@ -7,7 +7,6 @@ import asyncio
 import importlib
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -312,7 +311,7 @@ def _cmd_bootstrap_pr(args: argparse.Namespace) -> int:
                 open_pr=args.open_pr,
             )
         )
-    except (FileExistsError, OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (FileExistsError, OSError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"Created onboarding commit {result.commit_sha} on branch {result.branch_name}")
@@ -573,7 +572,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_parser.add_argument("--branch", default="localize/onboarding", help="Onboarding branch name.")
     bootstrap_parser.add_argument("--base-branch", default=None, help="Optional base branch to check out first.")
-    bootstrap_parser.add_argument("--action-ref", default="v0.1.3", help="Action ref to use in the generated workflow.")
+    bootstrap_parser.add_argument("--action-ref", default="v0.1.5", help="Action ref to use in the generated workflow.")
     bootstrap_parser.add_argument(
         "--onboarding-guide-file",
         default="docs/localize-pipeline.md",

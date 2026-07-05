@@ -1,4 +1,9 @@
-"""Exact-match translation memory with conflict-safe reuse."""
+"""Exact-match translation memory with conflict-safe reuse.
+
+The memory is intentionally append-oriented and may grow without bound in long
+running projects. Add a prune/compaction command before using it as a shared
+large-scale store.
+"""
 
 from __future__ import annotations
 
@@ -96,8 +101,11 @@ class TranslationMemory:
         if existing.get("status") == "conflict":
             targets = set(str(target) for target in existing.get("targets", []))
             targets.add(target_text)
-            existing["targets"] = sorted(targets)
             existing.setdefault("source", source_text)
+            if len(targets) == 1:
+                _demote_conflict(existing, next(iter(targets)))
+                return
+            existing["targets"] = sorted(targets)
             return
 
         if existing.get("target") == target_text:
@@ -156,6 +164,8 @@ class TranslationMemory:
             targets = _entry_targets(existing) | _entry_targets(incoming)
             if len(targets) <= 1:
                 _fill_missing_metadata(existing, incoming)
+                if targets and existing.get("status") == "conflict":
+                    _demote_conflict(existing, next(iter(targets)))
                 unchanged += 1
                 continue
 
@@ -212,6 +222,12 @@ def _mark_conflict(target: Dict[str, Any], source: Mapping[str, Any], targets: s
     target["status"] = "conflict"
     target["targets"] = sorted(targets)
     _fill_missing_metadata(target, source)
+
+
+def _demote_conflict(target: Dict[str, Any], value: str) -> None:
+    target["status"] = "active"
+    target["target"] = value
+    target.pop("targets", None)
 
 
 def merge_translation_memory(
@@ -335,3 +351,9 @@ def save_translation_memory(path: str | Path, memory: TranslationMemory) -> None
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise

@@ -1,4 +1,9 @@
 import json
+import os
+
+import pytest
+
+os.environ.setdefault("OPENAI_API_KEY", "DUMMY_KEY_FOR_TESTING")
 
 from localize.translation_memory import (
     TranslationMemory,
@@ -39,6 +44,29 @@ def test_translation_memory_marks_conflicts_and_stops_reusing_ambiguous_segments
     entry = next(iter(payload["entries"].values()))
     assert entry["status"] == "conflict"
     assert sorted(entry["targets"]) == ["Offen", "Öffnen"]
+
+
+def test_translation_memory_demotes_single_target_conflicts():
+    memory = TranslationMemory.from_payload({
+        "entries": {
+            f"java_properties:de:{memory_source_hash('Open')}": {
+                "source": "Open",
+                "source_hash": memory_source_hash("Open"),
+                "locale": "de",
+                "format_id": "java_properties",
+                "status": "conflict",
+                "targets": ["Öffnen"],
+            }
+        }
+    })
+
+    memory.record("Open", "Öffnen", locale="de", format_id="java_properties")
+
+    assert memory.lookup("Open", locale="de", format_id="java_properties") == "Öffnen"
+    entry = next(iter(memory.to_payload()["entries"].values()))
+    assert entry["status"] == "active"
+    assert entry["target"] == "Öffnen"
+    assert "targets" not in entry
 
 
 def test_translation_memory_preserves_spacing_in_exact_match_keys():
@@ -90,6 +118,19 @@ def test_save_translation_memory_is_best_effort(monkeypatch, tmp_path):
     save_translation_memory(tmp_path / "translation_memory.json", memory)
 
 
+def test_save_translation_memory_reraises_non_os_errors(monkeypatch, tmp_path):
+    memory = TranslationMemory()
+    memory.record("Save", "Speichern", locale="de", format_id="json")
+
+    def fail_write(*_args, **_kwargs):
+        raise RuntimeError("json encoder failed")
+
+    monkeypatch.setattr("localize.translation_memory.write_translation_memory", fail_write)
+
+    with pytest.raises(RuntimeError, match="json encoder failed"):
+        save_translation_memory(tmp_path / "translation_memory.json", memory)
+
+
 def test_translation_memory_stats_counts_active_conflict_locale_and_format():
     memory = TranslationMemory()
     memory.record("Save", "Speichern", locale="de", format_id="json")
@@ -118,6 +159,32 @@ def test_merge_translation_memory_imports_entries_and_marks_conflicts():
     assert result.conflict_entries == 1
     assert base.lookup("Cancel", locale="de", format_id="json") == "Abbrechen"
     assert base.lookup("Save", locale="de", format_id="json") is None
+
+
+def test_merge_translation_memory_demotes_single_target_conflicts():
+    base = TranslationMemory.from_payload({
+        "entries": {
+            f"json:de:{memory_source_hash('Save')}": {
+                "source": "Save",
+                "source_hash": memory_source_hash("Save"),
+                "locale": "de",
+                "format_id": "json",
+                "status": "conflict",
+                "targets": ["Speichern"],
+            }
+        }
+    })
+    incoming = TranslationMemory()
+    incoming.record("Save", "Speichern", locale="de", format_id="json")
+
+    result = merge_translation_memory(base, incoming)
+
+    assert result.unchanged_entries == 1
+    assert base.lookup("Save", locale="de", format_id="json") == "Speichern"
+    entry = next(iter(base.to_payload()["entries"].values()))
+    assert entry["status"] == "active"
+    assert entry["target"] == "Speichern"
+    assert "targets" not in entry
 
 
 def test_translation_memory_suggestions_are_fuzzy_but_not_automatic_reuse():

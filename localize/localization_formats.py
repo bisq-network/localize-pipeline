@@ -5,6 +5,13 @@ pipeline should not need to know that every filename ends in ``.properties`` or
 that locale suffixes use ``_<locale>``. This module keeps that knowledge in one
 place so future adapters can be registered without spreading format checks
 through the translation pipeline.
+
+Suffix detection is intentionally broad for backwards compatibility. Two-letter
+application suffixes can look like locale codes (for example,
+``app_id.properties``), so callers that know the configured locale list should
+prefer :meth:`LocalizationFormat.extract_supported_locale_suffix` and
+:meth:`LocalizationFormat.source_filename` with ``supported_codes`` to avoid
+rewriting unsupported ``_xx`` filenames.
 """
 
 from __future__ import annotations

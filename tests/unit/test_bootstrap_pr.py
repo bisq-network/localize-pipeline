@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from localize import bootstrap_pr
 from localize.bootstrap_pr import BootstrapPrOptions, create_bootstrap_pr
 
 
@@ -39,7 +40,6 @@ def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
         BootstrapPrOptions(
             target_project_root=repo,
             branch_name="localize/onboarding",
-            action_ref="v0.1.3",
             push=False,
             open_pr=False,
         )
@@ -63,7 +63,7 @@ def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
     assert config["supported_locales"] == [{"code": "de", "name": "German"}]
 
     workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
-    assert "bisq-network/localize-pipeline@v0.1.3" in workflow
+    assert "bisq-network/localize-pipeline@v0.1.5" in workflow
     assert "dry-run: true" in workflow
 
     glossary = yaml.safe_load((repo / "glossary.json").read_text(encoding="utf-8"))
@@ -186,3 +186,82 @@ def test_bootstrap_pr_threads_base_branch_into_workflow(tmp_path):
 
     workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
     assert "branches: [release]" in workflow
+
+
+def test_bootstrap_pr_detects_remote_default_branch(tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+    _git(repo, "checkout", "-b", "trunk")
+    _git(repo, "checkout", "main")
+    _git(repo, "update-ref", "refs/remotes/origin/trunk", "trunk")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+
+    create_bootstrap_pr(
+        BootstrapPrOptions(
+            target_project_root=repo,
+            branch_name="localize/trunk-onboarding",
+        )
+    )
+
+    workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
+    assert "branches: [trunk]" in workflow
+
+
+def test_bootstrap_pr_restores_branch_after_generation_failure(monkeypatch, tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+
+    def fail_copy(_target):
+        raise RuntimeError("copy failed")
+
+    monkeypatch.setattr(bootstrap_pr, "_copy_example_glossary", fail_copy)
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        create_bootstrap_pr(
+            BootstrapPrOptions(
+                target_project_root=repo,
+                branch_name="localize/failing-onboarding",
+            )
+        )
+
+    assert _git(repo, "branch", "--show-current") == "main"
+    assert "localize/failing-onboarding" not in _git(repo, "branch", "--list", "localize/failing-onboarding")
+
+
+def test_bootstrap_pr_restores_tracked_files_after_late_failure(tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+    original_config = "dry_run: true\n"
+    (repo / "config.yaml").write_text(original_config, encoding="utf-8")
+    _git(repo, "add", "config.yaml")
+    _git(repo, "commit", "-m", "Add existing config")
+
+    with pytest.raises(RuntimeError, match="Command failed"):
+        create_bootstrap_pr(
+            BootstrapPrOptions(
+                target_project_root=repo,
+                branch_name="localize/late-failing-onboarding",
+                overwrite=True,
+                push=True,
+            )
+        )
+
+    assert _git(repo, "branch", "--show-current") == "main"
+    assert _git(repo, "status", "--porcelain") == ""
+    assert (repo / "config.yaml").read_text(encoding="utf-8") == original_config
+    assert not (repo / "glossary.json").exists()
+    assert not (repo / ".github/workflows/translate.yml").exists()
+    assert "localize/late-failing-onboarding" not in _git(
+        repo,
+        "branch",
+        "--list",
+        "localize/late-failing-onboarding",
+    )
+
+
+def test_bootstrap_pr_subprocess_errors_include_stderr(tmp_path):
+    repo = tmp_path / "target"
+    _init_repo(repo)
+
+    with pytest.raises(RuntimeError, match="not-a-real-branch"):
+        bootstrap_pr._git(repo, "checkout", "not-a-real-branch")

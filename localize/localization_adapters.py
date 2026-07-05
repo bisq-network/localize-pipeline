@@ -15,6 +15,8 @@ from localize.localization_formats import (
 )
 from localize.properties_parser import (
     _has_unescaped_trailing_backslash,
+    _split_property_line,
+    _unescape_key,
     parse_properties_file,
     reassemble_file as reassemble_properties_file,
 )
@@ -63,39 +65,29 @@ def lint_properties_file(file_path: str) -> List[str]:
     errors = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            continuation_pending = False
+            in_continuation = False
             for i, line in enumerate(f, 1):
-                line = line.rstrip('\r\n')
-                if continuation_pending:
-                    continuation_pending = _has_unescaped_trailing_backslash(line)
+                raw_line = line.rstrip('\r\n')
+                line = raw_line.strip()
+                if in_continuation:
+                    in_continuation = _has_unescaped_trailing_backslash(raw_line)
                     continue
-                line = line.strip()
+
                 if not line:
+                    in_continuation = False
                     continue
 
                 if line.startswith('#') or line.startswith('!'):
                     err = _lint_comment_syntax(line, i)
                     if err:
                         errors.append(err)
+                    in_continuation = False
                     continue
 
-                if '=' in line or ':' in line:
-                    sep_idx = -1
-                    for j, ch in enumerate(line):
-                        if ch in ('=', ':'):
-                            backslash_count = 0
-                            k = j - 1
-                            while k >= 0 and line[k] == '\\':
-                                backslash_count += 1
-                                k -= 1
-                            if backslash_count % 2 == 1:
-                                continue
-                            sep_idx = j
-                            break
-                    if sep_idx == -1:
-                        continue
-                    key, value = line[:sep_idx], line[sep_idx + 1:]
-                    key = key.strip()
+                split_line = _split_property_line(raw_line)
+                if split_line is not None:
+                    raw_key, _separator_group, value = split_line
+                    key = _unescape_key(raw_key)
 
                     if '..' in key:
                         errors.append(f"Linter Error: Malformed key '{key}' with double dots found on line {i}.")
@@ -104,11 +96,13 @@ def lint_properties_file(file_path: str) -> List[str]:
                     trailing_backslashes = re.search(r'(\\+)$', value_to_check)
                     if trailing_backslashes and (len(trailing_backslashes.group(1)) % 2 == 1):
                         value_to_check = value_to_check[:-1]
-                        continuation_pending = True
+                        in_continuation = True
+                    else:
+                        in_continuation = False
 
                     if re.search(r'\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])', value_to_check):
                         errors.append(
-                            f"Linter Error: Invalid escape sequence in value for key '{key}' on line {i}."
+                            f"Linter Warning: Unknown escape sequence in value for key '{key}' on line {i}."
                         )
 
                     control_character_findings = find_disallowed_control_characters(value_to_check)
@@ -147,7 +141,7 @@ def _extract_properties_key_from_diff_line(diff_line: str) -> Optional[str]:
 
 
 def _escape_messageformat_if_needed(src_text: str, value: str) -> str:
-    if re.search(r'\{(?:\d+|[A-Za-z_][A-Za-z0-9_]*)[^{}]*\}', src_text):
+    if re.search(r'\{\d+(?:,[^{}]+)?\}', src_text):
         value = value.replace("''", "'")
         value = value.replace("'", "''")
     return value

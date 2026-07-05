@@ -38,6 +38,18 @@ def test_locale_directory_layout_maps_locale_segment_to_source_locale():
     ) == "locales/en/common.json"
 
 
+def test_locale_directory_layout_ignores_first_segment_false_positive():
+    layout = LocalizationLayout(id="locale_directory", source_locale="en")
+
+    assert layout.extract_locale("it/src/main/resources/messages.json", ["it"], JSON_FORMAT) is None
+    assert not layout.is_target_file("it/src/main/resources/messages.json", ["it"], JSON_FORMAT)
+    assert layout.source_path_for_target(
+        "it/src/main/resources/messages.json",
+        ["it"],
+        JSON_FORMAT,
+    ) == "it/src/main/resources/messages.json"
+
+
 def test_locale_filename_layout_maps_locale_filename_to_source_filename():
     layout = LocalizationLayout(id="locale_filename", source_locale="en")
 

@@ -426,6 +426,27 @@ def test_cli_bootstrap_pr_delegates_to_onboarding_generator(capsys):
     assert "Created onboarding commit abc123" in captured.out
 
 
+def test_cli_bootstrap_pr_defaults_to_latest_release_ref(capsys):
+    result = SimpleNamespace(
+        branch_name="localize/onboarding",
+        commit_sha="abc123",
+        pushed=False,
+        opened_pr=False,
+    )
+    with patch("localize.cli.create_bootstrap_pr", return_value=result) as create:
+        exit_code = cli.main([
+            "bootstrap-pr",
+            "--target-project-root",
+            "/repo",
+            "--input-folder",
+            "i18n",
+        ])
+
+    capsys.readouterr()
+    assert exit_code == 0
+    assert create.call_args.args[0].action_ref == "v0.1.5"
+
+
 def test_cli_quality_gate_delegates_to_rerunnable_reporter(tmp_path):
     with patch("localize.cli.translation_quality_gate_main", return_value=0) as quality_main:
         exit_code = cli.main([

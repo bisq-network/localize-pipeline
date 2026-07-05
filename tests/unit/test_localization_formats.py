@@ -25,6 +25,13 @@ def test_java_properties_format_matches_existing_filename_conventions():
     assert fmt.source_filename("mu_sig_de.properties", ["de", "sig"]) == "mu_sig.properties"
 
 
+def test_java_properties_format_keeps_unsupported_two_letter_suffix_source_names():
+    fmt = JAVA_PROPERTIES_FORMAT
+
+    assert fmt.extract_supported_locale_suffix("app_id.properties", ["de"]) is None
+    assert fmt.source_filename("app_id.properties", ["de"]) == "app_id.properties"
+
+
 def test_java_properties_format_exposes_cached_compiled_regex():
     assert JAVA_PROPERTIES_FORMAT.compiled_locale_suffix_regex.search("messages_de.properties")
     assert (

@@ -170,13 +170,31 @@ class FilesystemSourceConnector:
         self._copy_relative_files(changed_files, input_folder, queue_folder)
 
     def copy_translated_files_back(self, translated_queue: str, input_folder: str) -> None:
-        translated_queue_path = Path(translated_queue)
+        translated_queue_path = Path(translated_queue).resolve()
+        input_folder_path = Path(input_folder).resolve()
         if not translated_queue_path.exists():
             return
         for source_path in translated_queue_path.rglob("*"):
             if not source_path.is_file():
                 continue
-            target_path = Path(input_folder) / source_path.relative_to(translated_queue_path)
+            resolved_source = source_path.resolve()
+            try:
+                safe_relative_path = resolved_source.relative_to(translated_queue_path)
+            except ValueError:
+                logging.getLogger(__name__).warning(
+                    "Skipping translated file outside queue: %s",
+                    source_path,
+                )
+                continue
+            target_path = (input_folder_path / safe_relative_path).resolve()
+            try:
+                target_path.relative_to(input_folder_path)
+            except ValueError:
+                logging.getLogger(__name__).warning(
+                    "Skipping translated file whose destination escapes input folder: %s",
+                    source_path,
+                )
+                continue
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target_path)
 
@@ -307,7 +325,10 @@ class FileReporterConnector:
             {
                 "files": validation_files,
                 "skipped_files": skipped_files,
-                "pipeline_warnings": [],
+                "pipeline_warnings": [
+                    {"file": filename, "errors": list(errors)}
+                    for filename, errors in sorted(skipped_files.items())
+                ],
             },
         )
 
@@ -326,7 +347,7 @@ class PipelineConnectorSet:
     source: PipelineSourceConnector
     processor: PipelineProcessorConnector
     reporter: PipelineReporterConnector
-    publisher: PipelinePublisher = NoopPipelinePublisher()
+    publisher: PipelinePublisher = field(default_factory=NoopPipelinePublisher)
 
     def to_steps(self) -> TranslationPipelineSteps:
         """Convert connector objects into the core pipeline's callable step set."""

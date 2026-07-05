@@ -2,7 +2,7 @@
 
 import json
 
-from localize.localization_adapters import get_localization_adapter
+from localize.localization_adapters import _escape_messageformat_if_needed, get_localization_adapter
 from localize.localization_formats import JSON_FORMAT
 
 
@@ -118,6 +118,11 @@ def test_json_adapter_reassembles_array_values(tmp_path):
             {"title": "Zweiter"},
         ],
     }
+
+
+def test_messageformat_escape_only_triggers_for_placeholders():
+    assert _escape_messageformat_if_needed("Use {braces} in examples", "l'ami") == "l'ami"
+    assert _escape_messageformat_if_needed("Hello {0}", "l'ami") == "l''ami"
 
 
 def test_json_adapter_synchronizes_source_and_target_string_keys(tmp_path):

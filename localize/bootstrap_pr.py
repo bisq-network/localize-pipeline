@@ -30,7 +30,7 @@ class BootstrapPrOptions:
     workflow_path: str = ".github/workflows/translate.yml"
     branch_name: str = "localize/onboarding"
     base_branch: Optional[str] = None
-    action_ref: str = "v0.1.3"
+    action_ref: str = "v0.1.5"
     commit_message: str = "Add Localize Pipeline onboarding"
     pr_title: str = "Add Localize Pipeline onboarding"
     overwrite: bool = False
@@ -59,13 +59,21 @@ def _run(
     cwd: Path,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         list(args),
         cwd=str(cwd),
-        check=check,
+        check=False,
         text=True,
         capture_output=True,
     )
+    if check and result.returncode != 0:
+        command = " ".join(str(arg) for arg in args)
+        detail = (result.stderr or result.stdout or "").strip()
+        message = f"Command failed ({result.returncode}): {command}"
+        if detail:
+            message = f"{message}\n{detail}"
+        raise RuntimeError(message)
+    return result
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -125,6 +133,55 @@ def _checkout_onboarding_branch(repo: Path, options: BootstrapPrOptions, base_br
         _git(repo, "checkout", "-B", options.branch_name)
         return
     _git(repo, "checkout", "-b", options.branch_name)
+
+
+def _detect_default_branch(repo: Path) -> str:
+    result = _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", check=False)
+    if result.returncode == 0:
+        ref = result.stdout.strip()
+        prefix = "refs/remotes/origin/"
+        if ref.startswith(prefix):
+            branch = ref[len(prefix):]
+            if branch:
+                return branch
+    return "main"
+
+
+def _cleanup_created_paths(repo: Path, relative_paths: Iterable[str]) -> None:
+    for relative_path in relative_paths:
+        path = repo / relative_path
+        tracked = _git(repo, "ls-files", "--error-unmatch", "--", relative_path, check=False)
+        if tracked.returncode == 0:
+            _git(repo, "restore", "--staged", "--worktree", "--", relative_path)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except IsADirectoryError:
+                pass
+
+        parent = path.parent
+        while parent != repo and parent.exists():
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
+def _record_rollback_step(
+    failures: list[str],
+    description: str,
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout or "").strip()
+    if detail:
+        failures.append(f"{description} failed ({result.returncode}): {detail}")
+    else:
+        failures.append(f"{description} failed ({result.returncode})")
 
 
 def _assert_can_write(repo: Path, relative_paths: Iterable[str], *, overwrite: bool) -> None:
@@ -352,65 +409,93 @@ def create_bootstrap_pr(options: BootstrapPrOptions) -> BootstrapPrResult:
         if path is not None
     )
     _assert_can_write(repo, created_files, overwrite=options.overwrite)
-    base_branch = options.base_branch or "main"
+    base_branch = options.base_branch or _detect_default_branch(repo)
+    original_branch = _git(repo, "branch", "--show-current").stdout.strip()
+    branch_preexisted = _branch_exists(repo, options.branch_name)
 
-    _checkout_onboarding_branch(repo, options, base_branch)
+    try:
+        _checkout_onboarding_branch(repo, options, base_branch)
 
-    (repo / config_path).parent.mkdir(parents=True, exist_ok=True)
-    (repo / config_path).write_text(_build_onboarding_config(options, repo, input_folder), encoding="utf-8")
-    _copy_example_glossary(repo / glossary_path)
-    workflow_file = repo / workflow_path
-    workflow_file.parent.mkdir(parents=True, exist_ok=True)
-    workflow_file.write_text(
-        _render_workflow(
-            action_ref=options.action_ref,
-            config_path=config_path,
-            base_branch=base_branch,
-            plugin_modules=options.plugin_modules,
-            plugin_install_command=options.plugin_install_command,
-        ),
-        encoding="utf-8",
-    )
-    if onboarding_guide_path:
-        guide_file = repo / onboarding_guide_path
-        guide_file.parent.mkdir(parents=True, exist_ok=True)
-        guide_file.write_text(
-            _render_onboarding_guide(
-                config_path=config_path,
-                glossary_path=glossary_path,
-                workflow_path=workflow_path,
+        (repo / config_path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / config_path).write_text(_build_onboarding_config(options, repo, input_folder), encoding="utf-8")
+        _copy_example_glossary(repo / glossary_path)
+        workflow_file = repo / workflow_path
+        workflow_file.parent.mkdir(parents=True, exist_ok=True)
+        workflow_file.write_text(
+            _render_workflow(
                 action_ref=options.action_ref,
+                config_path=config_path,
+                base_branch=base_branch,
                 plugin_modules=options.plugin_modules,
                 plugin_install_command=options.plugin_install_command,
             ),
             encoding="utf-8",
         )
+        if onboarding_guide_path:
+            guide_file = repo / onboarding_guide_path
+            guide_file.parent.mkdir(parents=True, exist_ok=True)
+            guide_file.write_text(
+                _render_onboarding_guide(
+                    config_path=config_path,
+                    glossary_path=glossary_path,
+                    workflow_path=workflow_path,
+                    action_ref=options.action_ref,
+                    plugin_modules=options.plugin_modules,
+                    plugin_install_command=options.plugin_install_command,
+                ),
+                encoding="utf-8",
+            )
 
-    _git(repo, "add", *created_files)
-    _git(repo, "commit", "-m", options.commit_message)
-    commit_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _git(repo, "add", *created_files)
+        _git(repo, "commit", "-m", options.commit_message)
+        commit_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    pushed = False
-    opened_pr = False
-    if options.push or options.open_pr:
-        _git(repo, "push", "-u", "origin", options.branch_name)
-        pushed = True
-    if options.open_pr:
-        _run(
-            (
-                "gh",
-                "pr",
-                "create",
-                "--title",
-                options.pr_title,
-                "--base",
-                base_branch,
-                "--body",
-                "Adds Localize Pipeline config, glossary, and workflow in dry-run mode.",
-            ),
-            cwd=repo,
-        )
-        opened_pr = True
+        pushed = False
+        opened_pr = False
+        if options.push or options.open_pr:
+            _git(repo, "push", "-u", "origin", options.branch_name)
+            pushed = True
+        if options.open_pr:
+            _run(
+                (
+                    "gh",
+                    "pr",
+                    "create",
+                    "--title",
+                    options.pr_title,
+                    "--base",
+                    base_branch,
+                    "--body",
+                    "Adds Localize Pipeline config, glossary, and workflow in dry-run mode.",
+                ),
+                cwd=repo,
+            )
+            opened_pr = True
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        if not branch_preexisted:
+            try:
+                _cleanup_created_paths(repo, created_files)
+            except Exception as rollback_exc:
+                rollback_failures.append(f"cleanup generated files failed: {rollback_exc}")
+        if original_branch:
+            checkout_result = _git(repo, "checkout", original_branch, check=False)
+            _record_rollback_step(
+                rollback_failures,
+                f"checkout {original_branch}",
+                checkout_result,
+            )
+        if not branch_preexisted:
+            delete_result = _git(repo, "branch", "-D", options.branch_name, check=False)
+            _record_rollback_step(
+                rollback_failures,
+                f"delete branch {options.branch_name}",
+                delete_result,
+            )
+        if rollback_failures:
+            details = "\n".join(rollback_failures)
+            raise RuntimeError(f"{exc}\nRollback failed:\n{details}") from exc
+        raise
 
     return BootstrapPrResult(
         branch_name=options.branch_name,
