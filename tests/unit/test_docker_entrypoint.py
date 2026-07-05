@@ -42,6 +42,8 @@ def test_entrypoint_recurses_git_dir_ownership_before_privilege_drop():
 
     assert 'if [ -d "$TARGET_REPO_DIR/.git" ]; then' in script
     assert 'chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR/.git"' in script
+    assert "unable to recursively chown ${TARGET_REPO_DIR}; continuing" in script
+    assert "unable to chown entries in ${TARGET_REPO_DIR}; continuing" in script
     assert 'chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo/.git' not in script
 
 

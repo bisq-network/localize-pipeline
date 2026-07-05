@@ -544,9 +544,11 @@ else
     if [ -d "$TARGET_REPO_DIR" ]; then
         # Only fix entries with mismatched ownership; don't follow symlinks.
         if [ "${CHOWN_TARGET_REPO_RECURSIVE:-false}" = "true" ]; then
-          chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR"
+          chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR" \
+            || log "Warning: unable to recursively chown ${TARGET_REPO_DIR}; continuing" "WARNING"
         else
-          find "$TARGET_REPO_DIR" -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} +
+          find "$TARGET_REPO_DIR" -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} + \
+            || log "Warning: unable to chown entries in ${TARGET_REPO_DIR}; continuing" "WARNING"
           if [ -d "$TARGET_REPO_DIR/.git" ]; then
             chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR/.git" \
               || log "Warning: unable to chown ${TARGET_REPO_DIR}/.git; continuing" "WARNING"
