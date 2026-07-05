@@ -7,6 +7,25 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.6] - 2026-07-05
+
+### Fixed
+
+- Removed build-time SSH and GPG private-key persistence from Docker image
+  layers; runtime secrets are imported by the entrypoint instead.
+- Hardened core translation retries, holistic review scoping, failed-key ledger
+  handling, post-translation validation, queue cleanup, and reporting counts.
+- Tightened quality-gate, semantic-review, remediation, placeholder, and
+  validation behavior for blocking translation defects.
+- Aligned config, CLI, provider, shell, Docker, and GitHub Action behavior for
+  safer production runs.
+- Improved parser, adapter, translation-memory, connector, bootstrap, layout,
+  and documentation edge cases.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.6`.
+
 ### Added
 
 - `ignore_key_patterns` config to keep matching localization keys copied from
