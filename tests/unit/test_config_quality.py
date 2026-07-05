@@ -210,13 +210,16 @@ def test_bisq_mobile_profile_packages_sanitized_production_shape():
 
 
 def test_docker_compose_mounts_the_selected_profile():
-    compose = (PROJECT_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    compose_text = (PROJECT_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = yaml.safe_load(compose_text)
+    mounts = compose["services"]["translator"]["volumes"]
+    config_mount = next(mount for mount in mounts if isinstance(mount, dict) and mount["target"] == "/app/config.yaml")
+    glossary_mount = next(mount for mount in mounts if isinstance(mount, dict) and mount["target"] == "/app/glossary.json")
 
-    assert "source: ../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml" in compose
-    assert "target: /app/config.yaml" in compose
-    assert "source: ../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json" in compose
-    assert "target: /app/glossary.json" in compose
-    assert "create_host_path: false" in compose
+    assert config_mount["source"] == "../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml"
+    assert config_mount["bind"]["create_host_path"] is False
+    assert glossary_mount["source"] == "../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json"
+    assert glossary_mount["bind"]["create_host_path"] is False
 
 
 def test_repository_does_not_ship_legacy_systemd_deployment_scripts():

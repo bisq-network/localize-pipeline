@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,7 +32,8 @@ def test_docker_cleanup_does_not_prune_shared_volumes_or_tagged_images():
     assert "set -euo pipefail" in script
     assert "docker volume prune" not in script
     assert "docker image prune -a" not in script
-    assert 'docker image prune -f --filter "dangling=true"' in script
+    assert 'docker image prune -f --filter "dangling=true" 2>&1' not in script
+    assert 'docker image prune -f --filter "dangling=true" --filter "until=168h"' in script
 
 
 def test_entrypoint_insecure_ssh_preserves_identity_config():
@@ -44,19 +47,24 @@ def test_entrypoint_insecure_ssh_preserves_identity_config():
 
 
 def test_docker_compose_has_init_and_no_deploy_key_build_arg():
-    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    compose = yaml.safe_load((REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8"))
+    translator = compose["services"]["translator"]
 
-    assert "init: true" in compose
-    build_block = compose[compose.index("build:") : compose.index("# The entrypoint")]
-    assert "DEPLOY_KEY_NAME=" not in build_block
-    assert "create_host_path: false" in compose
+    assert translator["init"] is True
+    assert "DEPLOY_KEY_NAME=" not in str(translator["build"])
+    assert "secrets" not in translator["build"]
 
 
 def test_docker_compose_ci_override_uses_placeholder_secrets():
     override = (REPO_ROOT / "docker" / "docker-compose.ci.yml").read_text(encoding="utf-8")
+    override_config = yaml.safe_load(override)
+    translator = override_config["services"]["translator"]
 
     assert 'SKIP_GPG_IMPORT: "true"' in override
     assert 'SKIP_DEPLOY_KEY: "true"' in override
+    assert translator["environment"]["SKIP_GPG_IMPORT"] == "true"
+    assert translator["environment"]["SKIP_DEPLOY_KEY"] == "true"
+    assert "args" not in translator.get("build", {})
     assert "file: ./ci-secrets/empty-gpg-secret.asc" in override
     assert "file: ./ci-secrets/empty-deploy-key" in override
     assert (REPO_ROOT / "docker" / "ci-secrets" / "empty-gpg-secret.asc").exists()
@@ -74,7 +82,9 @@ def test_run_local_translation_resolves_config_before_chdir():
     script = (REPO_ROOT / "run-local-translation.sh").read_text(encoding="utf-8")
 
     assert 'CALLER_CWD=$(pwd)' in script
-    assert 'CONFIG_FILE_PATH="$CALLER_CWD/$CONFIG_FILE_PATH"' in script
+    assert "resolve_to_absolute()" in script
+    assert 'CONFIG_FILE_PATH=$(resolve_to_absolute "$1")' in script
+    assert 'CONFIG_FILE_PATH=$(resolve_to_absolute "$TRANSLATOR_CONFIG_FILE")' in script
     assert 'if [ -n "${1:-}" ]; then' in script
     assert "TRANSLATOR_CONFIG_FILE" in script
     assert "./setup.sh" not in script

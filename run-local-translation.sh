@@ -13,18 +13,20 @@ set -euo pipefail
 CALLER_CWD=$(pwd)
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 
+resolve_to_absolute() {
+    local path="$1"
+    if [[ "$path" != /* ]]; then
+        path="$CALLER_CWD/$path"
+    fi
+    printf '%s\n' "$path"
+}
+
 # Use the first argument as the config file path, a pre-set environment value,
 # or default to 'config.yaml'. Resolve relative arguments before changing dirs.
 if [ -n "${1:-}" ]; then
-    CONFIG_FILE_PATH="$1"
-    if [[ "$CONFIG_FILE_PATH" != /* ]]; then
-        CONFIG_FILE_PATH="$CALLER_CWD/$CONFIG_FILE_PATH"
-    fi
+    CONFIG_FILE_PATH=$(resolve_to_absolute "$1")
 elif [ -n "${TRANSLATOR_CONFIG_FILE:-}" ]; then
-    CONFIG_FILE_PATH="$TRANSLATOR_CONFIG_FILE"
-    if [[ "$CONFIG_FILE_PATH" != /* ]]; then
-        CONFIG_FILE_PATH="$CALLER_CWD/$CONFIG_FILE_PATH"
-    fi
+    CONFIG_FILE_PATH=$(resolve_to_absolute "$TRANSLATOR_CONFIG_FILE")
 else
     CONFIG_FILE_PATH="$PROJECT_ROOT/config.yaml"
 fi

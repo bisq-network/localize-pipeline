@@ -4,7 +4,6 @@
 #
 # This script safely removes:
 # - Stopped containers older than 24 hours
-# - Dangling images (untagged from builds)
 # - Dangling images older than 7 days
 # - Build cache older than 7 days
 #
@@ -63,10 +62,6 @@ echo "[$DATE] Disk before cleanup: ${BEFORE_GB} GB available (${BEFORE_PERCENT}%
 # Remove stopped containers older than 24 hours
 echo "[$DATE] Removing old containers..." | tee -a "$LOG_FILE"
 docker container prune -f --filter "until=24h" 2>&1 | tee -a "$LOG_FILE"
-
-# Remove dangling images (untagged images from builds)
-echo "[$DATE] Removing dangling images..." | tee -a "$LOG_FILE"
-docker image prune -f --filter "dangling=true" 2>&1 | tee -a "$LOG_FILE"
 
 # Remove older dangling images while preserving tagged images used for rollback.
 echo "[$DATE] Removing dangling images older than 7 days..." | tee -a "$LOG_FILE"

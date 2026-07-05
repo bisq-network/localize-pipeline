@@ -40,8 +40,9 @@ def test_entrypoint_keeps_arbitrary_configured_runtime_paths_out_of_root_setup()
 def test_entrypoint_recurses_git_dir_ownership_before_privilege_drop():
     script = _entrypoint_script()
 
-    assert 'if [ -d "/target_repo/.git" ]; then' in script
-    assert 'chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo/.git' in script
+    assert 'if [ -d "$TARGET_REPO_DIR/.git" ]; then' in script
+    assert 'chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR/.git"' in script
+    assert 'chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo/.git' not in script
 
 
 def test_entrypoint_root_fallback_is_explicit_before_exec():

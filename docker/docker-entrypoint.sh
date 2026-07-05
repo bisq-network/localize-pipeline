@@ -541,15 +541,15 @@ else
     ensure_configured_runtime_dirs
 
     # Fix permissions on the target repository if it's a mounted volume
-    if [ -d "/target_repo" ]; then
+    if [ -d "$TARGET_REPO_DIR" ]; then
         # Only fix entries with mismatched ownership; don't follow symlinks.
         if [ "${CHOWN_TARGET_REPO_RECURSIVE:-false}" = "true" ]; then
-          chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo
+          chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR"
         else
-          find /target_repo -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} +
-          if [ -d "/target_repo/.git" ]; then
-            chown -R "${APPUSER_UID}:${APPUSER_GID}" /target_repo/.git \
-              || log "Warning: unable to chown /target_repo/.git; continuing" "WARNING"
+          find "$TARGET_REPO_DIR" -maxdepth 1 \( ! -uid "$APPUSER_UID" -o ! -gid "$APPUSER_GID" \) -exec chown -h "${APPUSER_UID}:${APPUSER_GID}" {} +
+          if [ -d "$TARGET_REPO_DIR/.git" ]; then
+            chown -R "${APPUSER_UID}:${APPUSER_GID}" "$TARGET_REPO_DIR/.git" \
+              || log "Warning: unable to chown ${TARGET_REPO_DIR}/.git; continuing" "WARNING"
           fi
         fi
     fi

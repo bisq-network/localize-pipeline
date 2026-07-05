@@ -180,9 +180,11 @@ def test_open_pr_fetches_force_with_lease_baseline(action):
     pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
     run = pr_step["run"]
 
-    fetch_index = run.index('git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true')
-    push_index = run.index('git push --force-with-lease origin "$branch"')
-    assert fetch_index < push_index
+    baseline_index = run.index('expected_remote_sha="$(git ls-remote --heads origin "$branch"')
+    fetch_index = run.index('git fetch origin "+$remote_ref:refs/remotes/origin/$branch" || true')
+    push_index = run.index('git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"')
+    assert baseline_index < fetch_index < push_index
+    assert 'git push --force-with-lease origin "$branch"' not in run
 
 
 def test_open_pr_checks_token_permissions_before_push(action):
@@ -190,9 +192,10 @@ def test_open_pr_checks_token_permissions_before_push(action):
     run = pr_step["run"]
 
     preflight_index = run.index('gh api "repos/${GITHUB_REPOSITORY}" --jq')
-    push_index = run.index('git push --force-with-lease origin "$branch"')
+    push_index = run.index('git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"')
     assert preflight_index < push_index
-    assert "contents:write and pull-requests:write" in run
+    assert "contents:write permission" in run
+    assert "pull-requests:write permissions to push" not in run
 
 
 def test_action_uses_neutral_openai_key_env(action):

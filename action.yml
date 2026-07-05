@@ -297,7 +297,7 @@ runs:
         fi
 
         if ! gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push // false' | grep -qx true; then
-          echo "::error::github-token must have contents:write and pull-requests:write permissions to push '$branch' and open or update the translation PR."
+          echo "::error::github-token must have contents:write permission to push '$branch'."
           exit 1
         fi
 
@@ -399,8 +399,14 @@ runs:
         PY
 
         git commit "${commit_args[@]}"
-        git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
-        git push --force-with-lease origin "$branch"
+        remote_ref="refs/heads/$branch"
+        expected_remote_sha="$(git ls-remote --heads origin "$branch" | awk '{print $1}')"
+        git fetch origin "+$remote_ref:refs/remotes/origin/$branch" || true
+        if [ -n "$expected_remote_sha" ]; then
+          git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"
+        else
+          git push origin "$branch"
+        fi
         if gh pr view "$branch" >/dev/null 2>&1; then
           echo "Pull request already exists for $branch; it now points at the latest push."
           gh pr edit "$branch" --title "$PR_TITLE" --body-file "$body_file"
