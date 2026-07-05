@@ -5,6 +5,7 @@ services:
     build:
       context: .. # Build context is the project root
       dockerfile: docker/Dockerfile # Path to Dockerfile from project root
+    init: true
     # The entrypoint is defined in the Dockerfile.
     # By default, run the main orchestration script. Can be overridden for debugging.
     command: ["/app/update-translations.sh"]
@@ -14,8 +15,18 @@ services:
       # is set in the top-level 'volumes' section using the environment variable.
       - target-repo-data:/target_repo
       # Mount the selected project profile's configuration and glossary files.
-      - ../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml:/app/config.yaml:ro
-      - ../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json:/app/glossary.json:ro
+      - type: bind
+        source: ../profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../profiles/${TRANSLATOR_PROFILE:-bisq}/glossary.json
+        target: /app/glossary.json
+        read_only: true
+        bind:
+          create_host_path: false
       # Mount logs directory (in project root) for persistence
       - ../logs:/app/logs
     # The container will start as root, and the entrypoint script will drop privileges to 'appuser'.

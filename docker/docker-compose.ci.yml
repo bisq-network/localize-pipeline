@@ -1,0 +1,11 @@
+services:
+  translator:
+    environment:
+      SKIP_GPG_IMPORT: "true"
+      SKIP_DEPLOY_KEY: "true"
+
+secrets:
+  gpg_bot_key:
+    file: ./ci-secrets/empty-gpg-secret.asc
+  deploy_key:
+    file: ./ci-secrets/empty-deploy-key
