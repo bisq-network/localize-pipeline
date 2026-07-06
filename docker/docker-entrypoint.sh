@@ -100,6 +100,7 @@ ensure_insecure_ssh_config() {
 install_runtime_deploy_key() {
     local user_home="${APPUSER_HOME:-/home/appuser}"
     local runtime_deploy_key_path="${DEPLOY_KEY_PATH:-/run/secrets/deploy_key}"
+    local installed_deploy_key="$user_home/.ssh/deploy_key"
 
     if [ "${SKIP_DEPLOY_KEY:-false}" = "true" ]; then
         log "Skipping runtime deploy key setup because SKIP_DEPLOY_KEY=true."
@@ -107,13 +108,24 @@ install_runtime_deploy_key() {
     fi
 
     mkdir -p "$user_home/.ssh"
+    if [ -s "$user_home/.ssh/deploy_key" ]; then
+        chmod 600 "$installed_deploy_key"
+        ensure_github_identity_config "$user_home"
+        log "Runtime deploy key already installed for appuser."
+        return 0
+    fi
+
     if [ ! -s "$runtime_deploy_key_path" ]; then
         log "Runtime deploy key not found at $runtime_deploy_key_path; SSH clone/push may fail." "WARNING"
         return 0
     fi
+    if [ ! -r "$runtime_deploy_key_path" ]; then
+        log "Runtime deploy key at $runtime_deploy_key_path is not readable; SSH clone/push may fail." "WARNING"
+        return 0
+    fi
 
-    cp "$runtime_deploy_key_path" "$user_home/.ssh/deploy_key"
-    chmod 600 "$user_home/.ssh/deploy_key"
+    cp "$runtime_deploy_key_path" "$installed_deploy_key"
+    chmod 600 "$installed_deploy_key"
     ensure_github_identity_config "$user_home"
 
     if [ "$(id -u)" -eq 0 ]; then
@@ -135,8 +147,18 @@ import_runtime_gpg_key() {
         return 0
     fi
 
+    if run_as_appuser "$user_home" gpg --list-secret-keys --with-colons 2>/dev/null \
+        | awk -F: '/^sec/ {found=1} END {exit !found}'; then
+        log "Runtime GPG key already available for appuser."
+        return 0
+    fi
+
     if [ ! -s "$runtime_gpg_key_path" ]; then
         log "Runtime GPG key not found at $runtime_gpg_key_path; commit signing will be disabled." "WARNING"
+        return 0
+    fi
+    if [ ! -r "$runtime_gpg_key_path" ]; then
+        log "Runtime GPG key at $runtime_gpg_key_path is not readable; commit signing will be disabled." "WARNING"
         return 0
     fi
 

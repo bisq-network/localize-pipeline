@@ -79,8 +79,8 @@ def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
     assert 'SKIP_GPG_IMPORT:-false' in entrypoint
     assert 'gpg --batch --import "$gpg_import_file"' in entrypoint
     assert 'gpg --import-options show-only --import --with-colons "$gpg_import_file"' in entrypoint
-    assert '"$runtime_deploy_key_path" "$user_home/.ssh/deploy_key"' in entrypoint
-    assert 'chmod 600 "$user_home/.ssh/deploy_key"' in entrypoint
+    assert 'cp "$runtime_deploy_key_path" "$installed_deploy_key"' in entrypoint
+    assert 'chmod 600 "$installed_deploy_key"' in entrypoint
 
     appuser_block = entrypoint.split('if [ "$(id -u)" -ne 0 ]; then', 1)[1].split("else", 1)[0]
     assert appuser_block.index("install_runtime_deploy_key") < appuser_block.index("setup_ssh")
@@ -89,3 +89,12 @@ def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
     root_block = entrypoint.split("# --- Root Execution Block ---", 1)[1]
     assert root_block.index("install_runtime_deploy_key") < root_block.index("setup_ssh")
     assert root_block.index("import_runtime_gpg_key") < root_block.index("setup_ssh")
+
+
+def test_entrypoint_reuses_runtime_secrets_after_privilege_drop():
+    entrypoint = _entrypoint()
+
+    assert 'if [ -s "$user_home/.ssh/deploy_key" ]; then' in entrypoint
+    assert "Runtime deploy key already installed for appuser." in entrypoint
+    assert "gpg --list-secret-keys --with-colons" in entrypoint
+    assert "Runtime GPG key already available for appuser." in entrypoint
