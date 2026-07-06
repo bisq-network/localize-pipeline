@@ -151,7 +151,7 @@ import_runtime_gpg_key() {
         cleanup_gpg_import_file="$gpg_import_file"
     fi
 
-    fingerprint="$(run_as_appuser "$user_home" gpg --import-options show-only --with-colons "$gpg_import_file" \
+    fingerprint="$(run_as_appuser "$user_home" gpg --import-options show-only --import --with-colons "$gpg_import_file" \
         | awk -F: '/^fpr/ {print $10; exit}')"
     if [ -z "$fingerprint" ]; then
         rm -f "$cleanup_gpg_import_file"
