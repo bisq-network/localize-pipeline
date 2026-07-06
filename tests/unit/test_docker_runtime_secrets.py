@@ -78,7 +78,7 @@ def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
     assert 'GPG_BOT_KEY_PATH:-/run/secrets/gpg_bot_key' in entrypoint
     assert 'SKIP_GPG_IMPORT:-false' in entrypoint
     assert 'gpg --batch --import "$gpg_import_file"' in entrypoint
-    assert 'gpg --import-options show-only --with-colons "$gpg_import_file"' in entrypoint
+    assert 'gpg --import-options show-only --import --with-colons "$gpg_import_file"' in entrypoint
     assert '"$runtime_deploy_key_path" "$user_home/.ssh/deploy_key"' in entrypoint
     assert 'chmod 600 "$user_home/.ssh/deploy_key"' in entrypoint
 
