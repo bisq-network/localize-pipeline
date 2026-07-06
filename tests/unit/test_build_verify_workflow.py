@@ -21,7 +21,7 @@ def test_build_verify_runs_on_pull_request_push_and_manual_dispatch():
 
 
 def test_build_verify_tests_supported_python_versions():
-    job = _workflow()["jobs"]["build-and-verify"]
+    job = _workflow()["jobs"]["test-and-package"]
 
     assert job["strategy"]["fail-fast"] is False
     assert job["strategy"]["matrix"]["python-version"] == ["3.11", "3.12"]
@@ -30,13 +30,27 @@ def test_build_verify_tests_supported_python_versions():
 
 
 def test_build_verify_builds_and_smoke_tests_wheel():
-    steps = _workflow()["jobs"]["build-and-verify"]["steps"]
+    steps = _workflow()["jobs"]["test-and-package"]["steps"]
     smoke = next(step for step in steps if step["name"] == "Build and smoke-test package")
     run = smoke["run"]
 
     assert "python -m build" in run
     assert "python -m pip install --force-reinstall dist/*.whl" in run
     assert "localize --help" in run
+
+
+def test_build_verify_reports_exact_required_status_context():
+    jobs = _workflow()["jobs"]
+
+    assert "test-and-package" in jobs
+    assert "build-and-verify" in jobs
+    required_context = jobs["build-and-verify"]
+    assert required_context.get("name", "build-and-verify") == "build-and-verify"
+    assert "strategy" not in required_context
+    assert required_context["needs"] == "test-and-package"
+    verifier = next(step for step in required_context["steps"] if step["name"] == "Verify matrix result")
+    assert "needs.test-and-package.result" in verifier["run"]
+    assert "exit 1" in verifier["run"]
 
 
 def test_build_verify_uses_sha_pinned_actions():
