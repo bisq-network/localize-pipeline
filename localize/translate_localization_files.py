@@ -25,7 +25,6 @@ if sys.version_info < (3, 11):
 
 import jsonschema
 from aiolimiter import AsyncLimiter
-from openai import OpenAIError
 from openai.types.chat import (
     ChatCompletionSystemMessageParam,
     ChatCompletionUserMessageParam

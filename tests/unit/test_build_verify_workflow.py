@@ -5,6 +5,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-verify.yml"
+DEV_REQUIREMENTS = REPO_ROOT / "requirements-dev.txt"
 
 
 def _workflow():
@@ -53,3 +54,10 @@ def test_build_verify_uses_sha_pinned_actions():
         if line.lstrip().startswith("uses:")
     ]
     assert not any("@v" in line for line in active_uses_lines)
+
+
+def test_dev_requirements_pin_setuptools_for_hash_locked_install():
+    locked_requirements = DEV_REQUIREMENTS.read_text(encoding="utf-8")
+
+    assert "setuptools==" in locked_requirements
+    assert "# setuptools" not in locked_requirements

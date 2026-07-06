@@ -1,5 +1,5 @@
 # High-level development/testing dependencies
-# Run 'pip-compile' to generate requirements-dev.txt
+# Run 'pip-compile --allow-unsafe' to generate requirements-dev.txt
 
 -r requirements.in
 
@@ -7,4 +7,5 @@ pytest>=9.0.3
 pytest-asyncio>=1.2
 pip-tools
 ruff
-pip-audit 
+pip-audit
+setuptools
