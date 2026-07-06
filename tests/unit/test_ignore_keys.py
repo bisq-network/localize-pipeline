@@ -39,6 +39,13 @@ def test_plain_ignore_pattern_is_exact_not_substring():
     assert not is_ignored_key("mobile.id.label", patterns)
 
 
+def test_plain_dotted_ignore_pattern_is_exact_not_regex_wildcard():
+    patterns = compile_ignore_key_patterns(["app.settings"])
+
+    assert is_ignored_key("app.settings", patterns)
+    assert not is_ignored_key("app-settingsX", patterns)
+
+
 def test_empty_patterns_are_noop():
     assert compile_ignore_key_patterns([]) == []
     assert not is_ignored_key("/#1", [])

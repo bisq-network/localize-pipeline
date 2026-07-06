@@ -7,7 +7,7 @@ from re import Pattern
 from typing import Iterable, Sequence
 
 
-_REGEX_META_CHARS = frozenset(".^$*+?{}[]\\|()")
+_REGEX_META_CHARS = frozenset("^$*+?{}[]\\|()")
 
 
 def compile_ignore_key_patterns(raw_patterns: Iterable[str | Pattern[str]] | None) -> list[Pattern[str]]:

@@ -275,6 +275,28 @@ class TestLoadAppConfig:
         assert config.input_folder == str(input_folder)
         assert config.glossary_file_path == str(config_dir / "glossary.json")
 
+    def test_load_config_expands_user_project_paths(self, monkeypatch, tmp_path):
+        fake_home = tmp_path / "home"
+        target_root = fake_home / "target"
+        input_folder = target_root / "src" / "i18n"
+        input_folder.mkdir(parents=True)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "dry_run: true\n"
+            "target_project_root: ~/target\n"
+            "input_folder: src/i18n\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        with patch("localize.app_config.setup_logger") as mock_logger:
+            mock_logger.return_value = MagicMock()
+            with patch.dict(os.environ, {"TRANSLATOR_CONFIG_FILE": str(config_path), "HOME": str(fake_home)}, clear=True):
+                config = load_app_config()
+
+        assert config.target_project_root == str(target_root)
+        assert config.input_folder == str(input_folder)
+
     def test_load_config_and_cli_share_queue_dir_resolution(self, tmp_path):
         from localize.cli import _runtime_dir
 

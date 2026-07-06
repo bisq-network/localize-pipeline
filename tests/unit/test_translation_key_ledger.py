@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -58,6 +59,58 @@ def test_load_translation_key_ledger_corrupt_file_can_be_reset(monkeypatch, tmp_
 
     assert not ledger_path.exists()
     assert list(tmp_path.glob("ledger.json.corrupt-*"))
+
+
+def test_load_translation_key_ledger_reports_failed_backup_when_reset_allowed(
+        monkeypatch, tmp_path, caplog
+):
+    ledger_path = tmp_path / "ledger.json"
+    ledger_path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("LOCALIZE_ALLOW_RESET_LEDGER", "true")
+
+    def fail_replace(_source, _target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("localize.translate_localization_files.os.replace", fail_replace)
+
+    with caplog.at_level(logging.WARNING):
+        assert load_translation_key_ledger(str(ledger_path)) == {}
+
+    log_output = caplog.text
+    assert "could not be backed up" in log_output
+    assert "was backed up" not in log_output
+    assert ledger_path.exists()
+
+
+def test_save_translation_key_ledger_uses_atomic_json_writer(monkeypatch, tmp_path):
+    ledger_path = tmp_path / "ledger.json"
+    key_ledger = {
+        "mobile_de.properties": {
+            "key.one": {
+                "source_hash": compute_ledger_hash("Source one"),
+                "target_hash": compute_ledger_hash("Ziel eins")
+            }
+        }
+    }
+    calls = []
+
+    def fake_write_json_atomic(path, payload, **kwargs):
+        calls.append((path, payload, kwargs))
+
+    monkeypatch.setattr(
+        "localize.translate_localization_files.write_json_atomic",
+        fake_write_json_atomic,
+    )
+
+    save_translation_key_ledger(str(ledger_path), key_ledger)
+
+    assert len(calls) == 1
+    path, payload, kwargs = calls[0]
+    assert path == str(ledger_path)
+    assert payload["version"] == 1
+    assert payload["files"] == key_ledger
+    assert payload["updated_at"].endswith("Z")
+    assert kwargs == {"sort_keys": True}
 
 
 def test_translation_key_ledger_timestamp_uses_utc_z_suffix():

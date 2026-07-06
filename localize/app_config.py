@@ -145,6 +145,8 @@ def validate_config(
 
     # Required paths must be set, not a left-over placeholder, and must exist.
     target_root = config.get("target_project_root")
+    if target_root:
+        target_root = os.path.expanduser(str(target_root))
     if target_root and config_base_dir and not os.path.isabs(str(target_root)):
         target_root = os.path.join(config_base_dir, str(target_root))
     for key in ("target_project_root", "input_folder"):
@@ -163,11 +165,11 @@ def validate_config(
             continue
         # A relative input_folder is resolved against target_project_root, matching
         # how update-translations.sh builds ABSOLUTE_INPUT_FOLDER.
-        resolved = str(value)
+        resolved = os.path.expanduser(str(value))
         if not os.path.isabs(resolved) and key == "target_project_root" and config_base_dir:
             resolved = os.path.join(config_base_dir, resolved)
-        if key == "input_folder" and target_root and not os.path.isabs(str(value)):
-            resolved = os.path.join(str(target_root), str(value))
+        if key == "input_folder" and target_root and not os.path.isabs(resolved):
+            resolved = os.path.join(str(target_root), resolved)
         if not path_exists(resolved):
             issues.append(ConfigIssue(
                 "error",
@@ -721,10 +723,10 @@ def load_app_config() -> AppConfig:
     )
     translation_memory_enabled = _as_bool(config.get('translation_memory_enabled', True), default=True)
     config_dir = os.path.dirname(os.path.abspath(config_file_path))
-    target_project_root = str(config.get('target_project_root') or '/path/to/default/repo/root')
+    target_project_root = os.path.expanduser(str(config.get('target_project_root') or '/path/to/default/repo/root'))
     if not os.path.isabs(target_project_root):
         target_project_root = os.path.abspath(os.path.join(config_dir, target_project_root))
-    input_folder = str(config.get('input_folder') or '/path/to/default/input_folder')
+    input_folder = os.path.expanduser(str(config.get('input_folder') or '/path/to/default/input_folder'))
     if not os.path.isabs(input_folder):
         input_folder = os.path.abspath(os.path.join(target_project_root, input_folder))
     glossary_file_path = _resolve_config_relative_path(

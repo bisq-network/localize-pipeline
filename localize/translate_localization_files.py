@@ -229,16 +229,23 @@ def load_translation_key_ledger(ledger_file_path: str) -> Dict[str, Dict[str, Di
     def _backup_and_handle_failure(reason: str) -> Dict[str, Dict[str, Dict[str, str]]]:
         timestamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
         backup_path = f"{ledger_file_path}.corrupt-{timestamp}"
+        backed_up = False
         try:
             os.replace(ledger_file_path, backup_path)
+            backed_up = True
         except OSError:
             logger.exception("Failed to back up invalid translation key ledger '%s'.", ledger_file_path)
             if not allow_reset:
                 raise RuntimeError(f"Failed to load translation key ledger '{ledger_file_path}': {reason}")
-        message = (
-            f"Translation key ledger '{ledger_file_path}' is invalid and was backed up to "
-            f"'{backup_path}': {reason}"
-        )
+        if backed_up:
+            message = (
+                f"Translation key ledger '{ledger_file_path}' is invalid and was backed up to "
+                f"'{backup_path}': {reason}"
+            )
+        else:
+            message = (
+                f"Translation key ledger '{ledger_file_path}' is invalid and could not be backed up: {reason}"
+            )
         if allow_reset:
             logger.warning("%s. LOCALIZE_ALLOW_RESET_LEDGER is set; continuing with an empty ledger.", message)
             return {}
@@ -268,18 +275,12 @@ def save_translation_key_ledger(
         logger.info("[Dry Run] Skipping write of translation key ledger.")
         return
     try:
-        parent_dir = os.path.dirname(ledger_file_path)
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
         payload = {
             "version": 1,
             "updated_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace('+00:00', 'Z'),
             "files": key_ledger
         }
-        temp_path = f"{ledger_file_path}.tmp"
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
-        os.replace(temp_path, ledger_file_path)
+        write_json_atomic(ledger_file_path, payload, sort_keys=True)
     except Exception as exc:
         logger.exception("Failed to save translation key ledger to '%s'.", ledger_file_path)
         raise RuntimeError(f"Failed to save translation key ledger '{ledger_file_path}'.") from exc
