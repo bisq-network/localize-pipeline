@@ -93,13 +93,20 @@ runs:
   using: "composite"
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: ${{ inputs.python-version }}
 
     - name: Install pipeline dependencies
       shell: bash
-      run: pip install -r "${{ github.action_path }}/requirements.txt"
+      run: |
+        set -euo pipefail
+        LOCALIZE_ACTION_VENV="${RUNNER_TEMP:-/tmp}/localize-pipeline-venv"
+        python -m venv "$LOCALIZE_ACTION_VENV"
+        "$LOCALIZE_ACTION_VENV/bin/python" -m pip install --upgrade pip
+        "$LOCALIZE_ACTION_VENV/bin/python" -m pip install -r "${{ github.action_path }}/requirements.txt"
+        echo "$LOCALIZE_ACTION_VENV/bin" >> "$GITHUB_PATH"
+        echo "LOCALIZE_ACTION_VENV=$LOCALIZE_ACTION_VENV" >> "$GITHUB_ENV"
 
     - name: Install plugin dependencies
       if: ${{ inputs.plugin-install-command != '' }}
@@ -177,6 +184,10 @@ runs:
         else
           export TRANSLATION_DIFF_BASE="$DIFF_BASE_INPUT"
         fi
+        if [ -n "${TRANSLATION_DIFF_BASE:-}" ] && ! git cat-file -e "${TRANSLATION_DIFF_BASE}^{commit}" 2>/dev/null; then
+          echo "::error::TRANSLATION_DIFF_BASE '$TRANSLATION_DIFF_BASE' is not reachable. Use fetch-depth: 0 or pass a reachable diff-base input."
+          exit 1
+        fi
         python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"
 
     - name: Open pull request
@@ -204,12 +215,16 @@ runs:
         fi
 
         signing_key_file=""
-        cleanup_signing_key() {
+        git_askpass_file=""
+        cleanup_pr_step() {
           if [ -n "${signing_key_file:-}" ]; then
             rm -f "$signing_key_file"
           fi
+          if [ -n "${git_askpass_file:-}" ]; then
+            rm -f "$git_askpass_file"
+          fi
         }
-        trap cleanup_signing_key EXIT
+        trap cleanup_pr_step EXIT
 
         commit_args=(-m "$COMMIT_MSG")
         case "${COMMIT_SIGNING_METHOD:-none}" in
@@ -300,6 +315,20 @@ runs:
           echo "::error::github-token must have contents:write permission to push '$branch'."
           exit 1
         fi
+
+        git_askpass_file="${RUNNER_TEMP:-/tmp}/localize-git-askpass"
+        cat > "$git_askpass_file" <<'EOF'
+        #!/bin/sh
+        case "$1" in
+          *Username*) printf '%s\n' x-access-token ;;
+          *Password*) printf '%s\n' "${GH_TOKEN:?}" ;;
+          *) printf '\n' ;;
+        esac
+        EOF
+        chmod 700 "$git_askpass_file"
+        export GIT_ASKPASS="$git_askpass_file"
+        export GIT_TERMINAL_PROMPT=0
+        git remote set-url --push origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
         body_file="${RUNNER_TEMP:-/tmp}/localize-pr-body.md"
         LOCALIZE_PR_BODY_FILE="$body_file" python - <<'PY'
@@ -416,7 +445,7 @@ runs:
 
     - name: Upload run summaries
       if: ${{ always() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: localize-pipeline-summaries
         path: |

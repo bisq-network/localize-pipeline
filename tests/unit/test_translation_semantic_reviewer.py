@@ -256,6 +256,46 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
 
 
 @pytest.mark.asyncio
+async def test_semantic_reviewer_omits_json_mode_when_provider_does_not_support_it():
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content='```json\n{"findings": []}\n```')
+            )
+        ]
+    )
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.capabilities_for_model.return_value = SimpleNamespace(
+        supports_response_format=False
+    )
+    changes = [
+        TranslationChange(
+            file="resources/mobile_es.properties",
+            locale_code="es",
+            key="mobile.clear",
+            source_value="Clear network address: {0}",
+            old_value=None,
+            new_value="Borrar dirección de red: {0}",
+        )
+    ]
+
+    findings = await review_translation_changes(
+        client=object(),
+        model="anthropic:claude",
+        target_language="Spanish",
+        changes=changes,
+        style_rules=[],
+        brand_glossary=[],
+        model_provider=provider,
+    )
+
+    assert findings == []
+    kwargs = provider.create_chat_completion.await_args.kwargs
+    assert "response_format" not in kwargs
+
+
+@pytest.mark.asyncio
 async def test_semantic_reviewer_invalid_json_degrades_to_no_findings():
     provider = MagicMock()
     provider.create_chat_completion = AsyncMock(
@@ -396,6 +436,133 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
     assert json.loads(validation_summary_path.read_text(encoding="utf-8"))[
         "semantic_review_findings"
     ] == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_accepts_string_supported_locales(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: gpt-4o",
+                "supported_locales:",
+                "  - de",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = MagicMock()
+    provider.client = object()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"findings": []})))]
+        )
+    )
+
+    with (
+        patch("localize.translation_semantic_reviewer.get_staged_diff", return_value="fake diff"),
+        patch(
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            return_value=[
+                TranslationChange(
+                    file="resources/messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ],
+        ) as iter_changes,
+        patch("localize.translation_semantic_reviewer.create_model_provider", return_value=provider),
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                "resources",
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+            ]
+        )
+
+    assert exit_code == 0
+    assert iter_changes.call_args.kwargs["locale_codes"] == ["de"]
+    provider.create_chat_completion.assert_awaited_once()
+    summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
+    assert summary["semantic_review"] == {
+        "attempted": True,
+        "failed_batches": 0,
+        "failed_locales": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_records_failed_batches(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: gpt-4o",
+                "supported_locales:",
+                "  - de",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider = MagicMock()
+    provider.client = object()
+    provider.create_chat_completion = AsyncMock(side_effect=RuntimeError("review unavailable"))
+
+    with (
+        patch("localize.translation_semantic_reviewer.get_staged_diff", return_value="fake diff"),
+        patch(
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            return_value=[
+                TranslationChange(
+                    file="resources/messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ],
+        ),
+        patch("localize.translation_semantic_reviewer.create_model_provider", return_value=provider),
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                "resources",
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+            ]
+        )
+
+    assert exit_code == 0
+    summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
+    assert summary["semantic_review"]["failed_batches"] == 1
+    assert summary["pipeline_warnings"][0]["scope"] == "run"
 
 
 @pytest.mark.asyncio

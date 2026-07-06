@@ -824,3 +824,55 @@ def test_quality_gate_markdown_contains_validation_summary():
     assert "Semantic QA Examples" in markdown
     assert "Reverted keys" in markdown
     assert "Control-character findings" in markdown
+
+
+def test_quality_gate_markdown_escapes_semantic_review_text():
+    report = {
+        "blocking": True,
+        "source_identical": {
+            "changed_entries_count": 0,
+            "checked_entries_count": 0,
+            "source_identical_count": 0,
+            "expected_source_identical_count": 0,
+            "unexpected_source_identical_count": 0,
+            "unexpected_source_identical_ratio": 0.0,
+            "examples": [],
+        },
+        "semantic_qa": {
+            "findings_count": 1,
+            "errors_count": 1,
+            "warnings_count": 0,
+            "source_breakdown": {
+                "ai_review": {
+                    "findings_count": 1,
+                    "errors_count": 1,
+                    "warnings_count": 0,
+                    "examples": [
+                        {
+                            "file": "mobile_de.properties",
+                            "key": "bad`key",
+                            "value": "value`\r\n**Status:** Passed",
+                            "reason": "reason`\r\n### Spoofed",
+                            "suggested_value": "fix`",
+                        }
+                    ],
+                },
+                "rules_and_heuristics": {"findings_count": 0, "examples": []},
+            },
+            "examples": [],
+        },
+        "validation": {
+            "reverted_keys_count": 0,
+            "control_character_findings_count": 0,
+            "placeholder_failures_count": 0,
+        },
+        "pipeline_warnings_count": 0,
+        "pipeline_warnings": [],
+        "blocking_reasons": ["Semantic translation QA found blocking issues."],
+    }
+
+    markdown = render_quality_gate_markdown(report)
+
+    assert "reason\\`\\r\\n### Spoofed" in markdown
+    assert "value\\`\\r\\n**Status:** Passed" in markdown
+    assert "`bad\\`key`" in markdown

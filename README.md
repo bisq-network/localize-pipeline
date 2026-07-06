@@ -87,7 +87,9 @@ localize run --config config.yaml
 ```
 
 Set `OPENAI_API_KEY` for OpenAI-backed runs, or set `api_base_url` in
-`config.yaml` for a local/OpenAI-compatible endpoint.
+`config.yaml` for a local/OpenAI-compatible endpoint. See
+[`docs/environment-variables.md`](docs/environment-variables.md) for the full
+Docker, local-runner, and Action environment reference.
 
 ## GitHub Action
 
@@ -108,7 +110,7 @@ jobs:
   translate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
       - uses: bisq-network/localize-pipeline@v0.1.6

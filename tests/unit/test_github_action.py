@@ -22,6 +22,15 @@ def test_action_description_is_marketplace_publishable(action):
     assert len(action["description"]) < 125
 
 
+def test_action_uses_sha_pinned_dependencies(action):
+    rendered = ACTION.read_text(encoding="utf-8")
+
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in rendered
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in rendered
+    assert "actions/setup-python@v" not in rendered
+    assert "actions/upload-artifact@v" not in rendered
+
+
 def test_supports_byo_key_and_local_endpoint(action):
     inputs = action["inputs"]
     assert "openai-api-key" in inputs
@@ -68,6 +77,18 @@ def test_action_runs_preflight_check_before_translation(action):
     assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
 
 
+def test_action_installs_dependencies_in_private_virtualenv(action):
+    dependency_step = next(
+        step for step in action["runs"]["steps"] if step["name"] == "Install pipeline dependencies"
+    )
+    run = dependency_step["run"]
+
+    assert "python -m venv \"$LOCALIZE_ACTION_VENV\"" in run
+    assert '"$LOCALIZE_ACTION_VENV/bin/python" -m pip install -r' in run
+    assert "GITHUB_PATH" in run
+    assert "pip install -r" not in run.replace('"$LOCALIZE_ACTION_VENV/bin/python" -m pip install -r', "")
+
+
 def test_action_has_first_class_plugin_install_and_module_inputs(action):
     inputs = action["inputs"]
     assert inputs["plugin-modules"]["default"] == ""
@@ -98,6 +119,15 @@ def test_incremental_by_default_via_diff_base(action):
     assert "TRANSLATION_DIFF_BASE" in rendered
 
 
+def test_diff_base_is_validated_before_pipeline_runs(action):
+    rendered = ACTION.read_text(encoding="utf-8")
+
+    assert 'git cat-file -e "${TRANSLATION_DIFF_BASE}^{commit}"' in rendered
+    assert "fetch-depth: 0" in rendered
+    assert "TRANSLATION_DIFF_BASE" in rendered
+    assert "exit 1" in rendered
+
+
 def test_no_user_input_interpolated_into_run_scripts(action):
     """Guard against script injection: inputs must reach run: via env, not ${{ }}."""
     for step in action["runs"]["steps"]:
@@ -109,6 +139,10 @@ def test_no_user_input_interpolated_into_run_scripts(action):
 def test_opens_pr_with_gh_cli(action):
     rendered = ACTION.read_text(encoding="utf-8")
     assert "gh pr create" in rendered
+    assert "GIT_ASKPASS" in rendered
+    assert "git remote set-url --push origin" in rendered
+    assert "https://github.com/${GITHUB_REPOSITORY}.git" in rendered
+    assert "x-access-token" in rendered
     # The PR step is gated on the open-pr input.
     steps = action["runs"]["steps"]
     assert any("open-pr" in str(s.get("if", "")) for s in steps)
@@ -135,7 +169,7 @@ def test_open_pr_step_supports_optional_ssh_commit_signing(action):
     assert "git config user.signingkey \"$signing_key_file\"" in run
     assert "git config commit.gpgsign true" in run
     assert "commit_args=(-S -m \"$COMMIT_MSG\")" in run
-    assert "trap cleanup_signing_key EXIT" in run
+    assert "trap cleanup_pr_step EXIT" in run
     assert "git config user.name \"$GIT_USER_NAME\"" in run
     assert "git config user.email \"$GIT_USER_EMAIL\"" in run
 
@@ -166,7 +200,7 @@ def test_generated_pr_uses_summary_body_and_uploads_artifacts(action):
 
     upload = next(step for step in action["runs"]["steps"] if step["name"] == "Upload run summaries")
     assert upload["if"] == "${{ always() }}"
-    assert upload["uses"] == "actions/upload-artifact@v4"
+    assert upload["uses"] == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     assert upload["with"]["name"] == "localize-pipeline-summaries"
     paths = upload["with"]["path"]
     assert "translation_summary.json" in paths

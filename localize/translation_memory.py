@@ -74,15 +74,37 @@ class TranslationMemory:
 
     entries: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
-    def lookup(self, source_text: str, *, locale: str, format_id: str) -> str | None:
+    def lookup(
+        self,
+        source_text: str,
+        *,
+        locale: str,
+        format_id: str,
+        context_fingerprint: str | None = None,
+    ) -> str | None:
         """Return a reusable translation, or None when absent/ambiguous."""
         entry = self.entries.get(_entry_key(source_text, locale, format_id))
         if not entry or entry.get("status") == "conflict":
             return None
+        entry_fingerprint = entry.get("context_fingerprint")
+        if (
+            context_fingerprint is not None
+            and entry_fingerprint is not None
+            and entry_fingerprint != context_fingerprint
+        ):
+            return None
         target = entry.get("target")
         return str(target) if target is not None else None
 
-    def record(self, source_text: str, target_text: str, *, locale: str, format_id: str) -> None:
+    def record(
+        self,
+        source_text: str,
+        target_text: str,
+        *,
+        locale: str,
+        format_id: str,
+        context_fingerprint: str | None = None,
+    ) -> None:
         """Record one approved translation, marking conflicting targets unsafe."""
         key = _entry_key(source_text, locale, format_id)
         source_hash = memory_source_hash(source_text)
@@ -96,7 +118,12 @@ class TranslationMemory:
                 "target": target_text,
                 "status": "active",
             }
+            if context_fingerprint is not None:
+                self.entries[key]["context_fingerprint"] = context_fingerprint
             return
+
+        if context_fingerprint is not None:
+            existing["context_fingerprint"] = context_fingerprint
 
         if existing.get("status") == "conflict":
             targets = set(str(target) for target in existing.get("targets", []))
@@ -116,6 +143,28 @@ class TranslationMemory:
         existing["status"] = "conflict"
         existing["targets"] = sorted({previous_target, target_text} - {""})
         existing.setdefault("source", source_text)
+
+    def promote(
+        self,
+        source_text: str,
+        target_text: str,
+        *,
+        locale: str,
+        format_id: str,
+        context_fingerprint: str | None = None,
+    ) -> None:
+        """Overwrite one memory entry with a human-reviewed active target."""
+        key = _entry_key(source_text, locale, format_id)
+        self.entries[key] = {
+            "source": source_text,
+            "source_hash": memory_source_hash(source_text),
+            "locale": locale,
+            "format_id": format_id,
+            "target": target_text,
+            "status": "active",
+        }
+        if context_fingerprint is not None:
+            self.entries[key]["context_fingerprint"] = context_fingerprint
 
     def stats(self) -> TranslationMemoryStats:
         """Return high-level counts for observability and onboarding checks."""
@@ -212,7 +261,7 @@ def _entries_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
 
 
 def _fill_missing_metadata(target: Dict[str, Any], source: Mapping[str, Any]) -> None:
-    for key in ("source", "source_hash", "locale", "format_id"):
+    for key in ("source", "source_hash", "locale", "format_id", "context_fingerprint"):
         if key not in target and key in source:
             target[key] = source[key]
 

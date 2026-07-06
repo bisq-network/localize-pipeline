@@ -230,19 +230,12 @@ def reassemble_file(parsed_lines: List[Dict]) -> str:
                 lines.append(item['original_entry_text'])
                 continue
 
-            # Preserve original formatting if possible
-            if '\\n' in item.get('original_value', ''):
-                # Use escaped newline characters
+            # AI output can contain real newlines. Serializing those as Java
+            # continuation lines silently removes the logical line break when
+            # java.util.Properties reads the file, so changed values use \n.
+            if '\n' in value:
                 value = value.replace('\n', '\\n')
-                line = f"{raw_key}{separator_group}{value}\n"
-            elif '\n' in value or item.get('was_multiline', False):
-                # Handle multiline values with line continuations
-                lines_value = value.split('\n')
-                formatted_value = '\\\n'.join(lines_value)
-                line = (f"{raw_key}{separator_group}"
-                        f"{formatted_value}\n")
-            else:
-                line = f"{raw_key}{separator_group}{value}\n"
+            line = f"{raw_key}{separator_group}{value}\n"
             lines.append(line)
         else:
             lines.append(item['content'])

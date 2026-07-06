@@ -52,7 +52,7 @@ Rapid revocation is critical if a credential is compromised.
     1.  Remove the compromised GPG public key from the committer's GitHub account.
     2.  Generate a new GPG key pair.
     3.  Replace the key files in the host's `secrets/gpg_bot_key/` directory.
-    4.  Update `GIT_SIGNING_KEY` in `docker/.env`.
+    4.  Upload the replacement public key to the GitHub account associated with `GITHUB_TOKEN`.
     5.  The new key will be imported on the next container run. No image rebuild is required.
 
 3.  **API Token Compromise (`OPENAI_API_KEY`, etc.)**:
@@ -69,4 +69,4 @@ To proactively enforce security, a GitHub Actions workflow (`.github/workflows/b
 2.  **Dependency Scanning (`pip-audit`)**: Audits `requirements.txt` against a database of known vulnerabilities in Python packages.
 3.  **Docker Image Vulnerability Scanning (`Trivy`)**: Scans the final built image for OS and library vulnerabilities.
 
-If a high-severity vulnerability is found, the workflow fails, preventing the merge of insecure code. 
+If a high-severity vulnerability is found, the workflow fails, preventing the merge of insecure code.

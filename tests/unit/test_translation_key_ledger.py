@@ -3,6 +3,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from localize.translate_localization_files import (
     build_file_key_ledger,
     compute_ledger_hash,
@@ -34,6 +36,28 @@ def test_translation_key_ledger_roundtrip():
         loaded = load_translation_key_ledger(str(ledger_path))
 
         assert loaded == key_ledger
+
+
+def test_load_translation_key_ledger_corrupt_file_fails_closed(tmp_path):
+    ledger_path = tmp_path / "ledger.json"
+    ledger_path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="LOCALIZE_ALLOW_RESET_LEDGER"):
+        load_translation_key_ledger(str(ledger_path))
+
+    assert not ledger_path.exists()
+    assert list(tmp_path.glob("ledger.json.corrupt-*"))
+
+
+def test_load_translation_key_ledger_corrupt_file_can_be_reset(monkeypatch, tmp_path):
+    ledger_path = tmp_path / "ledger.json"
+    ledger_path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("LOCALIZE_ALLOW_RESET_LEDGER", "true")
+
+    assert load_translation_key_ledger(str(ledger_path)) == {}
+
+    assert not ledger_path.exists()
+    assert list(tmp_path.glob("ledger.json.corrupt-*"))
 
 
 def test_translation_key_ledger_timestamp_uses_utc_z_suffix():

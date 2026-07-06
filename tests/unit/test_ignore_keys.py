@@ -32,6 +32,13 @@ def test_properties_keys_use_the_adapter_key_verbatim():
     assert not is_ignored_key("screen.title", patterns)
 
 
+def test_plain_ignore_pattern_is_exact_not_substring():
+    patterns = compile_ignore_key_patterns(["id"])
+
+    assert is_ignored_key("id", patterns)
+    assert not is_ignored_key("mobile.id.label", patterns)
+
+
 def test_empty_patterns_are_noop():
     assert compile_ignore_key_patterns([]) == []
     assert not is_ignored_key("/#1", [])

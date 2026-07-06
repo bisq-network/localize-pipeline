@@ -4,11 +4,21 @@
 
 # Python
 venv/
+.venv/
 *.pyc
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 *.egg-info/
-.env
+
+# Environment files
+.env*
+!.env.example
+docker/.env*
+!docker/.env.example
 
 # IDE
 .idea/
@@ -31,8 +41,16 @@ build/
 
 # Local config
 config.yaml
-docker/.env*
+config-mobile.yaml
+docker/config.docker.mobile.yaml
+docker/docker-compose.override*.yml
+docker/docker-compose.override*.yaml
 secrets/
+CLAUDE.md
+.claude/
+claudedocs/
+docs/llm/
+docs/requirements/
 
 # Documentation & Tests (if not needed in image)
 # docs/

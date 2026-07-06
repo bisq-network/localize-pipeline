@@ -182,7 +182,7 @@ def _matching_translation_keys(
         return candidates
     if expected_value is None and key_hint in translations:
         return [key_hint]
-    return []
+    return candidates
 
 
 def _extract_json_added_value_from_diff_line(diff_line: str) -> Optional[str]:
@@ -249,69 +249,18 @@ def iter_translation_changes_from_diff(
     pending_added_line: Optional[str] = None
     pending_removed_line: Optional[str] = None
 
-    for line in diff_text.splitlines():
-        if line.startswith("+++ /dev/null"):
-            current_file = None
-            removed_values = {}
-            pending_added_line = None
-            pending_removed_line = None
-            continue
-        if line.startswith("+++ b/"):
-            current_file = line[len("+++ b/") :]
-            removed_values = {}
-            pending_added_line = None
-            pending_removed_line = None
-            continue
-        if not current_file or not localization_format.is_supported_file(current_file):
-            continue
-        rel_to_input = _relpath(str(repo_root_path / current_file), str(input_folder_path))
-        if locale_codes and not localization_layout.is_target_file(
-            rel_to_input,
-            locale_codes,
-            localization_format,
-        ):
-            continue
-        if line.startswith("---"):
-            continue
-        if line.startswith("-"):
-            removed_line = line[1:]
-            if localization_format.id == JAVA_PROPERTIES_FORMAT.id:
-                pending_removed_line = (
-                    _append_properties_continuation(pending_removed_line, removed_line)
-                    if pending_removed_line is not None
-                    else removed_line
-                )
-                if _has_unescaped_trailing_backslash(pending_removed_line):
-                    continue
-                removed_line = pending_removed_line
-                pending_removed_line = None
-            for key, value in _extract_changed_entries(removed_line, localization_format, None):
-                removed_values[key] = value
-            continue
-        if not line.startswith("+"):
-            continue
-        added_line = line[1:]
-        if localization_format.id == JAVA_PROPERTIES_FORMAT.id:
-            pending_added_line = (
-                _append_properties_continuation(pending_added_line, added_line)
-                if pending_added_line is not None
-                else added_line
-            )
-            if _has_unescaped_trailing_backslash(pending_added_line):
-                continue
-            added_line = pending_added_line
-            pending_added_line = None
-
-        changed_path = repo_root_path / current_file
+    def changes_for_added_line(added_line: str, file_path: str) -> List[TranslationChange]:
+        rel_to_input = _relpath(str(repo_root_path / file_path), str(input_folder_path))
+        changed_path = repo_root_path / file_path
         target_translations: Optional[Mapping[str, str]] = None
         if localization_format.id != JAVA_PROPERTIES_FORMAT.id:
             if not changed_path.exists():
-                continue
+                return []
             if changed_path not in target_cache:
                 try:
                     _, target_cache[changed_path] = adapter.parse_file(str(changed_path))
                 except Exception:
-                    continue
+                    return []
             target_translations = target_cache[changed_path]
 
         changed_entries = _extract_changed_entries(
@@ -320,7 +269,7 @@ def iter_translation_changes_from_diff(
             target_translations,
         )
         if not changed_entries:
-            continue
+            return []
         locale_code = localization_layout.extract_locale(rel_to_input, locale_codes, localization_format) or ""
         source_translations: Dict[str, str] = {}
 
@@ -339,8 +288,8 @@ def iter_translation_changes_from_diff(
                         source_cache[source_path] = {}
                 source_translations = source_cache[source_path]
 
-        for key, target_value in changed_entries:
-            yield TranslationChange(
+        return [
+            TranslationChange(
                 file=_relpath(str(changed_path), str(input_folder_path)),
                 locale_code=locale_code,
                 key=key,
@@ -348,6 +297,99 @@ def iter_translation_changes_from_diff(
                 old_value=removed_values.pop(key, None),
                 new_value=target_value,
             )
+            for key, target_value in changed_entries
+        ]
+
+    def flush_pending_added_line() -> List[TranslationChange]:
+        nonlocal pending_added_line
+        if not current_file or pending_added_line is None:
+            pending_added_line = None
+            return []
+        added_line = pending_added_line
+        if _has_unescaped_trailing_backslash(added_line):
+            added_line = added_line[:-1].rstrip()
+        pending_added_line = None
+        return changes_for_added_line(added_line, current_file)
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            for change in flush_pending_added_line():
+                yield change
+            current_file = None
+            removed_values = {}
+            pending_removed_line = None
+            continue
+        if line.startswith("+++ /dev/null"):
+            for change in flush_pending_added_line():
+                yield change
+            current_file = None
+            removed_values = {}
+            pending_removed_line = None
+            continue
+        if line.startswith("+++ b/"):
+            for change in flush_pending_added_line():
+                yield change
+            current_file = line[len("+++ b/") :]
+            removed_values = {}
+            pending_removed_line = None
+            continue
+        if not current_file or not localization_format.is_supported_file(current_file):
+            continue
+        rel_to_input = _relpath(str(repo_root_path / current_file), str(input_folder_path))
+        if locale_codes and not localization_layout.is_target_file(
+            rel_to_input,
+            locale_codes,
+            localization_format,
+        ):
+            continue
+        if line.startswith("---"):
+            for change in flush_pending_added_line():
+                yield change
+            pending_removed_line = None
+            continue
+        if line.startswith("@@"):
+            for change in flush_pending_added_line():
+                yield change
+            pending_removed_line = None
+            continue
+        if line.startswith("-"):
+            for change in flush_pending_added_line():
+                yield change
+            removed_line = line[1:]
+            if localization_format.id == JAVA_PROPERTIES_FORMAT.id:
+                pending_removed_line = (
+                    _append_properties_continuation(pending_removed_line, removed_line)
+                    if pending_removed_line is not None
+                    else removed_line
+                )
+                if _has_unescaped_trailing_backslash(pending_removed_line):
+                    continue
+                removed_line = pending_removed_line
+                pending_removed_line = None
+            for key, value in _extract_changed_entries(removed_line, localization_format, None):
+                removed_values[key] = value
+            continue
+        if not line.startswith("+"):
+            for change in flush_pending_added_line():
+                yield change
+            pending_removed_line = None
+            continue
+        added_line = line[1:]
+        if localization_format.id == JAVA_PROPERTIES_FORMAT.id:
+            pending_added_line = (
+                _append_properties_continuation(pending_added_line, added_line)
+                if pending_added_line is not None
+                else added_line
+            )
+            if _has_unescaped_trailing_backslash(pending_added_line):
+                continue
+            added_line = pending_added_line
+            pending_added_line = None
+
+        for change in changes_for_added_line(added_line, current_file):
+            yield change
+    for change in flush_pending_added_line():
+        yield change
 
 
 def load_semantic_rules(raw_rules: Iterable[Dict[str, Any]]) -> List[SemanticRule]:

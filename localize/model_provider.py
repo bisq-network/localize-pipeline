@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import re
 from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any, Dict, Optional, Protocol, Sequence
@@ -247,9 +248,12 @@ class OpenAICompatibleProvider:
             encoding = tiktoken.encoding_for_model(tokenizer_model_name)
         except Exception:
             try:
-                encoding = tiktoken.get_encoding("gpt2")
+                encoding = tiktoken.get_encoding("o200k_base")
             except Exception:
-                return len(text.split())
+                try:
+                    encoding = tiktoken.get_encoding("gpt2")
+                except Exception:
+                    return len(text.split())
 
         try:
             return len(encoding.encode(text))
@@ -301,6 +305,24 @@ class OpenAICompatibleProvider:
             supports_response_format=True,
             supports_completion_token_limit=True,
         )
+
+    def _status_code_from_exception(self, exc: Any) -> Optional[int]:
+        if exc is None:
+            return None
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+        return status_code if isinstance(status_code, int) else None
+
+    def _message_status_code(self, exc: Exception) -> Optional[int]:
+        match = re.search(r"(?:Error code|status(?: code)?):\s*(\d{3})", str(exc), re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
 
 class AiSuiteProvider(OpenAICompatibleProvider):
@@ -365,11 +387,13 @@ class AiSuiteProvider(OpenAICompatibleProvider):
     def is_retryable_error(self, exc: Exception) -> bool:
         if super().is_retryable_error(exc):
             return True
-        status_code = getattr(exc, "status_code", None)
-        if status_code is None:
-            response = getattr(exc, "response", None)
-            status_code = getattr(response, "status_code", None)
-        if isinstance(status_code, int):
+        status_code = (
+            self._status_code_from_exception(exc)
+            or self._status_code_from_exception(getattr(exc, "__cause__", None))
+            or self._status_code_from_exception(getattr(exc, "__context__", None))
+            or self._message_status_code(exc)
+        )
+        if status_code is not None:
             if status_code == 429:
                 return True
             if 400 <= status_code < 500:

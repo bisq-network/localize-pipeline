@@ -1,6 +1,7 @@
 import importlib
 import os
 import re
+import subprocess
 from pathlib import Path
 
 # The session autouse fixture patches this module by name.
@@ -18,6 +19,55 @@ def test_default_max_files_per_pr_matches_coderabbit_review_limit():
 
     assert match is not None
     assert int(match.group(1)) == 150
+
+
+def test_publish_translation_changes_runs_under_set_u(tmp_path):
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    start = script.index("publish_translation_changes() {")
+    end = script.index("\npublish_translation_changes\n", start)
+    function_text = script[start:end]
+    harness = f"""
+set -euo pipefail
+log() {{ :; }}
+record_pipeline_event() {{ :; }}
+command_exists() {{ return 1; }}
+collect_changed_translation_files() {{ printf '%s\\n' "$1/messages_de.properties"; }}
+stage_and_submit_batch() {{ return 0; }}
+mapfile() {{
+  local array_name
+  if [ "${{1:-}}" = "-t" ]; then
+    shift
+  fi
+  array_name="$1"
+  eval "$array_name=()"
+  local line
+  while IFS= read -r line; do
+    eval "$array_name+=(\\"\\$line\\")"
+  done
+}}
+git() {{
+  case "$*" in
+    "config user.name "*) return 0 ;;
+    "config user.email "*) return 0 ;;
+    "remote") printf '%s\\n' origin ;;
+    "remote get-url origin") printf '%s\\n' git@github.com:owner/repo.git ;;
+    *) return 0 ;;
+  esac
+}}
+{function_text}
+APP_ROOT={str(tmp_path)!r}
+TARGET_PROJECT_ROOT={str(tmp_path)!r}
+ABSOLUTE_INPUT_FOLDER={str(tmp_path / "resources")!r}
+INPUT_FOLDER=resources
+DRY_RUN=false
+MAX_FILES_PER_PR=150
+TRANSLATION_BRANCH_PREFIX=translation-updates
+publish_translation_changes
+"""
+
+    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_max_files_per_pr_is_validated_before_batching():
@@ -71,8 +121,9 @@ def test_generated_prs_publish_translation_quality_gate_status():
 
     assert "localize.translation_quality_gate" in script
     assert "localize.translation_semantic_reviewer" in script
-    assert 'QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-changed}"' in script
-    assert '--audit-scope "$QUALITY_AUDIT_SCOPE"' in script
+    assert 'QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-}"' in script
+    assert 'if [ -n "$QUALITY_AUDIT_SCOPE" ]; then' in script
+    assert 'QUALITY_GATE_CMD+=(--audit-scope "$QUALITY_AUDIT_SCOPE")' in script
     assert "translation-quality-gate" in script
     assert 'status_repo="${FORK_OWNER}/${FORK_REPO_NAME_SHORT}"' in script
     assert 'gh api "repos/$status_repo/statuses/$commit_sha"' in script
@@ -113,6 +164,17 @@ def test_validation_summary_is_reset_before_translation_script_runs():
 
     assert reset_index < python_index
     assert '{"files":{},"pipeline_warnings":[]}' in script
+
+
+def test_localize_dry_run_env_overrides_shell_dry_run_config():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+
+    dry_run_index = script.index('DRY_RUN=$(get_config_value "dry_run" "$CONFIG_FILE")')
+    override_index = script.index('case "${LOCALIZE_DRY_RUN:-}" in')
+    publish_index = script.index('publish_translation_changes()')
+
+    assert dry_run_index < override_index < publish_index
+    assert "DRY_RUN=true" in script[override_index:publish_index]
 
 
 def test_smoke_only_mode_runs_before_pending_pr_guard():

@@ -156,6 +156,7 @@ async def test_process_translation_queue_reuses_translation_memory_without_model
                os.path.join(env['input_folder'], 'ledger.json')), \
          patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()), \
          patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock) as review:
+        review.return_value = {}
         await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
@@ -170,7 +171,7 @@ async def test_process_translation_queue_reuses_translation_memory_without_model
     assert "key.one=Wert eins" in final_content
     assert "key.two=Wert zwei" in final_content
     provider.create_chat_completion.assert_not_called()
-    review.assert_not_awaited()
+    review.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import tempfile
 import textwrap
 
+import pytest
 from openai import OpenAIError
 
 # Set a dummy API key before importing the main script.
@@ -25,6 +26,7 @@ from localize.translate_localization_files import (
     run_post_translation_validation,
     run_per_key_validation_with_summary,
     run_pre_translation_validation,
+    split_lint_findings,
     validate_paths,
     write_skipped_files_report,
     _handle_retry,
@@ -319,6 +321,22 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(should_retry)
         sleep.assert_awaited_once_with(1.5)
+
+    async def test_handle_retry_reads_retry_after_from_response_headers(self):
+        exc = OpenAIError("rate limited")
+        exc.response = type("Response", (), {"headers": {"Retry-After": "2.5"}})()
+
+        with patch("localize.translate_localization_files.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            should_retry = await _handle_retry(
+                attempt=1,
+                max_retries=2,
+                base_delay=1,
+                key="key.one",
+                api_exc=exc,
+            )
+
+        self.assertTrue(should_retry)
+        sleep.assert_awaited_once_with(2.5)
 
     def test_extract_texts_to_translate_logic(self):
         """Tests the logic of `extract_texts_to_translate`."""
@@ -694,12 +712,58 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
         filename = "bad_placeholders.properties"
         self.assertFalse(run_post_translation_validation(final_content, source_translations, filename))
 
+    def test_post_translation_validation_ignores_unchanged_placeholder_mismatch(self):
+        final_content = "legacy=Legacy text\nnew.key=Neuer Wert"
+        source_translations = {
+            "legacy": "Legacy text {0}",
+            "new.key": "New value",
+        }
+        filename = "legacy_bad_placeholders.properties"
+
+        self.assertTrue(
+            run_post_translation_validation(
+                final_content,
+                source_translations,
+                filename,
+                changed_keys_for_run={"new.key"},
+            )
+        )
+        self.assertFalse(
+            run_post_translation_validation(
+                final_content,
+                source_translations,
+                filename,
+                changed_keys_for_run={"legacy"},
+            )
+        )
+
     def test_post_translation_validation_fails_on_mojibake(self):
         """Tests that mojibake is caught by post-translation validation."""
         final_content = "key.one=This is verfÃ¼gbar" # Mojibake
         source_translations = {"key.one": "This is available"}
         filename = "mojibake_file.properties"
         self.assertFalse(run_post_translation_validation(final_content, source_translations, filename))
+
+    def test_split_lint_findings_keeps_warnings_non_blocking(self):
+        errors, warnings = split_lint_findings(
+            [
+                "Linter Warning: Unknown escape sequence in value for key 'x'.",
+                "Linter Error: Disallowed control character artifact.",
+            ]
+        )
+
+        self.assertEqual(errors, ["Linter Error: Disallowed control character artifact."])
+        self.assertEqual(warnings, ["Linter Warning: Unknown escape sequence in value for key 'x'."])
+
+    def test_per_key_validation_reverts_empty_translation(self):
+        valid, summary = run_per_key_validation_with_summary(
+            {"key.one": ""},
+            {"key.one": "Source text"},
+            "empty.properties",
+        )
+
+        self.assertEqual(valid["key.one"], "Source text")
+        self.assertEqual(summary["empty_target_keys"], ["key.one"])
 
 
 class TestSourceFilenameExtraction(unittest.TestCase):
@@ -985,6 +1049,23 @@ class TestFileDetectionLogic(unittest.TestCase):
 
         changed_basenames = [os.path.basename(f) for f in changed_files]
         self.assertIn("mobile_de.properties", changed_basenames)
+
+    @patch('subprocess.run')
+    def test_get_changed_files_diff_base_fails_closed_when_unreachable(self, mock_subprocess_run):
+        """An unreachable configured diff base should fail the run instead of returning no changes."""
+        import subprocess
+
+        from localize.translate_localization_files import get_changed_translation_files
+
+        mock_subprocess_run.side_effect = subprocess.CalledProcessError(
+            returncode=128,
+            cmd=["git", "cat-file", "-e", "origin/main^{commit}"],
+            stderr="fatal: Not a valid object name origin/main",
+        )
+
+        with patch.dict('os.environ', {'TRANSLATION_DIFF_BASE': 'origin/main'}):
+            with pytest.raises(RuntimeError, match="TRANSLATION_DIFF_BASE"):
+                get_changed_translation_files("/fake/repo/i18n/resources", "/fake/repo")
 
     @patch('subprocess.run')
     def test_get_changed_files_detects_hyphenated_locales(self, mock_subprocess_run):

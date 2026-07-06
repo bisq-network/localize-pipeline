@@ -250,3 +250,54 @@ def test_apply_translation_memory_splits_hits_from_model_work():
     assert plan.pending_line_indices == [4]
     assert plan.pending_keys == ["button.cancel"]
     assert plan.pending_positions == [1]
+
+
+def test_apply_translation_memory_ignores_source_identical_hits():
+    memory = TranslationMemory()
+    memory.record("Save", "Save", locale="de", format_id="json")
+
+    plan = apply_translation_memory(
+        texts_to_translate=["Save"],
+        indices=[3],
+        keys_to_translate=["button.save"],
+        memory=memory,
+        locale="de",
+        format_id="json",
+    )
+
+    assert plan.cached_results == []
+    assert plan.pending_texts == ["Save"]
+    assert plan.pending_positions == [0]
+
+
+def test_translation_memory_promote_overwrites_conflict():
+    memory = TranslationMemory()
+    memory.record("Open", "Offen", locale="de", format_id="java_properties")
+    memory.record("Open", "Öffnen", locale="de", format_id="java_properties")
+
+    assert memory.lookup("Open", locale="de", format_id="java_properties") is None
+
+    memory.promote("Open", "Öffnen", locale="de", format_id="java_properties")
+
+    assert memory.lookup("Open", locale="de", format_id="java_properties") == "Öffnen"
+
+
+def test_translation_memory_context_fingerprint_invalidates_stale_entries():
+    memory = TranslationMemory()
+    memory.record(
+        "Account",
+        "Konto",
+        locale="de",
+        format_id="java_properties",
+        context_fingerprint="old",
+    )
+
+    assert (
+        memory.lookup(
+            "Account",
+            locale="de",
+            format_id="java_properties",
+            context_fingerprint="new",
+        )
+        is None
+    )

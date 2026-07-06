@@ -7,6 +7,9 @@ from re import Pattern
 from typing import Iterable, Sequence
 
 
+_REGEX_META_CHARS = frozenset(".^$*+?{}[]\\|()")
+
+
 def compile_ignore_key_patterns(raw_patterns: Iterable[str | Pattern[str]] | None) -> list[Pattern[str]]:
     """Compile configured ignore-key regexes once at config load.
 
@@ -27,8 +30,11 @@ def compile_ignore_key_patterns(raw_patterns: Iterable[str | Pattern[str]] | Non
                 "ignore_key_patterns entries must be strings or compiled regex patterns; "
                 f"got {type(raw_pattern).__name__}."
             )
+        pattern_text = raw_pattern
+        if not any(char in _REGEX_META_CHARS for char in raw_pattern):
+            pattern_text = f"^{re.escape(raw_pattern)}$"
         try:
-            compiled.append(re.compile(raw_pattern))
+            compiled.append(re.compile(pattern_text))
         except re.error as exc:
             raise ValueError(
                 f"Invalid ignore_key_patterns regex {raw_pattern!r}: {exc}. "

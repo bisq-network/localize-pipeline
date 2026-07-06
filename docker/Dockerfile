@@ -82,10 +82,15 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 # Install Transifex CLI
 RUN TX_VERSION="v1.6.17" && \
     CONTAINER_ARCH=$(dpkg --print-architecture) && \
-    if [ "$CONTAINER_ARCH" = "amd64" ]; then TX_ARCH="linux-amd64"; \
-    elif [ "$CONTAINER_ARCH" = "arm64" ]; then TX_ARCH="linux-arm64"; \
+    if [ "$CONTAINER_ARCH" = "amd64" ]; then \
+        TX_ARCH="linux-amd64"; \
+        TX_SHA256="002dec5b9e71248a7e6a0808118e9da940205828d5a33ce88e04bb57a967164d"; \
+    elif [ "$CONTAINER_ARCH" = "arm64" ]; then \
+        TX_ARCH="linux-arm64"; \
+        TX_SHA256="c380ed9aece5d34316aa0fe2e5afa0633553656f98909f88cb72609e2fa13153"; \
     else echo "Unsupported architecture for Transifex CLI: $CONTAINER_ARCH"; exit 1; fi && \
     curl -Lf -O "https://github.com/transifex/cli/releases/download/${TX_VERSION}/tx-${TX_ARCH}.tar.gz" && \
+    echo "$TX_SHA256  tx-${TX_ARCH}.tar.gz" | sha256sum -c - && \
     tar -xzf "tx-${TX_ARCH}.tar.gz" -C /usr/local/bin tx && \
     rm "tx-${TX_ARCH}.tar.gz" && \
     tx --version

@@ -8,8 +8,8 @@ from collections import Counter
 from typing import Dict, Match, Tuple
 
 
-_HTML_TAG = r"</?[A-Za-z][^<>]*>"
-_PLACEHOLDER_TAG = r"<\{[A-Za-z0-9_][^{}\n]*\}[^<>]*>"
+_HTML_TAG = r"</?[A-Za-z][^<>\n]*>"
+_PLACEHOLDER_TAG = r"<\{[A-Za-z0-9_][^{}\n]*\}[^<>\n]*>"
 _I18NEXT_TOKEN = r"\{\{[^{}\n]+\}\}"
 _BRACE_TOKEN = r"\{[A-Za-z0-9_][^{}\n]*\}"
 _PYTHON_NAMED_PRINTF = r"%\([^)]+\)[#0 +\-]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[a-zA-Z]"

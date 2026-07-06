@@ -16,6 +16,15 @@ def test_health_check_alerts_do_not_write_to_stdout():
     assert 'tr -d "\'"' in script
 
 
+def test_health_check_does_not_put_github_token_on_curl_argv():
+    script = (REPO_ROOT / "scripts" / "check-translation-services.sh").read_text(encoding="utf-8")
+
+    assert '"Authorization: Bearer $GITHUB_TOKEN"' not in script
+    assert "mktemp" in script
+    assert "curl --config" in script
+    assert "chmod 600" in script
+
+
 def test_cron_cleanup_setup_uses_run_parts_safe_names_and_quoted_script():
     script = (REPO_ROOT / "scripts" / "setup-cron-cleanup.sh").read_text(encoding="utf-8")
 
@@ -71,11 +80,53 @@ def test_docker_compose_ci_override_uses_placeholder_secrets():
     assert (REPO_ROOT / "docker" / "ci-secrets" / "empty-deploy-key").exists()
 
 
+def test_docker_env_docs_use_live_variable_names():
+    env_example = (REPO_ROOT / "docker" / ".env.example").read_text(encoding="utf-8")
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    security = (REPO_ROOT / "SECURITY_STRATEGY.md").read_text(encoding="utf-8")
+
+    assert "GIT_SIGNING_KEY" not in env_example
+    assert "GIT_SIGNING_KEY" not in security
+    assert "APPUSER_UID/GID" in compose
+    assert "HOST_UID/GID" not in compose
+
+
 def test_dockerfile_uses_orchestration_default_command():
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
     assert "FROM ubuntu:24.04@sha256:" in dockerfile
     assert 'CMD ["/app/update-translations.sh"]' in dockerfile
+
+
+def test_dockerignore_excludes_local_configs_and_agent_scratch():
+    dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    for pattern in [
+        ".env*",
+        "!.env.example",
+        "docker/.env*",
+        "!docker/.env.example",
+        "docker/docker-compose.override*.yml",
+        "docker/docker-compose.override*.yaml",
+        "config.yaml",
+        "config-mobile.yaml",
+        "docker/config.docker.mobile.yaml",
+        "docs/llm/",
+        "docs/requirements/",
+        "CLAUDE.md",
+        ".claude/",
+        "claudedocs/",
+    ]:
+        assert pattern in dockerignore
+
+
+def test_dockerfile_verifies_transifex_cli_tarball_checksum():
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "TX_SHA256" in dockerfile
+    assert "002dec5b9e71248a7e6a0808118e9da940205828d5a33ce88e04bb57a967164d" in dockerfile
+    assert "c380ed9aece5d34316aa0fe2e5afa0633553656f98909f88cb72609e2fa13153" in dockerfile
+    assert 'echo "$TX_SHA256  tx-${TX_ARCH}.tar.gz" | sha256sum -c -' in dockerfile
 
 
 def test_run_local_translation_resolves_config_before_chdir():

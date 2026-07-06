@@ -506,7 +506,8 @@ def _filter_pipeline_warnings(
     return [
         warning
         for warning in warnings
-        if _file_matches_changed_files(str(warning.get("file", "")), changed_relative_files)
+        if warning.get("scope") == "run"
+        or _file_matches_changed_files(str(warning.get("file", "")), changed_relative_files)
     ]
 
 
@@ -671,6 +672,13 @@ def _truncate(value: str, limit: int = 100) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
+def _escape_markdown_report_text(value: Any, limit: int = 500) -> str:
+    text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    text = text.replace("`", "\\`")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def _semantic_breakdown_summary(semantic_qa: Mapping[str, Any]) -> str:
     breakdown = semantic_qa.get("source_breakdown")
     if not isinstance(breakdown, Mapping):
@@ -695,12 +703,14 @@ def _semantic_breakdown_summary(semantic_qa: Mapping[str, Any]) -> str:
 
 def _semantic_example_line(example: Mapping[str, Any]) -> str:
     line = (
-        f"- `{example['file']}` `{example['key']}`: "
-        f"{example['reason']} Value: `{_truncate(str(example['value']))}`"
+        f"- `{_escape_markdown_report_text(example['file'], 160)}` "
+        f"`{_escape_markdown_report_text(example['key'], 160)}`: "
+        f"{_escape_markdown_report_text(example['reason'])} "
+        f"Value: `{_escape_markdown_report_text(example['value'], 100)}`"
     )
     suggested_value = example.get("suggested_value")
     if suggested_value:
-        line += f" Suggested: `{_truncate(str(suggested_value))}`"
+        line += f" Suggested: `{_escape_markdown_report_text(suggested_value, 100)}`"
     return line
 
 
@@ -768,7 +778,9 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
         lines.append("")
         for example in source["examples"]:
             lines.append(
-                f"- `{example['file']}` `{example['key']}` = `{_truncate(example['value'])}`"
+                f"- `{_escape_markdown_report_text(example['file'], 160)}` "
+                f"`{_escape_markdown_report_text(example['key'], 160)}` = "
+                f"`{_escape_markdown_report_text(example['value'], 100)}`"
             )
         lines.append("")
 
@@ -807,7 +819,9 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
         lines.append("")
         for example in source["control_character_examples"]:
             lines.append(
-                f"- `{example['file']}` `{example['key']}`: {example['findings']}"
+                f"- `{_escape_markdown_report_text(example['file'], 160)}` "
+                f"`{_escape_markdown_report_text(example['key'], 160)}`: "
+                f"{_escape_markdown_report_text(example['findings'])}"
             )
         lines.append("")
 
@@ -815,9 +829,9 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
         lines.append("### Pipeline Warnings")
         lines.append("")
         for warning in report["pipeline_warnings"]:
-            lines.append(f"- `{warning.get('file', 'unknown')}`")
+            lines.append(f"- `{_escape_markdown_report_text(warning.get('file', 'unknown'), 160)}`")
             for error in warning.get("errors", []):
-                lines.append(f"  - {_truncate(str(error), 180)}")
+                lines.append(f"  - {_escape_markdown_report_text(error, 180)}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

@@ -31,10 +31,43 @@ def test_aisuite_is_packaged_as_primary_provider():
     requirements_txt = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
 
     in_match = re.search(r"^aisuite==([^\s]+)$", requirements_in, flags=re.MULTILINE)
-    txt_match = re.search(r"^aisuite==([^\s]+)$", requirements_txt, flags=re.MULTILINE)
+    txt_match = re.search(r"^aisuite==([^\\\s]+)", requirements_txt, flags=re.MULTILINE)
     assert in_match is not None
     assert txt_match is not None
     assert txt_match.group(1) == in_match.group(1)
+
+
+def test_runtime_requirements_are_hash_pinned():
+    requirements_txt = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+    assert "--generate-hashes" in requirements_txt
+    assert "--hash=sha256:" in requirements_txt
+    assert not re.search(r"^[A-Za-z0-9_.-]+==[^\s\\]+$", requirements_txt, flags=re.MULTILINE)
+
+
+def test_environment_variable_reference_covers_runtime_controls():
+    reference = (PROJECT_ROOT / "docs" / "environment-variables.md").read_text(encoding="utf-8")
+
+    for variable in [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "GITHUB_TOKEN",
+        "TX_TOKEN",
+        "TRANSLATOR_CONFIG_FILE",
+        "TRANSLATOR_PROFILE",
+        "LOCALIZE_DRY_RUN",
+        "LOCALIZE_SMOKE_ONLY",
+        "TX_PULL_TIMEOUT",
+        "MAX_FILES_PER_PR",
+        "TRANSLATION_FILTER_GLOB",
+        "TRANSLATION_QUALITY_AUDIT_SCOPE",
+        "LOCALIZE_ALLOW_RESET_LEDGER",
+        "HEALTHCHECK_URL",
+        "REPO_CLEANUP_STRATEGY",
+        "APPUSER_UID",
+        "APPUSER_GID",
+    ]:
+        assert f"`{variable}`" in reference
 
 
 def test_public_docs_describe_aisuite_as_default_provider():

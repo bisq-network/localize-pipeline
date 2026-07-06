@@ -74,6 +74,13 @@ class TestPlaceholderExtraction:
         # Translatable text should remain
         assert "The price is" in processed
 
+    def test_html_tag_protection_does_not_span_newlines(self):
+        text = "first=<span without close\nsecond=value>"
+        processed, mapping = extract_placeholders(text)
+
+        assert mapping == {}
+        assert processed == text
+
     def test_problematic_case_1_only_placeholders(self):
         """
         Test case from issue: {0} <{1} style=offer-details-code>

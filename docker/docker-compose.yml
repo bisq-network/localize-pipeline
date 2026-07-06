@@ -47,7 +47,7 @@ services:
         target: deploy_key
         mode: 0400
     # Note: Place the .env file alongside this compose file (docker/.env)
-    # with API keys and HOST_UID/GID.
+    # with API keys and APPUSER_UID/GID.
     # An example is provided in docker/.env.example
 
 # Define the named volume. The name used here is the default.

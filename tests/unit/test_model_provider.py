@@ -182,6 +182,15 @@ def test_openai_provider_retries_only_transient_errors():
     assert provider.is_retryable_error(OpenAIError("permanent")) is False
 
 
+def test_aisuite_provider_does_not_retry_message_wrapped_4xx():
+    provider = AiSuiteProvider(client=None)
+
+    assert provider.is_retryable_error(Exception("Error code: 401 - invalid API key")) is False
+    assert provider.is_retryable_error(Exception("Error code: 404 - model not found")) is False
+    assert provider.is_retryable_error(Exception("Error code: 429 - rate limit")) is True
+    assert provider.is_retryable_error(Exception("Error code: 500 - server error")) is True
+
+
 class _FakeSyncCompletions:
     def __init__(self, response):
         self.response = response

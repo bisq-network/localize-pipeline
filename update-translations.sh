@@ -632,6 +632,11 @@ if ! is_supported_translation_source "$TRANSLATION_SOURCE"; then
     TRANSLATION_SOURCE="transifex"
 fi
 DRY_RUN=$(get_config_value "dry_run" "$CONFIG_FILE")
+case "${LOCALIZE_DRY_RUN:-}" in
+    true|TRUE|1|yes|YES|on|ON)
+        DRY_RUN=true
+        ;;
+esac
 
 log "Target project root from config: \"$TARGET_PROJECT_ROOT\""
 log "Input folder from config: \"$INPUT_FOLDER\""
@@ -830,7 +835,7 @@ stage_and_submit_batch() {
     local QUALITY_REPORT_JSON="$report_dir/translation_quality_report-${branch}.json"
     local QUALITY_REPORT_MD="$report_dir/translation_quality_report-${branch}.md"
     local VALIDATION_SUMMARY="$report_dir/translation_validation_summary.json"
-    local QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-changed}"
+    local QUALITY_AUDIT_SCOPE="${TRANSLATION_QUALITY_AUDIT_SCOPE:-}"
     local SEMANTIC_REVIEW_EXIT=0
     set +e
     (
@@ -857,18 +862,23 @@ stage_and_submit_batch() {
     done
 
     local QUALITY_GATE_EXIT=0
+    local -a QUALITY_GATE_CMD=(
+        python3 -m localize.translation_quality_gate
+        --repo-root "$TARGET_PROJECT_ROOT"
+        --input-folder "$ABSOLUTE_INPUT_FOLDER"
+        --config "$CONFIG_FILE"
+        --validation-summary "$VALIDATION_SUMMARY"
+        --output-json "$QUALITY_REPORT_JSON"
+        --output-markdown "$QUALITY_REPORT_MD"
+    )
+    if [ -n "$QUALITY_AUDIT_SCOPE" ]; then
+        QUALITY_GATE_CMD+=(--audit-scope "$QUALITY_AUDIT_SCOPE")
+    fi
+    QUALITY_GATE_CMD+=(--changed-files "${BATCH_FILES[@]}")
     set +e
     (
         cd "$app_root" && \
-        python3 -m localize.translation_quality_gate \
-            --repo-root "$TARGET_PROJECT_ROOT" \
-            --input-folder "$ABSOLUTE_INPUT_FOLDER" \
-            --config "$CONFIG_FILE" \
-            --validation-summary "$VALIDATION_SUMMARY" \
-            --output-json "$QUALITY_REPORT_JSON" \
-            --output-markdown "$QUALITY_REPORT_MD" \
-            --audit-scope "$QUALITY_AUDIT_SCOPE" \
-            --changed-files "${BATCH_FILES[@]}"
+        "${QUALITY_GATE_CMD[@]}"
     )
     QUALITY_GATE_EXIT=$?
     set -e
@@ -1036,6 +1046,7 @@ PY
 }
 
 publish_translation_changes() {
+local app_root="${APP_ROOT:-/app}"
 TRANSLATION_CHANGES_CREATED=false
 target_root_prefix="${TARGET_PROJECT_ROOT%/}"
 REL_INPUT_FOLDER="${ABSOLUTE_INPUT_FOLDER#"$target_root_prefix"/}"

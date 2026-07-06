@@ -185,6 +185,26 @@ class TestLoadAppConfig:
 
         assert config.rate_limit_per_minute == 120
 
+    def test_load_config_exports_translation_filter_glob_when_env_missing(self):
+        mock_config = {"dry_run": True, "translation_file_filter_glob": "mobile_*.properties"}
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.setup_logger") as mock_logger:
+                mock_logger.return_value = MagicMock()
+                with patch.dict(os.environ, {}, clear=True):
+                    load_app_config()
+                    assert os.environ["TRANSLATION_FILTER_GLOB"] == "mobile_*.properties"
+
+    def test_load_config_keeps_existing_translation_filter_glob_env(self):
+        mock_config = {"dry_run": True, "translation_file_filter_glob": "mobile_*.properties"}
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.setup_logger") as mock_logger:
+                mock_logger.return_value = MagicMock()
+                with patch.dict(os.environ, {"TRANSLATION_FILTER_GLOB": "desktop_*.properties"}, clear=True):
+                    load_app_config()
+                    assert os.environ["TRANSLATION_FILTER_GLOB"] == "desktop_*.properties"
+
     def test_load_config_resolves_queue_folders_without_creating_them(self, tmp_path):
         mock_config = {"dry_run": True}
 
@@ -230,6 +250,30 @@ class TestLoadAppConfig:
 
         assert config.translation_key_ledger_file_path == str(config_dir / "state" / "ledger.json")
         assert config.translation_memory_file_path == str(config_dir / "state" / "memory.json")
+
+    def test_load_config_resolves_documented_relative_project_paths(self, tmp_path):
+        config_dir = tmp_path / "configs"
+        target_root = config_dir / "target"
+        input_folder = target_root / "src" / "i18n"
+        input_folder.mkdir(parents=True)
+        (config_dir / "glossary.json").write_text("{}", encoding="utf-8")
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "dry_run: true\n"
+            "target_project_root: target\n"
+            "input_folder: src/i18n\n"
+            "glossary_file_path: glossary.json\n",
+            encoding="utf-8",
+        )
+
+        with patch("localize.app_config.setup_logger") as mock_logger:
+            mock_logger.return_value = MagicMock()
+            with patch.dict(os.environ, {"TRANSLATOR_CONFIG_FILE": str(config_path)}, clear=True):
+                config = load_app_config()
+
+        assert config.target_project_root == str(target_root)
+        assert config.input_folder == str(input_folder)
+        assert config.glossary_file_path == str(config_dir / "glossary.json")
 
     def test_load_config_and_cli_share_queue_dir_resolution(self, tmp_path):
         from localize.cli import _runtime_dir

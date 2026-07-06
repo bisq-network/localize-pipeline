@@ -232,6 +232,44 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
 
 
 @pytest.mark.asyncio
+async def test_holistic_review_omits_json_mode_when_provider_does_not_support_it():
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='```json\n{"key1": "Hallo {0}"}\n```'
+                )
+            )
+        ]
+    )
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.is_retryable_error.return_value = False
+    provider.capabilities_for_model.return_value = SimpleNamespace(
+        supports_response_format=False
+    )
+
+    with (
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.REVIEW_MODEL_NAME", "anthropic:claude"),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
+    ):
+        result = await holistic_review_async(
+            source_content="key1=Hello {0}",
+            translated_content="key1=Hallo {0}",
+            target_language="German",
+            keys_to_review=["key1"],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {"key1": "Hallo {0}"}
+    kwargs = provider.create_chat_completion.await_args.kwargs
+    assert "response_format" not in kwargs
+
+
+@pytest.mark.asyncio
 async def test_holistic_review_completion_limit_scales_with_chunk_size():
     response = SimpleNamespace(
         choices=[

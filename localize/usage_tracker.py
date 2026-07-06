@@ -12,10 +12,10 @@ constructor) and treat reported cost as an estimate, not a billing figure.
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+from localize.atomic_io import write_json_atomic
 
 # USD per 1,000,000 tokens. Verify against current OpenAI pricing before relying.
 DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
@@ -162,9 +162,7 @@ class UsageTracker:
 
     def write_json(self, path: str) -> None:
         """Write the summary to ``path`` as JSON (creates parent dirs)."""
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.summary(), f, ensure_ascii=False, indent=2)
+        write_json_atomic(path, self.summary())
 
 
 # Module-level singleton, consistent with the module-global style of the pipeline.

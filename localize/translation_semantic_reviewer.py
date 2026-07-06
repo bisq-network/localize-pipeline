@@ -14,6 +14,7 @@ import jsonschema
 import yaml
 from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
+from localize.json_response import chat_json_mode_kwargs, loads_json_object
 from localize.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
@@ -114,9 +115,9 @@ def normalize_review_response(
     changes: Sequence[TranslationChange],
 ) -> List[Dict[str, str]]:
     try:
-        parsed = json.loads(response_text)
+        parsed = loads_json_object(response_text)
         jsonschema.validate(instance=parsed, schema=SEMANTIC_REVIEW_SCHEMA)
-    except (json.JSONDecodeError, jsonschema.ValidationError) as exc:
+    except (ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
         logging.getLogger(__name__).warning("Semantic review returned invalid JSON: %s", exc)
         return []
     changes_by_identity = {(change.file, change.key): change for change in changes}
@@ -196,6 +197,53 @@ def append_semantic_review_remediations(
     _write_validation_summary(validation_summary_path, summary)
 
 
+def append_semantic_review_status(
+    validation_summary_path: str,
+    *,
+    attempted: bool,
+    failed_batches: int = 0,
+    failed_locales: Sequence[str] = (),
+) -> None:
+    summary = _load_validation_summary(validation_summary_path)
+    if summary.get(_CORRUPT_SUMMARY_SENTINEL):
+        return
+    summary.setdefault("files", {})
+    summary.setdefault("pipeline_warnings", [])
+    summary["semantic_review"] = {
+        "attempted": attempted,
+        "failed_batches": failed_batches,
+        "failed_locales": list(failed_locales),
+    }
+    if failed_batches or failed_locales:
+        summary["pipeline_warnings"].append(
+            {
+                "file": "semantic-review",
+                "scope": "run",
+                "errors": [
+                    (
+                        "Semantic AI review did not complete for all batches "
+                        f"({failed_batches} failed batch(es), {len(failed_locales)} failed locale task(s))."
+                    )
+                ],
+            }
+        )
+    _write_validation_summary(validation_summary_path, summary)
+
+
+def _configured_locales(raw_locales: Sequence[Any]) -> tuple[List[str], Dict[str, str]]:
+    locales: List[str] = []
+    language_names: Dict[str, str] = {}
+    for locale in raw_locales:
+        if isinstance(locale, str) and locale:
+            locales.append(locale)
+            language_names[locale] = locale
+        elif isinstance(locale, dict) and locale.get("code"):
+            code = str(locale["code"])
+            locales.append(code)
+            language_names[code] = str(locale.get("name") or code)
+    return locales, language_names
+
+
 def _load_validation_summary(validation_summary_path: str) -> Dict[str, Any]:
     if os.path.exists(validation_summary_path):
         try:
@@ -241,6 +289,7 @@ async def review_translation_changes(
     style_rules: Sequence[str],
     brand_glossary: Sequence[str],
     model_provider: Optional[ChatModelProvider] = None,
+    failed_batches: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     if not changes:
         return []
@@ -264,6 +313,8 @@ async def review_translation_changes(
                 "Semantic review batch failed; continuing without findings for this batch: %s",
                 exc,
             )
+            if failed_batches is not None:
+                failed_batches.append(str(exc))
     return findings
 
 
@@ -289,7 +340,7 @@ async def _review_translation_change_batch(
             ChatCompletionUserMessageParam(role="user", content=messages[1]["content"]),
         ],
         temperature=0,
-        response_format={"type": "json_object"},
+        **chat_json_mode_kwargs(provider, model),
         completion_token_limit=4096,
         timeout=120.0,
     )
@@ -328,16 +379,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         append_semantic_review_findings(args.validation_summary, [])
         return 0
 
-    locales = [
-        locale["code"]
-        for locale in config.get("supported_locales", [])
-        if isinstance(locale, dict) and locale.get("code")
-    ]
-    language_names = {
-        locale["code"]: locale.get("name", locale["code"])
-        for locale in config.get("supported_locales", [])
-        if isinstance(locale, dict) and locale.get("code")
-    }
+    locales, language_names = _configured_locales(config.get("supported_locales", []) or [])
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
     localization_profiles = load_quality_gate_localization_profiles(args.config)
     changes = []
@@ -354,6 +396,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         )
     if not changes:
         append_semantic_review_findings(args.validation_summary, [])
+        append_semantic_review_status(args.validation_summary, attempted=False)
         return 0
 
     brand_glossary = [str(term) for term in config.get("brand_technical_glossary", [])]
@@ -381,6 +424,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         logger.error("Semantic review model provider configuration failed: %s", exc)
         return 1
     findings: List[Dict[str, str]] = []
+    failed_batches: List[str] = []
     locale_codes_to_review = sorted({change.locale_code for change in changes if change.locale_code})
     max_concurrent_locales = max(1, int(semantic_review_config.get("max_concurrent_locales", 3)))
     locale_semaphore = asyncio.Semaphore(max_concurrent_locales)
@@ -396,17 +440,26 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
                 style_rules=style_rules_by_locale.get(locale_code, []),
                 brand_glossary=brand_glossary,
                 model_provider=provider,
+                failed_batches=failed_batches,
             )
 
     locale_results = await asyncio.gather(
         *(review_locale(locale_code) for locale_code in locale_codes_to_review),
         return_exceptions=True,
     )
-    for result in locale_results:
+    failed_locales: List[str] = []
+    for locale_code, result in zip(locale_codes_to_review, locale_results):
         if isinstance(result, Exception):
             logger.warning("Semantic review locale task failed: %s", result)
+            failed_locales.append(locale_code)
             continue
         findings.extend(result)
+    append_semantic_review_status(
+        args.validation_summary,
+        attempted=True,
+        failed_batches=len(failed_batches),
+        failed_locales=failed_locales,
+    )
 
     if _auto_apply_suggestions_enabled(config, semantic_review_config):
         changed_identities = {

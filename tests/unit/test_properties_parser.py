@@ -63,3 +63,18 @@ def test_reassemble_preserves_untouched_multiline_formatting(tmp_path):
 
     assert translations == {"long.value": "first second part third part"}
     assert reassemble_file(parsed_lines) == original
+
+
+def test_reassemble_escapes_real_newline_in_changed_single_line_value():
+    parsed_lines = [
+        {
+            "type": "entry",
+            "key": "reviewed.value",
+            "value": "erste Zeile\nzweite Zeile",
+            "original_value": "old value",
+            "original_parsed_value": "old value",
+            "separator_group": "=",
+        }
+    ]
+
+    assert reassemble_file(parsed_lines) == "reviewed.value=erste Zeile\\nzweite Zeile\n"

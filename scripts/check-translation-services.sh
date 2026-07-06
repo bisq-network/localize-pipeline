@@ -54,15 +54,30 @@ count_open_translation_prs() {
     fi
 
     while :; do
-        response=$(curl -fsS \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${repo}/pulls?state=open&per_page=100&page=${page}" \
-            2>/dev/null) || {
-            log_alert "Failed to fetch PRs for ${repo}"
+        local curl_config
+        curl_config=$(mktemp) || {
+            log_alert "Failed to create temporary curl config for ${repo}"
             echo 0
             return 0
         }
+        chmod 600 "$curl_config"
+        {
+            printf 'fail\n'
+            printf 'show-error\n'
+            printf 'silent\n'
+            printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN"
+            printf 'header = "Accept: application/vnd.github+json"\n'
+        } > "$curl_config"
+
+        if ! response=$(curl --config "$curl_config" \
+            "https://api.github.com/repos/${repo}/pulls?state=open&per_page=100&page=${page}" \
+            2>/dev/null); then
+            rm -f "$curl_config"
+            log_alert "Failed to fetch PRs for ${repo}"
+            echo 0
+            return 0
+        fi
+        rm -f "$curl_config"
 
         page_count=$(jq -re '
           if type != "array" then error("unexpected payload")

@@ -63,6 +63,8 @@ def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
     assert config["supported_locales"] == [{"code": "de", "name": "German"}]
 
     workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
+    assert "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5" in workflow
+    assert "actions/checkout@v4" not in workflow
     assert "bisq-network/localize-pipeline@v0.1.6" in workflow
     assert "dry-run: true" in workflow
 

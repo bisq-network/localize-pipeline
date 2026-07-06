@@ -280,6 +280,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
     if result is False:
         return 1
+    if (
+        getattr(result, "changed_files", None)
+        and getattr(result, "processed_files_count", 0) == 0
+        and getattr(result, "skipped_files", None)
+    ):
+        print("error: all changed translation files were skipped", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -414,7 +421,7 @@ def _cmd_memory_promote(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    memory.record(
+    memory.promote(
         args.source_text,
         args.target_text,
         locale=args.locale,

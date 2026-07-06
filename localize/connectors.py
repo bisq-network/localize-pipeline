@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import json
 import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Mapping, Optional, Protocol
 
+from localize.atomic_io import write_json_atomic, write_text_atomic
 from localize.pipeline_core import (
     ProcessQueueResult,
     RUN_METRIC_KEYS,
@@ -279,12 +279,12 @@ class FileReporterConnector:
     """Write standard pipeline reports to local files."""
 
     def write_skipped_files_report(self, report_path: str, skipped_files: Dict[str, List[str]]) -> None:
-        Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(report_path, "w", encoding="utf-8") as file:
-            for filename, errors in sorted(skipped_files.items()):
-                file.write(f"{filename}\n")
-                for error in errors:
-                    file.write(f"  - {error}\n")
+        lines: List[str] = []
+        for filename, errors in sorted(skipped_files.items()):
+            lines.append(f"{filename}\n")
+            for error in errors:
+                lines.append(f"  - {error}\n")
+        write_text_atomic(report_path, "".join(lines))
 
     def remove_file_if_exists(self, report_path: str) -> None:
         try:
@@ -334,10 +334,7 @@ class FileReporterConnector:
 
     @staticmethod
     def _write_json(path: str, payload: Dict[str, object]) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False, indent=2)
-            file.write("\n")
+        write_json_atomic(path, payload)
 
 
 @dataclass(frozen=True)

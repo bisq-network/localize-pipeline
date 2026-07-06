@@ -505,6 +505,16 @@ def _as_positive_int(value: Any, *, default: int, name: str) -> int:
     return parsed
 
 
+def _as_float(value: Any, *, default: float, name: str) -> float:
+    """Parse a float config value with a default for omitted/null values."""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number.") from exc
+
+
 def _create_model_provider(
     dry_run: bool,
     logger: logging.Logger,
@@ -578,6 +588,13 @@ def load_app_config() -> AppConfig:
 
     # Get configuration values with defaults that validation and runtime share.
     dry_run = _resolve_dry_run(config)
+    config_filter_glob = str(config.get('translation_file_filter_glob') or '').strip()
+    if (
+        config_filter_glob
+        and config_filter_glob != "null"
+        and not os.environ.get('TRANSLATION_FILTER_GLOB')
+    ):
+        os.environ['TRANSLATION_FILTER_GLOB'] = config_filter_glob
     review_model_env = _non_empty_env('REVIEW_MODEL_NAME')
     validation_config = (
         {**config, 'review_model_name': review_model_env}
@@ -630,9 +647,21 @@ def load_app_config() -> AppConfig:
     ignore_key_patterns = compile_ignore_key_patterns(config.get('ignore_key_patterns') or [])
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(
-        source_identical_min_block_count=int(quality_gate_config.get('source_identical_min_block_count', 5)),
-        source_identical_max_count=int(quality_gate_config.get('source_identical_max_count', 20)),
-        source_identical_max_ratio=float(quality_gate_config.get('source_identical_max_ratio', 0.30)),
+        source_identical_min_block_count=_as_positive_int(
+            quality_gate_config.get('source_identical_min_block_count'),
+            default=5,
+            name='quality_gate.source_identical_min_block_count',
+        ),
+        source_identical_max_count=_as_positive_int(
+            quality_gate_config.get('source_identical_max_count'),
+            default=20,
+            name='quality_gate.source_identical_max_count',
+        ),
+        source_identical_max_ratio=_as_float(
+            quality_gate_config.get('source_identical_max_ratio'),
+            default=0.30,
+            name='quality_gate.source_identical_max_ratio',
+        ),
         block_on_pipeline_warnings=_as_bool(
             quality_gate_config.get('block_on_pipeline_warnings', True),
             default=True,
@@ -691,6 +720,18 @@ def load_app_config() -> AppConfig:
         default_path=os.path.join(project_root, 'logs', 'translation_memory.json'),
     )
     translation_memory_enabled = _as_bool(config.get('translation_memory_enabled', True), default=True)
+    config_dir = os.path.dirname(os.path.abspath(config_file_path))
+    target_project_root = str(config.get('target_project_root') or '/path/to/default/repo/root')
+    if not os.path.isabs(target_project_root):
+        target_project_root = os.path.abspath(os.path.join(config_dir, target_project_root))
+    input_folder = str(config.get('input_folder') or '/path/to/default/input_folder')
+    if not os.path.isabs(input_folder):
+        input_folder = os.path.abspath(os.path.join(target_project_root, input_folder))
+    glossary_file_path = _resolve_config_relative_path(
+        config.get('glossary_file_path'),
+        config_path=config_file_path,
+        default_path=os.path.join(config_dir, 'glossary.json'),
+    )
 
     project_context = str(config.get('project_context') or '').strip()
     try:
@@ -720,9 +761,9 @@ def load_app_config() -> AppConfig:
 
     return AppConfig(
         project_root=project_root,
-        target_project_root=config.get('target_project_root', '/path/to/default/repo/root'),
-        input_folder=config.get('input_folder', '/path/to/default/input_folder'),
-        glossary_file_path=config.get('glossary_file_path', 'glossary.json'),
+        target_project_root=target_project_root,
+        input_folder=input_folder,
+        glossary_file_path=glossary_file_path,
         model_name=model_name,
         review_model_name=review_model_name,
         max_model_tokens=_as_positive_int(

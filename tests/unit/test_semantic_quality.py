@@ -194,6 +194,61 @@ def test_semantic_warnings_do_not_block_unless_configured(tmp_path):
     assert report["blocking"] is False
 
 
+def test_properties_diff_continuation_does_not_swallow_next_hunk(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    input_folder.mkdir()
+    diff_text = """diff --git a/resources/messages_de.properties b/resources/messages_de.properties
+--- a/resources/messages_de.properties
++++ b/resources/messages_de.properties
+@@ -1 +1 @@
++first=Hallo \\
+@@ -8 +8 @@
++second=Welt
+"""
+
+    changes = list(
+        iter_translation_changes_from_diff(
+            diff_text=diff_text,
+            repo_root=str(repo_root),
+            input_folder=str(input_folder),
+            locale_codes=["de"],
+        )
+    )
+
+    assert [change.key for change in changes] == ["first", "second"]
+
+
+def test_json_diff_ambiguity_reports_all_matching_leaf_values(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_json(
+        input_folder / "messages_de.json",
+        {
+            "dialog": {"label": "Open"},
+            "menu": {"label": "Open"},
+        },
+    )
+    diff_text = """diff --git a/resources/messages_de.json b/resources/messages_de.json
+--- a/resources/messages_de.json
++++ b/resources/messages_de.json
+@@ -2 +2 @@
++    "label": "Open"
+"""
+
+    changes = list(
+        iter_translation_changes_from_diff(
+            diff_text=diff_text,
+            repo_root=str(repo_root),
+            input_folder=str(input_folder),
+            locale_codes=["de"],
+            localization_format=JSON_FORMAT,
+        )
+    )
+
+    assert {change.key for change in changes} == {"/dialog/label", "/menu/label"}
+
+
 def test_ai_review_error_findings_are_folded_into_quality_gate(tmp_path):
     report = build_quality_gate_report(
         source_stats=analyze_source_identical_changes(

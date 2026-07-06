@@ -8,6 +8,13 @@ from unittest.mock import patch
 import pytest
 
 
+os.environ.setdefault("OPENAI_API_KEY", "sk-test-key")
+os.environ.setdefault(
+    "TRANSLATOR_CONFIG_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "integration", "test_config.yaml"),
+)
+
+
 @pytest.fixture(scope="session")
 def integration_test_paths():
     """Session-scoped fixture to define the absolute paths for test directories."""
@@ -20,6 +27,7 @@ def integration_test_paths():
     translated_queue_dir = os.path.join(scratch_root, 'translated_queue')
     mock_glossary_path = os.path.join(tests_root, 'temp_mock_glossary.json')
     translation_memory_path = os.path.join(tests_root, 'temp_translation_memory.json')
+    translation_key_ledger_path = os.path.join(tests_root, 'temp_translation_key_ledger.json')
 
     return {
         "input_folder": input_dir,
@@ -27,6 +35,7 @@ def integration_test_paths():
         "translated_queue_folder": translated_queue_dir,
         "mock_glossary_path": mock_glossary_path,
         "translation_memory_path": translation_memory_path,
+        "translation_key_ledger_path": translation_key_ledger_path,
         "scratch_root": scratch_root,
         "project_root": project_root
     }
@@ -47,10 +56,6 @@ def setup_global_test_environment(integration_test_paths):
     # Mock language configuration to avoid dependency on config.yaml in tests
     mock_language_codes = {"de": "German", "es": "Spanish", "fr": "French"}
     mock_name_to_code = {"german": "de", "spanish": "es", "french": "fr"}
-    original_api_key = os.environ.get("OPENAI_API_KEY")
-    if original_api_key is None:
-        os.environ["OPENAI_API_KEY"] = "sk-test-key"
-
     patches = [
         patch('localize.translate_localization_files.INPUT_FOLDER', paths['input_folder']),
         patch('localize.translate_localization_files.TRANSLATION_QUEUE_FOLDER', paths['translation_queue_folder']),
@@ -59,7 +64,8 @@ def setup_global_test_environment(integration_test_paths):
         patch('localize.translate_localization_files.REPO_ROOT', paths['project_root']),
         patch('localize.translate_localization_files.LANGUAGE_CODES', mock_language_codes),
         patch('localize.translate_localization_files.NAME_TO_CODE', mock_name_to_code),
-        patch('localize.translate_localization_files.TRANSLATION_MEMORY_FILE_PATH', paths['translation_memory_path'])
+        patch('localize.translate_localization_files.TRANSLATION_MEMORY_FILE_PATH', paths['translation_memory_path']),
+        patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH', paths['translation_key_ledger_path'])
     ]
     started_patches = []
     try:
@@ -79,11 +85,6 @@ def setup_global_test_environment(integration_test_paths):
                 p.stop()
             except Exception as e:
                 logging.error(f"Failed to stop patch: {e}")
-        if original_api_key is None:
-            os.environ.pop("OPENAI_API_KEY", None)
-        else:
-            os.environ["OPENAI_API_KEY"] = original_api_key
-
     # Clean up directories once after all tests are done
     for folder in [paths['input_folder'], paths['translation_queue_folder'], paths['translated_queue_folder']]:
         if os.path.exists(folder):
@@ -93,6 +94,8 @@ def setup_global_test_environment(integration_test_paths):
                 logging.error(f"Failed to delete directory {folder}. Reason: {e}")
     if os.path.exists(paths['translation_memory_path']):
         os.remove(paths['translation_memory_path'])
+    if os.path.exists(paths['translation_key_ledger_path']):
+        os.remove(paths['translation_key_ledger_path'])
     if os.path.exists(paths['scratch_root']):
         shutil.rmtree(paths['scratch_root'])
 
