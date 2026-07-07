@@ -329,6 +329,7 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
     assert "version" in retained_allowlist["da"]
     assert "version" in retained_allowlist["de"]
     assert {"information", "message", "messages", "version"}.issubset(retained_allowlist["fr"])
+    assert "contact" in retained_allowlist["nl"]
     assert "version" in retained_allowlist["sv"]
     assert {
         "trade-history-traders-label",
