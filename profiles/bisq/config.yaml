@@ -28,6 +28,7 @@ quality_gate:
     es: ["personal"]
     fr: ["information", "message", "messages", "version"]
     it: ["reporting"]
+    nl: ["contact"]
     sv: ["version"]
 semantic_review:
   enabled: true
