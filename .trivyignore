@@ -234,3 +234,19 @@ CVE-2026-27145
 # Revisit by: 2026-08-15
 CVE-2026-48702
 CVE-2026-39832
+
+# CVE-2026-39831:
+# Newly surfaced Trivy finding in a vendor-supplied Go binary baked into the image.
+# Affects: tx v1.6.17 (Transifex CLI, Go 1.16.15) via golang.org/x/crypto/ssh.
+# Title: "golang.org/x/crypto/ssh: security key bypass due to missing user
+#         presence check" (fixed upstream in x/crypto 0.52.0).
+# Rationale: Same golang.org/x/crypto/ssh family already accepted above
+#            (CVE-2025-47913 / CVE-2026-39827..39835). tx talks to Transifex's
+#            API using fixed workflow inputs and never performs SSH security-key
+#            authentication for untrusted users here, so the user-presence bypass
+#            is not reachable. No newer upstream tx release patches this and the
+#            binary cannot be rebuilt by us.
+# Checked CI Trivy report: 2026-07-10.
+# Added: 2026-07-11
+# Revisit by: 2026-08-15
+CVE-2026-39831
