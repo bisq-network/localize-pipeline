@@ -409,3 +409,20 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
         and "paymentAccounts.accountCreationDate" in rule
         for rule in style_rules["pcm"]
     )
+
+
+def test_preimage_is_a_protected_brand_technical_term():
+    """Keep the Lightning term 'Preimage' untranslated in the Bisq profile.
+
+    bisq2#4866 CodeRabbit flagged that the model rendered the source term
+    'Preimage' (bisqEasy.history.table.csv.txIdOrPreimage) as unrelated words
+    across several locales, e.g. Russian 'преобразование' (transformation),
+    Polish 'Prezentacja' and Bulgarian 'Представяне' (presentation), and Irish
+    'íomhá réamhtheoranta' (predefined image). Protecting it alongside the
+    other Lightning terms keeps the CSV export header accurate and consistent.
+    """
+    config = yaml.safe_load(BISQ_PROFILE_CONFIG.read_text(encoding="utf-8"))
+    brand_glossary = config["brand_technical_glossary"]
+    assert "Preimage" in brand_glossary
+    # Sibling Lightning terms must remain protected so the family stays consistent.
+    assert {"Lightning", "Lightning Escrow", "Submarine Swaps"}.issubset(set(brand_glossary))
