@@ -234,34 +234,3 @@ CVE-2026-27145
 # Revisit by: 2026-08-15
 CVE-2026-48702
 CVE-2026-39832
-
-# CVE-2026-39831:
-# Newly surfaced Trivy finding in a vendor-supplied Go binary baked into the image.
-# Affects: tx v1.6.17 (Transifex CLI, Go 1.16.15) via golang.org/x/crypto/ssh.
-# Title: "golang.org/x/crypto/ssh: security key bypass due to missing user
-#         presence check" (fixed upstream in x/crypto 0.52.0).
-# Rationale: Same golang.org/x/crypto/ssh family already accepted above
-#            (CVE-2025-47913 / CVE-2026-39827..39835). tx talks to Transifex's
-#            API using fixed workflow inputs and never performs SSH security-key
-#            authentication for untrusted users here, so the user-presence bypass
-#            is not reachable. No newer upstream tx release patches this and the
-#            binary cannot be rebuilt by us.
-# Checked CI Trivy report: 2026-07-10.
-# Added: 2026-07-11
-# Revisit by: 2026-08-15
-CVE-2026-39831
-
-# CVE-2026-39822:
-# Trivy matches this Go stdlib os.Root issue by compiler version, without
-# checking whether an affected symbol is linked or called.
-# Affects reported by Trivy: gh v2.93.0 (Go 1.26.4), yq v4.53.3
-# (Go 1.26.4), tx v1.6.17 (Go 1.16.15), and gosu 1.19 (Go 1.24.6).
-# Rationale: None of these exact upstream releases calls os.OpenInRoot,
-#            os.OpenRoot, or an affected os.Root method. The API did not exist
-#            in Go 1.16, so the tx finding is necessarily a false positive.
-#            These fixed-version CI/CD utilities also do not accept untrusted
-#            filesystem paths in this deployment flow.
-# Checked upstream source and CI Trivy report: 2026-07-12.
-# Added: 2026-07-12
-# Revisit by: 2026-08-15
-CVE-2026-39822
