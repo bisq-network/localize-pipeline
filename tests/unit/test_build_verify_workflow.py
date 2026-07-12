@@ -6,6 +6,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-verify.yml"
 DEV_REQUIREMENTS = REPO_ROOT / "requirements-dev.txt"
+TRIVY_IGNORE = REPO_ROOT / ".trivyignore"
+TRIVY_IGNORE_POLICY = REPO_ROOT / ".trivyignore.rego"
 
 
 def _workflow():
@@ -75,3 +77,19 @@ def test_dev_requirements_pin_setuptools_for_hash_locked_install():
 
     assert "setuptools==" in locked_requirements
     assert "# setuptools" not in locked_requirements
+
+
+def test_trivy_vendor_suppressions_are_scoped_and_expire():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    global_ignores = TRIVY_IGNORE.read_text(encoding="utf-8")
+    policy = TRIVY_IGNORE_POLICY.read_text(encoding="utf-8")
+
+    assert "--ignore-policy /workspace/.trivyignore.rego" in workflow
+    assert "CVE-2026-39831" not in global_ignores
+    assert "CVE-2026-39822" not in global_ignores
+    assert 'input.VulnerabilityID == "CVE-2026-39831"' in policy
+    assert 'input.PkgName == "golang.org/x/crypto"' in policy
+    assert 'input.VulnerabilityID == "CVE-2026-39822"' in policy
+    assert 'input.PkgName == "stdlib"' in policy
+    assert "input.InstalledVersion == affected_os_root_versions[_]" in policy
+    assert 'time.parse_rfc3339_ns("2026-08-15T00:00:00Z")' in policy
