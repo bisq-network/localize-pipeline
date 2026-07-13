@@ -444,7 +444,7 @@ def test_cli_bootstrap_pr_defaults_to_latest_release_ref(capsys):
 
     capsys.readouterr()
     assert exit_code == 0
-    assert create.call_args.args[0].action_ref == "v0.1.6"
+    assert create.call_args.args[0].action_ref == "v0.1.7"
 
 
 def test_cli_quality_gate_delegates_to_rerunnable_reporter(tmp_path):
@@ -590,7 +590,7 @@ def test_pyproject_exposes_localize_console_script():
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["name"] == "localize-pipeline"
-    assert pyproject["project"]["version"] == "0.1.6"
+    assert pyproject["project"]["version"] == "0.1.7"
     assert pyproject["project"]["urls"]["Repository"] == "https://github.com/bisq-network/localize-pipeline"
     assert pyproject["project"]["urls"]["Changelog"]
     assert pyproject["project"]["urls"]["Issues"] == "https://github.com/bisq-network/localize-pipeline/issues"

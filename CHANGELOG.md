@@ -7,6 +7,20 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.7] - 2026-07-13
+
+### Fixed
+
+- GitHub Action runs now reject unsafe privileged PR contexts before secrets or
+  signing keys can be used. `pull_request_target` and PR-triggered
+  `workflow_run` contexts are blocked, and fork pull requests must run as
+  dry-run checks without opening PRs or receiving model/signing secrets.
+- Updated the vulnerable development `click` pin used by CI dependency audits.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.7`.
+
 ## [0.1.6] - 2026-07-05
 
 ### Fixed
