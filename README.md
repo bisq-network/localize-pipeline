@@ -132,6 +132,11 @@ allow write tokens and workflow-created pull requests. The workflow-level
 sufficient if repository or organization settings keep the default token
 read-only.
 
+Run live translation from trusted `push` or `workflow_dispatch` workflows. For
+pull request checks, use dry-run mode with PR creation disabled and no model or
+signing secrets. Do not run live translation from `pull_request_target` or from
+`workflow_run` events triggered by pull request builds.
+
 Full guide: [docs/github-action.md](docs/github-action.md).
 
 ## Documentation
