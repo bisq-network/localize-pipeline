@@ -37,6 +37,11 @@ For a no-cost setup preview, add `dry-run: true`. The action still validates the
 config and discovery path, but the runtime skips model calls and translation
 writes.
 
+Do not run live translation from `pull_request_target` or from a `workflow_run`
+triggered by pull request builds. Those contexts can combine trusted repository
+secrets with untrusted PR code. Use `push` or `workflow_dispatch` for live
+translation PRs, and use the dry-run PR pattern below for untrusted PR checks.
+
 ## Recommended Rollout
 
 Use local runs for the initial locale baseline and use the GitHub Action for
@@ -182,12 +187,16 @@ path is used by local CLI runs and the Action.
 
 ## Pull Request Events
 
-For `pull_request` workflows, set `diff-base` to the PR base SHA:
+For `pull_request` workflows, use dry-run validation only. Set `diff-base` to
+the PR base SHA, disable PR creation, and do not pass model or signing secrets:
 
 ```yaml
 on:
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   translate:
@@ -200,8 +209,12 @@ jobs:
         with:
           config-file: config.yaml
           diff-base: ${{ github.event.pull_request.base.sha }}
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          dry-run: true
+          open-pr: false
 ```
+
+Run the live translation workflow after the change is merged, or trigger it
+manually with `workflow_dispatch`.
 
 ## Inputs
 

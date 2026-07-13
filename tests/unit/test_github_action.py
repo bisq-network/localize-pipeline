@@ -77,6 +77,23 @@ def test_action_runs_preflight_check_before_translation(action):
     assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
 
 
+def test_action_rejects_unsafe_pr_contexts_before_setup(action):
+    steps = action["runs"]["steps"]
+    guard = next(step for step in steps if step["name"] == "Validate workflow context")
+    setup_index = next(i for i, step in enumerate(steps) if step["name"] == "Set up Python")
+    guard_index = steps.index(guard)
+
+    assert guard_index == 0
+    assert guard_index < setup_index
+    assert guard["env"]["LOCALIZE_OPEN_PR"] == "${{ inputs.open-pr }}"
+    assert guard["env"]["LOCALIZE_DRY_RUN"] == "${{ inputs.dry-run }}"
+    assert guard["env"]["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
+    assert guard["env"]["LOCALIZE_COMMIT_SIGNING_KEY_INPUT"] == "${{ inputs.commit-signing-key }}"
+    assert "pull_request_target" in guard["run"]
+    assert 'workflow_run.get("event") == "pull_request"' in guard["run"]
+    assert "Fork pull_request runs may only use Localize Pipeline" in guard["run"]
+
+
 def test_action_installs_dependencies_in_private_virtualenv(action):
     dependency_step = next(
         step for step in action["runs"]["steps"] if step["name"] == "Install pipeline dependencies"
