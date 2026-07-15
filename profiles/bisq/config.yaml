@@ -205,6 +205,22 @@ semantic_quality_rules:
     forbidden_target_regex: 'வர்த்தக சகோதரர்'
     severity: "error"
     source: "bisq2#4835 CodeRabbit"
+  - id: "network-seed-node-not-seed-phrase"
+    message: "On the Network connections screen 'Seed' labels a seed node (bootstrap peer), not a wallet recovery phrase; do not translate it as seed phrase/words."
+    locales: ["cs", "es", "ru", "id", "it", "vi"]
+    keys: ["mobile.networkInfo.connections.seed"]
+    forbidden_target_regex: "(Slova|Frase|фраза|Kata|Parole|khóa)"
+    regex_ignorecase: true
+    severity: "error"
+    source: "bisq-mobile#1606 CodeRabbit"
+  - id: "network-transport-not-physical-transport"
+    message: "On the Network screens 'Transport' is the network transport (e.g. Tor/clearnet), not physical transportation/shipping."
+    locales: ["af_ZA", "cs", "vi"]
+    keys: ["mobile.networkInfo.myNode.transport", "mobile.networkInfo.overview.transport"]
+    forbidden_target_regex: "(Vervoer|Doprava|Vận chuyển)"
+    regex_ignorecase: true
+    severity: "error"
+    source: "bisq-mobile#1606 CodeRabbit"
 supported_locales:
   - code: "cs"
     name: "Czech"
