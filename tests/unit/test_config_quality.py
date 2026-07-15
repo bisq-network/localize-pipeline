@@ -5,6 +5,12 @@ import re
 import pytest
 import yaml
 
+from localize.semantic_quality import (
+    TranslationChange,
+    evaluate_semantic_rules,
+    load_semantic_rules,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BISQ_PROFILE_CONFIG = PROJECT_ROOT / "profiles" / "bisq" / "config.yaml"
@@ -426,3 +432,100 @@ def test_preimage_is_a_protected_brand_technical_term():
     assert "Preimage" in brand_glossary
     # Sibling Lightning terms must remain protected so the family stays consistent.
     assert {"Lightning", "Lightning Escrow", "Submarine Swaps"}.issubset(set(brand_glossary))
+
+
+_NETWORK_RULE_IDS = {
+    "network-seed-node-not-seed-phrase",
+    "network-transport-not-physical-transport",
+}
+
+
+@pytest.mark.parametrize("config_path", [BISQ_MOBILE_PROFILE_CONFIG, BISQ_PROFILE_CONFIG])
+def test_network_terminology_rules_from_1606_are_encoded(config_path):
+    """bisq-mobile#1606 CodeRabbit flagged mistranslated Network labels.
+
+    Across six locales `mobile.networkInfo.connections.seed` (source "Seed",
+    meaning a seed node) was rendered as a wallet recovery phrase, e.g. Czech
+    "Seedová Slova", Spanish "Frase Semilla", Russian "Seed-фраза". In three
+    locales the transport labels (source "Transport", the network transport)
+    became physical transportation, e.g. Afrikaans "Vervoer", Czech "Doprava".
+    Both rules are mirrored into every profile like the other mobile nits.
+    """
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    rules_by_id = {rule["id"]: rule for rule in config.get("semantic_quality_rules", [])}
+    supported = {loc["code"] for loc in config["supported_locales"]}
+
+    assert _NETWORK_RULE_IDS.issubset(rules_by_id)
+    for rule_id in _NETWORK_RULE_IDS:
+        rule = rules_by_id[rule_id]
+        assert rule["source"] == "bisq-mobile#1606 CodeRabbit"
+        assert rule["severity"] == "error"
+        assert set(rule["locales"]) <= supported
+
+    seed_rule = rules_by_id["network-seed-node-not-seed-phrase"]
+    assert seed_rule["keys"] == ["mobile.networkInfo.connections.seed"]
+    transport_rule = rules_by_id["network-transport-not-physical-transport"]
+    assert set(transport_rule["keys"]) == {
+        "mobile.networkInfo.myNode.transport",
+        "mobile.networkInfo.overview.transport",
+    }
+
+
+def test_network_terminology_rules_flag_the_real_1606_mistranslations():
+    """The shipped mobile-profile rules must catch the merged bad values only."""
+    config = yaml.safe_load(BISQ_MOBILE_PROFILE_CONFIG.read_text(encoding="utf-8"))
+    rules = load_semantic_rules(config["semantic_quality_rules"])
+
+    def _seed(locale, value):
+        return TranslationChange(
+            file=f"mobile_{locale}.properties",
+            locale_code=locale,
+            key="mobile.networkInfo.connections.seed",
+            source_value="Seed",
+            old_value=None,
+            new_value=value,
+        )
+
+    def _transport(locale, value):
+        return TranslationChange(
+            file=f"mobile_{locale}.properties",
+            locale_code=locale,
+            key="mobile.networkInfo.myNode.transport",
+            source_value="Transport",
+            old_value=None,
+            new_value=value,
+        )
+
+    # Confirmed-wrong values from the merged PR must be flagged.
+    flagged = [
+        _seed("cs", "Seedová Slova"),
+        _seed("es", "Frase Semilla"),
+        _seed("ru", "Seed-фраза"),
+        _seed("id", "Kata Seed"),
+        _seed("it", "Parole Seed"),
+        _seed("vi", "Từ khóa seed"),
+        _transport("af_ZA", "Vervoer"),
+        _transport("cs", "Doprava"),
+        _transport("vi", "Vận chuyển"),
+    ]
+    flagged_ids = {
+        finding.key + "|" + finding.value
+        for finding in evaluate_semantic_rules(changes=flagged, rules=rules)
+    }
+    for change in flagged:
+        assert change.key + "|" + change.new_value in flagged_ids, change.new_value
+
+    # Correct network-node/transport wording must pass, as must out-of-scope
+    # locales that kept an acceptable rendering of the same source string.
+    clean = [
+        _seed("cs", "Seedový uzel"),
+        _seed("es", "Nodo semilla"),
+        _seed("ru", "Seed-узел"),
+        _seed("vi", "Nút seed"),
+        _seed("de", "Seed"),
+        _seed("pcm", "Seed node"),
+        _transport("af_ZA", "Transport"),
+        _transport("cs", "Přenos"),
+        _transport("de", "Transport"),
+    ]
+    assert evaluate_semantic_rules(changes=clean, rules=rules) == []
