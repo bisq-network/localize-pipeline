@@ -38,3 +38,21 @@ def test_translation_system_prompt_mentions_format_metadata():
     )
 
     assert JAVA_PROPERTIES_FORMAT.display_name in prompt
+
+
+def test_translation_system_prompt_requests_grammatical_number_agreement():
+    prompt = build_translation_system_prompt(
+        target_language="German",
+        style_rules_text="",
+        project_context="",
+        localization_format=JAVA_PROPERTIES_FORMAT,
+    )
+
+    assert "grammatical number" in prompt
+    # Singular/plural count-template families must be called out explicitly so
+    # the model does not reuse the plural wording for the singular case.
+    assert ".single" in prompt
+    assert ".plural" in prompt
+    # The example must render a real placeholder, not a doubled f-string brace.
+    assert "Used {0} time" in prompt
+    assert "{{0}}" not in prompt
