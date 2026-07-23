@@ -53,6 +53,7 @@ def test_translation_system_prompt_requests_grammatical_number_agreement():
     # the model does not reuse the plural wording for the singular case.
     assert ".single" in prompt
     assert ".plural" in prompt
+    assert "identical singular and plural target forms are acceptable" in prompt
     # The example must render a real placeholder, not a doubled f-string brace.
     assert "Used {0} time" in prompt
     assert "{{0}}" not in prompt
