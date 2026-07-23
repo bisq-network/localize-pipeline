@@ -6,6 +6,7 @@ import fnmatch
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Iterable as IterableABC
 from collections.abc import Mapping as MappingABC
 from dataclasses import asdict, dataclass, field
@@ -474,9 +475,10 @@ def _matches_any(value: str, patterns: Sequence[str]) -> bool:
 
 
 def _regex_matches(pattern: str | Pattern[str], value: Optional[str]) -> bool:
+    normalized_value = unicodedata.normalize("NFC", value or "")
     if isinstance(pattern, re.Pattern):
-        return pattern.search(value or "") is not None
-    return re.search(pattern, value or "") is not None
+        return pattern.search(normalized_value) is not None
+    return re.search(pattern, normalized_value) is not None
 
 
 def evaluate_semantic_rules(

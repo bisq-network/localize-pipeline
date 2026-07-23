@@ -12,6 +12,8 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 - Require GitPython 3.1.55 or newer, refresh both lockfiles, and build GitHub
   CLI 2.96.0 with gRPC-Go 1.82.1 so dependency and image audits reject the
   July 2026 advisories.
+- Reject Vietnamese horn-vowel contamination in non-Vietnamese Bisq locales,
+  including canonically equivalent decomposed Unicode text.
 
 ### Changed
 
