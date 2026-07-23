@@ -2,6 +2,7 @@
 from pathlib import Path
 import re
 import tomllib
+import unicodedata
 
 from packaging.version import Version
 import pytest
@@ -598,6 +599,10 @@ def test_contamination_guard_flags_the_real_4884_token(config_path):
         "O lè tún bẹ̀rẹ̀ ohun èlò náà láti tún gba dữdata nẹ́tíwọ̀kì.",
     )
     findings = evaluate_semantic_rules(changes=[contaminated], rules=rules)
+    assert any(f.rule_id == _CONTAMINATION_RULE_ID for f in findings)
+
+    decomposed = _warning("yo", unicodedata.normalize("NFD", contaminated.new_value))
+    findings = evaluate_semantic_rules(changes=[decomposed], rules=rules)
     assert any(f.rule_id == _CONTAMINATION_RULE_ID for f in findings)
 
     # Legitimate Vietnamese (horn vowels expected) and a cleaned Yoruba value
