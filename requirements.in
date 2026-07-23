@@ -5,7 +5,7 @@ openai
 aisuite==0.1.14
 python-dotenv
 PyYAML
-GitPython
+GitPython>=3.1.55
 httpx
 tiktoken
 tqdm

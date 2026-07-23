@@ -98,6 +98,16 @@ def test_dockerfile_uses_orchestration_default_command():
     assert 'CMD ["/app/update-translations.sh"]' in dockerfile
 
 
+def test_dockerfile_builds_current_gh_with_fixed_grpc():
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "ARG GH_VERSION=2.96.0" in dockerfile
+    assert "ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0" in dockerfile
+    assert "ARG GRPC_VERSION=1.82.1" in dockerfile
+    assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
+    assert 'go get "google.golang.org/grpc@v${GRPC_VERSION}"' in dockerfile
+
+
 def test_dockerignore_excludes_local_configs_and_agent_scratch():
     dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
