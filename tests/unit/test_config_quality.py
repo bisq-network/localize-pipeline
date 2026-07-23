@@ -1,7 +1,9 @@
 """Regression tests for production translation prompt guidance."""
 from pathlib import Path
 import re
+import tomllib
 
+from packaging.version import Version
 import pytest
 import yaml
 
@@ -41,6 +43,23 @@ def test_aisuite_is_packaged_as_primary_provider():
     assert in_match is not None
     assert txt_match is not None
     assert txt_match.group(1) == in_match.group(1)
+
+
+def test_gitpython_security_floor_is_consistent():
+    requirements_in = (PROJECT_ROOT / "requirements.in").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    floor_match = re.search(r"^GitPython>=(\S+)$", requirements_in, flags=re.MULTILINE)
+    assert floor_match is not None
+    floor = Version(floor_match.group(1))
+    assert floor >= Version("3.1.55")
+    assert f"GitPython>={floor}" in pyproject["project"]["dependencies"]
+
+    for lockfile in ["requirements.txt", "requirements-dev.txt"]:
+        locked = (PROJECT_ROOT / lockfile).read_text(encoding="utf-8")
+        locked_match = re.search(r"^gitpython==([^\s\\]+)", locked, flags=re.MULTILINE)
+        assert locked_match is not None
+        assert Version(locked_match.group(1)) >= floor
 
 
 def test_runtime_requirements_are_hash_pinned():

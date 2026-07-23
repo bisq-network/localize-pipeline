@@ -7,6 +7,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+### Fixed
+
+- Require GitPython 3.1.55 or newer and refresh both lockfiles so dependency
+  audits reject releases affected by the July 2026 GitPython advisories.
+
 ## [0.1.7] - 2026-07-13
 
 ### Fixed
