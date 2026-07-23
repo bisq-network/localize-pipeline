@@ -1,9 +1,20 @@
 FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS gh-builder
 
-ARG GH_VERSION=2.93.0
+ARG GH_VERSION=2.96.0
+ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
+ARG GRPC_VERSION=1.82.1
 ENV CGO_ENABLED=0
 
-RUN GOBIN=/out go install github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}
+WORKDIR /src/gh
+RUN git clone --depth 1 --branch "v${GH_VERSION}" \
+        https://github.com/cli/cli.git . && \
+    test "$(git rev-parse HEAD)" = "$GH_COMMIT" && \
+    go get "google.golang.org/grpc@v${GRPC_VERSION}" && \
+    GH_VERSION="${GH_VERSION}" go run script/build.go bin/gh && \
+    install -D bin/gh /out/gh
+RUN go version -m /out/gh > /tmp/gh-buildinfo && \
+    grep -E "google[.]golang[.]org/grpc[[:space:]]+v${GRPC_VERSION}([[:space:]]|$)" \
+        /tmp/gh-buildinfo
 
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
