@@ -548,3 +548,66 @@ def test_network_terminology_rules_flag_the_real_1606_mistranslations():
         _transport("de", "Transport"),
     ]
     assert evaluate_semantic_rules(changes=clean, rules=rules) == []
+
+
+_CONTAMINATION_RULE_ID = "no-vietnamese-horn-vowels-outside-vi"
+
+
+@pytest.mark.parametrize("config_path", [BISQ_PROFILE_CONFIG, BISQ_MOBILE_PROFILE_CONFIG])
+def test_cross_language_contamination_guard_is_encoded(config_path):
+    """bisq2#4884 CodeRabbit flagged a cross-language contamination token.
+
+    The merged Yoruba `bisqEasy.takeOffer.noMediatorAvailable.warning`
+    contained `dữdata`, fusing the Vietnamese word `dữ` (from vi's
+    "dữ liệu mạng" = network data) with English "data". Vietnamese horn
+    vowels never appear in any other Bisq target locale, so a locale-wide
+    guard (every locale except vi) catches this class of vi-fragment bleed.
+    The guard is mirrored into every profile like the other shared nits.
+    """
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    rules_by_id = {rule["id"]: rule for rule in config.get("semantic_quality_rules", [])}
+
+    assert _CONTAMINATION_RULE_ID in rules_by_id
+    rule = rules_by_id[_CONTAMINATION_RULE_ID]
+    assert rule["source"] == "bisq2#4884 CodeRabbit"
+    assert rule["severity"] == "error"
+    assert rule["locales"] == ["*"]
+    assert rule["excluded_locales"] == ["vi"]
+    assert rule["keys"] == ["*"]
+
+
+@pytest.mark.parametrize("config_path", [BISQ_PROFILE_CONFIG, BISQ_MOBILE_PROFILE_CONFIG])
+def test_contamination_guard_flags_the_real_4884_token(config_path):
+    """The guard must catch the merged Yoruba `dữdata` token but not clean vi."""
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    rules = load_semantic_rules(config["semantic_quality_rules"])
+
+    def _warning(locale, value):
+        return TranslationChange(
+            file=f"bisq_easy_{locale}.properties",
+            locale_code=locale,
+            key="bisqEasy.takeOffer.noMediatorAvailable.warning",
+            source_value="No mediator is currently available.",
+            old_value=None,
+            new_value=value,
+        )
+
+    # The merged contamination must be flagged in the affected (non-vi) locale.
+    contaminated = _warning(
+        "yo",
+        "O lè tún bẹ̀rẹ̀ ohun èlò náà láti tún gba dữdata nẹ́tíwọ̀kì.",
+    )
+    findings = evaluate_semantic_rules(changes=[contaminated], rules=rules)
+    assert any(f.rule_id == _CONTAMINATION_RULE_ID for f in findings)
+
+    # Legitimate Vietnamese (horn vowels expected) and a cleaned Yoruba value
+    # (no horn vowels) must both pass the guard.
+    clean = [
+        _warning("vi", "Bạn có thể thử khởi động lại ứng dụng để tải lại dữ liệu mạng."),
+        _warning("yo", "O lè tún bẹ̀rẹ̀ ohun èlò náà láti tún gba data nẹ́tíwọ̀kì."),
+    ]
+    clean_findings = [
+        f for f in evaluate_semantic_rules(changes=clean, rules=rules)
+        if f.rule_id == _CONTAMINATION_RULE_ID
+    ]
+    assert clean_findings == []

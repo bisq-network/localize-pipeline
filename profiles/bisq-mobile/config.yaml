@@ -97,6 +97,14 @@ semantic_quality_rules:
     regex_ignorecase: true
     severity: "error"
     source: "bisq-mobile#1606 CodeRabbit"
+  - id: "no-vietnamese-horn-vowels-outside-vi"
+    message: "Vietnamese horn vowels (ư/ơ and their tone-mark variants) must not appear outside the Vietnamese locale; they signal cross-language contamination such as the Yoruba 'dữdata' token that fused Vietnamese 'dữ' with English 'data'."
+    locales: ["*"]
+    excluded_locales: ["vi"]
+    keys: ["*"]
+    forbidden_target_regex: '[ưừứữửựƯỪỨỮỬỰơờớỡởợƠỜỚỠỞỢ]'
+    severity: "error"
+    source: "bisq2#4884 CodeRabbit"
 supported_locales:
   - code: "af_ZA"
     name: "Afrikaans"
