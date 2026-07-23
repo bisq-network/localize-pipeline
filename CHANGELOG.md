@@ -13,6 +13,13 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   CLI 2.96.0 with gRPC-Go 1.82.1 so dependency and image audits reject the
   July 2026 advisories.
 
+### Changed
+
+- The translation system prompt now instructs the model to match the
+  grammatical number of the English source and to keep singular/plural count
+  templates (e.g. keys ending in `.single`/`.plural`) distinct, reducing
+  singular-slot-uses-plural-word regressions in inflected languages.
+
 ## [0.1.7] - 2026-07-13
 
 ### Fixed
