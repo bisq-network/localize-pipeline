@@ -11,14 +11,23 @@ _TRANSLATE_MODULE = importlib.import_module("localize.translate_localization_fil
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# CodeRabbit refuses to review a pull request with more than this many files
+# ("Too many files! This PR contains N files, which is X over the limit of 100").
+# A batch at or above this size is published without any review, so the split
+# threshold has to stay strictly below it.
+CODERABBIT_MAX_REVIEWABLE_FILES = 100
 
-def test_default_max_files_per_pr_matches_coderabbit_review_limit():
+
+def _script_default_max_files_per_pr() -> int:
     script = (REPO_ROOT / "update-translations.sh").read_text()
-
     match = re.search(r"^DEFAULT_MAX_FILES_PER_PR=(\d+)", script, re.MULTILINE)
 
     assert match is not None
-    assert int(match.group(1)) == 150
+    return int(match.group(1))
+
+
+def test_default_max_files_per_pr_stays_under_coderabbit_review_limit():
+    assert _script_default_max_files_per_pr() < CODERABBIT_MAX_REVIEWABLE_FILES
 
 
 def test_publish_translation_changes_runs_under_set_u(tmp_path):
@@ -70,6 +79,78 @@ publish_translation_changes
     assert result.returncode == 0, result.stderr
 
 
+def test_every_published_batch_stays_within_coderabbit_review_limit(tmp_path):
+    """A run large enough to split must not emit a batch CodeRabbit will skip.
+
+    bisq-network/bisq2#4891 shipped 150 files in one batch and was published
+    with no review at all, so assert on the emitted batch sizes rather than on
+    the threshold constant alone.
+    """
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    start = script.index("publish_translation_changes() {")
+    end = script.index("\npublish_translation_changes\n", start)
+    function_text = script[start:end]
+    default_max_files = _script_default_max_files_per_pr()
+    # Three 54-locale resource groups, the shape of the 2026-07-24 run.
+    total_files = 162
+    harness = f"""
+set -euo pipefail
+log() {{ :; }}
+record_pipeline_event() {{ :; }}
+command_exists() {{ return 1; }}
+collect_changed_translation_files() {{
+  for i in $(seq 1 {total_files}); do
+    printf '%s\\n' "$1/messages_$i.properties"
+  done
+}}
+stage_and_submit_batch() {{ printf 'BATCH %s\\n' "${{#BATCH_FILES[@]}}"; return 0; }}
+mapfile() {{
+  local array_name
+  if [ "${{1:-}}" = "-t" ]; then
+    shift
+  fi
+  array_name="$1"
+  eval "$array_name=()"
+  local line
+  while IFS= read -r line; do
+    eval "$array_name+=(\\"\\$line\\")"
+  done
+}}
+git() {{
+  case "$*" in
+    "config user.name "*) return 0 ;;
+    "config user.email "*) return 0 ;;
+    "remote") printf '%s\\n' origin ;;
+    "remote get-url origin") printf '%s\\n' git@github.com:owner/repo.git ;;
+    *) return 0 ;;
+  esac
+}}
+{function_text}
+APP_ROOT={str(tmp_path)!r}
+TARGET_PROJECT_ROOT={str(tmp_path)!r}
+ABSOLUTE_INPUT_FOLDER={str(tmp_path / "resources")!r}
+INPUT_FOLDER=resources
+DRY_RUN=false
+MAX_FILES_PER_PR={default_max_files}
+TRANSLATION_BRANCH_PREFIX=translation-updates
+publish_translation_changes
+"""
+
+    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
+
+    assert result.returncode == 0, result.stderr
+    batch_sizes = [
+        int(line.split()[1])
+        for line in result.stdout.splitlines()
+        if line.startswith("BATCH ")
+    ]
+
+    assert batch_sizes, result.stdout
+    assert sum(batch_sizes) == total_files
+    for size in batch_sizes:
+        assert size < CODERABBIT_MAX_REVIEWABLE_FILES, batch_sizes
+
+
 def test_max_files_per_pr_is_validated_before_batching():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
@@ -85,13 +166,23 @@ def test_max_files_per_pr_is_validated_before_batching():
 def test_env_example_documents_max_files_per_pr_override():
     env_example = (REPO_ROOT / "docker" / ".env.example").read_text()
 
-    assert "MAX_FILES_PER_PR=150" in env_example
+    match = re.search(r"^MAX_FILES_PER_PR=(\d+)", env_example, re.MULTILINE)
+
+    assert match is not None
+    # The documented override must not drift away from the script default, and
+    # must not talk operators into a value CodeRabbit refuses to review.
+    assert int(match.group(1)) == _script_default_max_files_per_pr()
+    assert int(match.group(1)) < CODERABBIT_MAX_REVIEWABLE_FILES
+    assert "150 files" not in env_example
 
 
 def test_health_check_reads_github_token_from_main_or_mobile_install():
     script = (REPO_ROOT / "scripts" / "check-translation-services.sh").read_text()
 
-    assert 'for env_file in "$INSTALL_ROOT/docker/.env" "$MOBILE_INSTALL_ROOT/docker/.env"' in script
+    assert (
+        'for env_file in "$INSTALL_ROOT/docker/.env" "$MOBILE_INSTALL_ROOT/docker/.env"'
+        in script
+    )
     assert 'if [ -z "$GITHUB_TOKEN" ] && [ -f "$env_file" ]; then' in script
 
 
@@ -101,11 +192,20 @@ def test_health_check_alerts_on_stale_completed_cron_runs():
     assert "cron_log_files()" in script
     assert "combine_cron_logs()" in script
     assert 'gzip -cd -- "$file"' in script
-    assert 'MAX_CRON_SUCCESS_AGE_SECONDS="${MAX_CRON_SUCCESS_AGE_SECONDS:-93600}"' in script
+    assert (
+        'MAX_CRON_SUCCESS_AGE_SECONDS="${MAX_CRON_SUCCESS_AGE_SECONDS:-93600}"'
+        in script
+    )
     assert 'local max_success_age_sec="$3"' in script
     assert "last completed run is too old" in script
-    assert 'check_cron_log "Main service" "$main_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"' in script
-    assert 'check_cron_log "Mobile app service" "$mobile_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"' in script
+    assert (
+        'check_cron_log "Main service" "$main_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"'
+        in script
+    )
+    assert (
+        'check_cron_log "Mobile app service" "$mobile_log" "$MAX_CRON_SUCCESS_AGE_SECONDS"'
+        in script
+    )
 
 
 def test_health_check_verifies_job_heartbeat_attempts():
@@ -130,7 +230,7 @@ def test_generated_prs_publish_translation_quality_gate_status():
     assert 'gh api "repos/$status_repo/commits/$commit_sha/status"' in script
     assert "for verify_attempt in 1 2 3 4 5" in script
     assert 'sleep "$verify_delay"' in script
-    assert 'verify_delay=$((verify_delay * 2))' in script
+    assert "verify_delay=$((verify_delay * 2))" in script
     assert "2>/dev/null || true" in script
     assert "QUALITY_REPORT_MD" in script
 
@@ -142,7 +242,7 @@ def test_fork_repo_name_short_strips_git_suffix_before_status_api():
     submit_index = script.index('if ! stage_and_submit_batch "$BRANCH_NAME"')
 
     assert "origin_url=$(git remote get-url origin)" in script
-    assert 's#\\.git$##' in script
+    assert "s#\\.git$##" in script
     assert 'status_repo="${FORK_OWNER}/${FORK_REPO_NAME_SHORT}"' in script
     assert normalize_index < submit_index
 
@@ -160,7 +260,9 @@ def test_validation_summary_is_reset_before_translation_script_runs():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     reset_index = script.index("translation_validation_summary.json")
-    python_index = script.index('python3 -u -m localize.cli run --config "$CONFIG_FILE"')
+    python_index = script.index(
+        'python3 -u -m localize.cli run --config "$CONFIG_FILE"'
+    )
 
     assert reset_index < python_index
     assert '{"files":{},"pipeline_warnings":[]}' in script
@@ -171,7 +273,7 @@ def test_localize_dry_run_env_overrides_shell_dry_run_config():
 
     dry_run_index = script.index('DRY_RUN=$(get_config_value "dry_run" "$CONFIG_FILE")')
     override_index = script.index('case "${LOCALIZE_DRY_RUN:-}" in')
-    publish_index = script.index('publish_translation_changes()')
+    publish_index = script.index("publish_translation_changes()")
 
     assert dry_run_index < override_index < publish_index
     assert "DRY_RUN=true" in script[override_index:publish_index]
@@ -185,8 +287,14 @@ def test_smoke_only_mode_runs_before_pending_pr_guard():
 
     assert "run_smoke_only_if_requested()" in script
     assert 'local app_root="${APP_ROOT:-/app}"' in script
-    assert '( cd "$app_root" && python3 -m localize.cli doctor --config "$CONFIG_FILE" )' in script
-    assert '( cd "$app_root" && python3 -m localize.cli smoke --config "$CONFIG_FILE" )' in script
+    assert (
+        '( cd "$app_root" && python3 -m localize.cli doctor --config "$CONFIG_FILE" )'
+        in script
+    )
+    assert (
+        '( cd "$app_root" && python3 -m localize.cli smoke --config "$CONFIG_FILE" )'
+        in script
+    )
     assert "python3 -m localize.cli doctor" in script
     assert "python3 -m localize.cli smoke" in script
     assert smoke_index < pending_guard_index
@@ -221,7 +329,10 @@ def test_translation_source_is_read_and_defaults_to_transifex():
     """translation_source is read from config and defaults to transifex (back-compat)."""
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    assert 'TRANSLATION_SOURCE=$(get_config_value "translation_source" "$CONFIG_FILE")' in script
+    assert (
+        'TRANSLATION_SOURCE=$(get_config_value "translation_source" "$CONFIG_FILE")'
+        in script
+    )
     assert 'TRANSLATION_SOURCE="${TRANSLATION_SOURCE:-transifex}"' in script
 
 
@@ -234,7 +345,7 @@ def test_translation_source_is_normalized_and_validated():
     assert "tr '[:upper:]' '[:lower:]'" in script
     assert 'is_supported_translation_source "$TRANSLATION_SOURCE"' in script
     # Normalization must happen before the git-source guard is evaluated.
-    norm_index = script.index('TRANSLATION_SOURCE=$(normalize_translation_source')
+    norm_index = script.index("TRANSLATION_SOURCE=$(normalize_translation_source")
     guard_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
     assert norm_index < guard_index
 
@@ -264,7 +375,9 @@ def test_git_source_prepares_diff_baseline_before_pipeline():
     checkout_index = script.index('git checkout -B "${DEFAULT_BRANCH}"')
     baseline_index = script.index('prepare_git_source_diff_base "$TRANSLATION_SOURCE"')
     prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
-    python_index = script.index('python3 -u -m localize.cli run --config "$CONFIG_FILE"')
+    python_index = script.index(
+        'python3 -u -m localize.cli run --config "$CONFIG_FILE"'
+    )
 
     assert checkout_index < baseline_index < prepare_index < python_index
 
@@ -275,7 +388,10 @@ def test_git_source_baseline_uses_persistent_logs_state():
 
     assert "sanitize_state_component()" in script
     assert 'state_dir="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"' in script
-    assert 'input_component=$(sanitize_state_component "${INPUT_FOLDER:-default}")' in script
+    assert (
+        'input_component=$(sanitize_state_component "${INPUT_FOLDER:-default}")'
+        in script
+    )
     assert "git-source-baseline" in script
     assert "GIT_SOURCE_BASELINE_FILE=" in script
     assert "GIT_SOURCE_CURRENT_HEAD=" in script
@@ -290,10 +406,15 @@ def test_git_source_baseline_advances_only_after_no_change_success():
     assert "TRANSLATION_CHANGES_CREATED=true" in script
     assert '"${DRY_RUN:-false}" == "true"' in script
     assert '"${TRANSLATION_CHANGES_CREATED:-false}" == "true"' in script
-    assert "Not advancing git-source baseline because translation changes were produced" in script
+    assert (
+        "Not advancing git-source baseline because translation changes were produced"
+        in script
+    )
 
     publish_index = script.index("\npublish_translation_changes\n")
-    update_index = script.index('update_git_source_baseline_if_safe "$TRANSLATION_SOURCE"')
+    update_index = script.index(
+        'update_git_source_baseline_if_safe "$TRANSLATION_SOURCE"'
+    )
     return_branch_index = script.index("# Go back to original branch")
 
     assert publish_index < update_index < return_branch_index
@@ -302,7 +423,9 @@ def test_git_source_baseline_advances_only_after_no_change_success():
 def test_translation_source_read_before_transifex_step():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    read_index = script.index('TRANSLATION_SOURCE=$(get_config_value "translation_source"')
+    read_index = script.index(
+        'TRANSLATION_SOURCE=$(get_config_value "translation_source"'
+    )
     prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
     assert read_index < prepare_index
 
@@ -311,7 +434,9 @@ def test_source_adapter_is_prepared_before_python_pipeline_runs():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     prepare_index = script.index('prepare_translation_source "$TRANSLATION_SOURCE"')
-    python_index = script.index('python3 -u -m localize.cli run --config "$CONFIG_FILE"')
+    python_index = script.index(
+        'python3 -u -m localize.cli run --config "$CONFIG_FILE"'
+    )
 
     assert prepare_index < python_index
 
@@ -324,7 +449,9 @@ def test_publish_adapter_wraps_commit_and_pr_flow():
     assert "translation_file_status_regex()" in script
     assert "collect_changed_translation_files()" in script
     publish_def_index = script.index("publish_translation_changes()")
-    publish_call_index = script.index("publish_translation_changes", publish_def_index + 1)
+    publish_call_index = script.index(
+        "publish_translation_changes", publish_def_index + 1
+    )
     return_branch_index = script.index("Returning to original branch")
 
     assert publish_def_index < publish_call_index < return_branch_index
@@ -333,7 +460,10 @@ def test_publish_adapter_wraps_commit_and_pr_flow():
 def test_publish_adapter_preserves_both_paths_for_translation_renames():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    assert "translation_file_status_regex() {\n    translation_file_change_regex\n}" in script
+    assert (
+        "translation_file_status_regex() {\n    translation_file_change_regex\n}"
+        in script
+    )
     assert 'extension_regex="\\\\.($(translation_file_extension_regex))$"' in script
     assert 'old_path = substr(path, 1, index(path, " -> ") - 1)' in script
     assert 'new_path = substr(path, index(path, " -> ") + 4)' in script
@@ -348,30 +478,32 @@ def test_publish_adapter_supports_json_translation_files():
     assert "localization_formats" in script
     assert "file_extension" in script
     assert "json)\n            printf 'json'" in script
-    assert "java_properties|\"\"|\"null\")\n            printf 'properties'" in script
+    assert 'java_properties|""|"null")\n            printf \'properties\'' in script
 
 
 def test_publish_adapter_supports_mixed_format_profiles():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     function_body = script[
-        script.index("translation_file_extension_regex() {"):
-        script.index("collect_changed_translation_files()")
+        script.index("translation_file_extension_regex() {") : script.index(
+            "collect_changed_translation_files()"
+        )
     ]
 
     assert "localization_formats" in function_body
-    assert "format_extension(profile.get(\"format\"))" in function_body
-    assert "format_extension(profile.get(\"localization_format\"))" in function_body
+    assert 'format_extension(profile.get("format"))' in function_body
+    assert 'format_extension(profile.get("localization_format"))' in function_body
     assert "extensions.add(extension_for_format(format_id))" in function_body
-    assert "print(\"|\".join(sorted(extensions)))" in function_body
+    assert 'print("|".join(sorted(extensions)))' in function_body
 
 
 def test_translation_file_extension_override_precedes_format_id_defaults():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     function_body = script[
-        script.index("translation_file_extension_regex() {"):
-        script.index("collect_changed_translation_files()")
+        script.index("translation_file_extension_regex() {") : script.index(
+            "collect_changed_translation_files()"
+        )
     ]
 
     extension_normalize_index = function_body.index("normalize_extension")
@@ -416,8 +548,14 @@ def test_pending_pr_gate_does_not_swallow_gh_failures():
 
     assert "if ! MANUAL_BLOCK_PR=$(gh pr list" in script
     assert "if ! existing_pr_branches=$(gh pr list" in script
-    assert "gh pr list --state open --author \"@me\" --repo \"$UPSTREAM_REPO_NAME\" --search \"in:title $BLOCKING_KEYWORD\" --json number -q '.[0].number' || true" not in script
-    assert "gh pr list --state open --author \"@me\" --repo \"$UPSTREAM_REPO_NAME\" --json headRefName -q '.[].headRefName' | grep" not in script
+    assert (
+        'gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --search "in:title $BLOCKING_KEYWORD" --json number -q \'.[0].number\' || true'
+        not in script
+    )
+    assert (
+        'gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --json headRefName -q \'.[].headRefName\' | grep'
+        not in script
+    )
     assert "Failed to query manually-blocked PRs" in script
     assert "Failed to query existing translation PRs" in script
 
@@ -425,12 +563,16 @@ def test_pending_pr_gate_does_not_swallow_gh_failures():
 def test_publish_adapter_uses_collected_translation_files_for_changes():
     script = (REPO_ROOT / "update-translations.sh").read_text()
     publish_body = script[
-        script.index("publish_translation_changes() {"):
-        script.index("# Go back to original branch")
+        script.index("publish_translation_changes() {") : script.index(
+            "# Go back to original branch"
+        )
     ]
 
-    assert 'mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")' in publish_body
-    assert 'TRANSLATION_CHANGES=$(printf' in publish_body
+    assert (
+        'mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")'
+        in publish_body
+    )
+    assert "TRANSLATION_CHANGES=$(printf" in publish_body
     assert "No git-scoped translation file changes detected" in publish_body
     assert "git status --porcelain | grep -E" not in publish_body
 
@@ -441,7 +583,9 @@ def test_shell_helpers_are_local_run_safe_and_nonfatal():
     assert 'SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)' in script
     assert 'LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"' in script
     assert 'LOG_FILE="$LOG_DIR/deployment_log.log"' in script
-    log_cmd_body = script[script.index("log_cmd() {") : script.index("record_pipeline_event()")]
+    log_cmd_body = script[
+        script.index("log_cmd() {") : script.index("record_pipeline_event()")
+    ]
     assert "local status=${PIPESTATUS[0]}" in log_cmd_body
     assert "return 0" in log_cmd_body
 
@@ -449,17 +593,33 @@ def test_shell_helpers_are_local_run_safe_and_nonfatal():
 def test_pipeline_events_use_one_key_value_per_argument():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    assert 'record_pipeline_event "source_files_detected" "count=0" "source=transifex"' in script
-    assert 'record_pipeline_event "source_files_detected" "count=${SOURCE_CHANGE_COUNT:-0}" "source=transifex"' in script
-    assert 'record_pipeline_event "pull_request_created" "url=$PR_URL" "branch=$branch" "files=${#BATCH_FILES[@]}"' in script
-    assert 'record_pipeline_event "translation_files_detected" "count=$TOTAL_FILES" "input_folder=$REL_INPUT_FOLDER"' in script
+    assert (
+        'record_pipeline_event "source_files_detected" "count=0" "source=transifex"'
+        in script
+    )
+    assert (
+        'record_pipeline_event "source_files_detected" "count=${SOURCE_CHANGE_COUNT:-0}" "source=transifex"'
+        in script
+    )
+    assert (
+        'record_pipeline_event "pull_request_created" "url=$PR_URL" "branch=$branch" "files=${#BATCH_FILES[@]}"'
+        in script
+    )
+    assert (
+        'record_pipeline_event "translation_files_detected" "count=$TOTAL_FILES" "input_folder=$REL_INPUT_FOLDER"'
+        in script
+    )
     assert '"count=0 source=transifex"' not in script
 
 
 def test_transifex_is_required_only_for_transifex_source_and_times_out():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
-    tool_loop = script[script.index("for tool in yq git curl jq python3") : script.index("# --- Execution Lock")]
+    tool_loop = script[
+        script.index("for tool in yq git curl jq python3") : script.index(
+            "# --- Execution Lock"
+        )
+    ]
     assert " tx " not in tool_loop
     assert "TX_PULL_CMD=(tx pull -t -f --use-git-timestamps)" in script
     assert "TX_PULL_CMD=(tx pull -s -t -f --use-git-timestamps)" in script
@@ -469,7 +629,11 @@ def test_transifex_is_required_only_for_transifex_source_and_times_out():
 
 def test_publish_flow_preflights_gh_and_caps_pr_body():
     script = (REPO_ROOT / "update-translations.sh").read_text()
-    stage = script[script.index("stage_and_submit_batch()") : script.index("publish_translation_changes()")]
+    stage = script[
+        script.index("stage_and_submit_batch()") : script.index(
+            "publish_translation_changes()"
+        )
+    ]
 
     preflight_index = stage.index("Cannot create PR: gh CLI or GITHUB_TOKEN missing.")
     commit_index = stage.index('if ! commit_staged_changes "$commit_msg"')
@@ -495,8 +659,14 @@ def test_git_operations_are_scoped_and_explicit():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     assert 'LOCK_DIR="${LOCALIZE_STATE_DIR:-$LOG_DIR/state}"' in script
-    assert 'LOCK_FILE="$LOCK_DIR/translation-${UPSTREAM_REPO_NAME//\\//-}.lock"' in script
-    config_body = script[script.index("get_config_value()") : script.index("prepare_translation_source()")]
+    assert (
+        'LOCK_FILE="$LOCK_DIR/translation-${UPSTREAM_REPO_NAME//\\//-}.lock"' in script
+    )
+    config_body = script[
+        script.index("get_config_value()") : script.index(
+            "prepare_translation_source()"
+        )
+    ]
     assert "local val" in config_body
     assert "ABSOLUTE_INPUT_FOLDER=$(echo" not in script
     assert "git config --type=bool --get commit.gpgsign" in script

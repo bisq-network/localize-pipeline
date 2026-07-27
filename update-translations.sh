@@ -782,8 +782,10 @@ ls -la "$TARGET_PROJECT_ROOT"
 log "Listing permissions for $TARGET_PROJECT_ROOT/.git before git status:"
 ls -la "$TARGET_PROJECT_ROOT/.git"
 
-# Maximum files per PR before splitting. CodeRabbit skips review above 150.
-DEFAULT_MAX_FILES_PER_PR=150
+# Maximum files per PR before splitting. CodeRabbit refuses to review a PR with
+# more than 100 files, and an unreviewed batch is the one thing batching exists
+# to prevent, so stay strictly below that cap with a margin for headroom.
+DEFAULT_MAX_FILES_PER_PR=90
 MAX_FILES_PER_PR=${MAX_FILES_PER_PR:-$DEFAULT_MAX_FILES_PER_PR}
 if [[ ! "$MAX_FILES_PER_PR" =~ ^[1-9][0-9]*$ ]]; then
     log "Invalid MAX_FILES_PER_PR '$MAX_FILES_PER_PR'; expected a positive integer. Falling back to $DEFAULT_MAX_FILES_PER_PR." "WARNING"
