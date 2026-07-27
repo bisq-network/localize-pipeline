@@ -90,7 +90,11 @@ def test_every_published_batch_stays_within_coderabbit_review_limit(tmp_path):
     start = script.index("publish_translation_changes() {")
     end = script.index("\npublish_translation_changes\n", start)
     function_text = script[start:end]
-    default_max_files = _script_default_max_files_per_pr()
+    # Run the script's own default/validation block rather than injecting a
+    # threshold, so the batch sizes below depend on the real defaulting path.
+    threshold_start = script.index("DEFAULT_MAX_FILES_PER_PR=")
+    threshold_end = script.index("\nfi\n", threshold_start) + len("\nfi\n")
+    threshold_text = script[threshold_start:threshold_end]
     # Three 54-locale resource groups, the shape of the 2026-07-24 run.
     total_files = 162
     harness = f"""
@@ -131,7 +135,8 @@ TARGET_PROJECT_ROOT={str(tmp_path)!r}
 ABSOLUTE_INPUT_FOLDER={str(tmp_path / "resources")!r}
 INPUT_FOLDER=resources
 DRY_RUN=false
-MAX_FILES_PER_PR={default_max_files}
+unset MAX_FILES_PER_PR
+{threshold_text}
 TRANSLATION_BRANCH_PREFIX=translation-updates
 publish_translation_changes
 """
