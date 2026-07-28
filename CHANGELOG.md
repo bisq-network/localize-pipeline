@@ -9,6 +9,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Fixed
 
+- Split generated translation PRs at 90 files instead of 150. CodeRabbit now
+  refuses to review a PR above 100 files, so the previous threshold produced a
+  lead batch that merged with no review at all (`bisq-network/bisq2#4891`
+  carried 150 files and 205 of 217 changed values past review). Deployments
+  that pin `MAX_FILES_PER_PR` in `docker/.env` must lower it to match.
 - Require GitPython 3.1.55 or newer, refresh both lockfiles, and build GitHub
   CLI 2.96.0 with gRPC-Go 1.82.1 so dependency and image audits reject the
   July 2026 advisories.
