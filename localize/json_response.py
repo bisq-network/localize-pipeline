@@ -23,7 +23,11 @@ def chat_reasoning_effort_kwargs(
     if not reasoning_effort:
         return {}
     capabilities = provider.capabilities_for_model(model)
-    if getattr(capabilities, "supports_reasoning_effort", False):
+    supported_efforts = getattr(capabilities, "supported_reasoning_efforts", frozenset())
+    if (
+        getattr(capabilities, "supports_reasoning_effort", False)
+        and (not supported_efforts or reasoning_effort in supported_efforts)
+    ):
         return {"reasoning_effort": reasoning_effort}
     return {}
 

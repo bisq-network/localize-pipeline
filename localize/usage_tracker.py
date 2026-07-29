@@ -28,6 +28,9 @@ DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
     },
     "gpt-5.6-terra": {
         "input": 2.50, "cached_input": 0.25, "cache_write": 3.125, "output": 15.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     },
     "gpt-5.6-luna": {
         "input": 1.00, "cached_input": 0.10, "cache_write": 1.25, "output": 6.00,
@@ -60,6 +63,7 @@ def cost_for_tokens(
     *,
     cached_tokens: int = 0,
     cache_write_tokens: int = 0,
+    apply_long_context_pricing: bool = True,
 ) -> Optional[float]:
     """USD cost for token counts, or ``None`` if ``model`` has no known price.
 
@@ -81,11 +85,20 @@ def cost_for_tokens(
     uncached_tokens = remaining_prompt_tokens - cache_write_tokens
     cached_input_price = price.get("cached_input", price["input"])
     cache_write_price = price.get("cache_write", price["input"])
+    input_multiplier = output_multiplier = 1.0
+    long_context_threshold = price.get("long_context_threshold")
+    if (
+        apply_long_context_pricing
+        and long_context_threshold is not None
+        and prompt_tokens > long_context_threshold
+    ):
+        input_multiplier = price.get("long_context_input_multiplier", 1.0)
+        output_multiplier = price.get("long_context_output_multiplier", 1.0)
     return (
-        uncached_tokens / 1_000_000 * price["input"]
-        + cached_tokens / 1_000_000 * cached_input_price
-        + cache_write_tokens / 1_000_000 * cache_write_price
-        + completion_tokens / 1_000_000 * price["output"]
+        uncached_tokens / 1_000_000 * price["input"] * input_multiplier
+        + cached_tokens / 1_000_000 * cached_input_price * input_multiplier
+        + cache_write_tokens / 1_000_000 * cache_write_price * input_multiplier
+        + completion_tokens / 1_000_000 * price["output"] * output_multiplier
     )
 
 
@@ -96,6 +109,8 @@ class _ModelUsage:
     completion_tokens: int = 0
     cached_tokens: int = 0
     cache_write_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    cost_complete: bool = True
 
 
 class UsageTracker:
@@ -126,6 +141,11 @@ class UsageTracker:
             entry.completion_tokens += int(raw_usage.get("completion_tokens", 0) or 0)
             entry.cached_tokens += int(raw_usage.get("cached_tokens", 0) or 0)
             entry.cache_write_tokens += int(raw_usage.get("cache_write_tokens", 0) or 0)
+            raw_cost = raw_usage.get("estimated_cost_usd")
+            if raw_cost is None:
+                entry.cost_complete = False
+            else:
+                entry.estimated_cost_usd += float(raw_cost)
 
     def record(
         self,
@@ -143,6 +163,18 @@ class UsageTracker:
         entry.completion_tokens += int(completion_tokens or 0)
         entry.cached_tokens += int(cached_tokens or 0)
         entry.cache_write_tokens += int(cache_write_tokens or 0)
+        cost = cost_for_tokens(
+            model,
+            prompt_tokens,
+            completion_tokens,
+            self._prices,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+        if cost is None:
+            entry.cost_complete = False
+        else:
+            entry.estimated_cost_usd += cost
 
     def record_response(self, model: str, response: Any) -> None:
         """Record usage from an OpenAI ChatCompletion response (no-op if absent)."""
@@ -158,16 +190,6 @@ class UsageTracker:
             cache_write_tokens=getattr(prompt_details, "cache_write_tokens", 0) or 0,
         )
 
-    def _model_cost(self, model: str, usage: _ModelUsage) -> Optional[float]:
-        return cost_for_tokens(
-            model,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            self._prices,
-            cached_tokens=usage.cached_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-        )
-
     def summary(self) -> Dict[str, Any]:
         """Return a structured summary of usage and estimated cost."""
         models: Dict[str, Any] = {}
@@ -175,11 +197,11 @@ class UsageTracker:
         total_cost = 0.0
         cost_known = True
         for model, u in sorted(self._by_model.items()):
-            cost = self._model_cost(model, u)
-            if cost is None:
+            cost = u.estimated_cost_usd if u.cost_complete else None
+            if not u.cost_complete:
                 cost_known = False
             else:
-                total_cost += cost
+                total_cost += u.estimated_cost_usd
             models[model] = {
                 "calls": u.calls,
                 "prompt_tokens": u.prompt_tokens,

@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from localize.usage_tracker import DEFAULT_PRICES, UsageTracker
+from localize.usage_tracker import DEFAULT_PRICES, UsageTracker, cost_for_tokens
 
 
 PRICES = {
@@ -51,6 +51,9 @@ def test_default_prices_cover_configured_gpt5_models():
         "cached_input": 0.25,
         "cache_write": 3.125,
         "output": 15.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     }
     assert DEFAULT_PRICES["gpt-5.6-luna"] == {
         "input": 1.00,
@@ -142,9 +145,39 @@ def test_record_response_prices_cached_reads_and_writes_separately():
     model = t.summary()["models"]["gpt-5.6-terra"]
     assert model["cached_tokens"] == 400_000
     assert model["cache_write_tokens"] == 200_000
-    # 400K uncached * $2.50 + 400K cached * $0.25
-    # + 200K writes * $3.125 + 100K output * $15.00
-    assert model["estimated_cost_usd"] == 3.225
+    # The 1M-token prompt uses Terra's long-context rates for the full request.
+    assert model["estimated_cost_usd"] == 5.7
+
+
+def test_gpt56_long_context_pricing_boundary():
+    base_cost = cost_for_tokens(
+        "gpt-5.6-terra",
+        272_000,
+        100_000,
+        cached_tokens=100_000,
+        cache_write_tokens=50_000,
+    )
+    long_cost = cost_for_tokens(
+        "gpt-5.6-terra",
+        272_001,
+        100_000,
+        cached_tokens=100_000,
+        cache_write_tokens=50_000,
+    )
+
+    assert base_cost == 1.98625
+    assert long_cost == 3.222505
+
+
+def test_long_context_pricing_is_applied_per_call_not_aggregate():
+    tracker = UsageTracker(prices=DEFAULT_PRICES)
+
+    tracker.record("gpt-5.6-terra", 200_000, 10_000)
+    tracker.record("gpt-5.6-terra", 200_000, 10_000)
+
+    model = tracker.summary()["models"]["gpt-5.6-terra"]
+    assert model["prompt_tokens"] == 400_000
+    assert model["estimated_cost_usd"] == 1.3
 
 
 def test_record_response_handles_missing_usage():

@@ -204,6 +204,17 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
     provider = MagicMock()
     provider.create_chat_completion = AsyncMock(return_value=response)
     provider.is_retryable_error.return_value = False
+    provider.capabilities_for_model.return_value = SimpleNamespace(
+        supports_reasoning_effort=True,
+        supported_reasoning_efforts=frozenset({
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }),
+    )
 
     with (
         patch("localize.translate_localization_files.DRY_RUN", False),

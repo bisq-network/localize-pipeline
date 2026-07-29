@@ -40,7 +40,15 @@ REASONING_EFFORT_VALUES = frozenset({
     "xhigh",
     "max",
 })
-_OPENAI_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+_GPT56_REASONING_EFFORTS = frozenset({
+    "none", "low", "medium", "high", "xhigh", "max",
+})
+_GPT54_55_REASONING_EFFORTS = frozenset({
+    "none", "low", "medium", "high", "xhigh",
+})
+_GPT51_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high"})
+_GPT5_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high"})
+_GPT_PRO_REASONING_EFFORTS = frozenset({"medium", "high", "xhigh"})
 _MODEL_PROVIDER_ALIASES = {
     "aisuite": "aisuite",
     "openai": "openai_compatible",
@@ -56,6 +64,7 @@ class ModelProviderCapabilities:
     supports_response_format: bool
     supports_completion_token_limit: bool = True
     supports_reasoning_effort: bool = False
+    supported_reasoning_efforts: frozenset[str] = frozenset()
 
 
 class ModelProviderConfigurationError(RuntimeError):
@@ -123,9 +132,25 @@ def normalize_reasoning_effort(value: Any) -> Optional[str]:
     return normalized if normalized in REASONING_EFFORT_VALUES else None
 
 
-def _openai_model_supports_reasoning_effort(model: str) -> bool:
+def _openai_supported_reasoning_efforts(model: str) -> frozenset[str]:
+    """Return documented effort values for an OpenAI model family."""
     bare_model = model.split(":", 1)[-1].strip().lower()
-    return bare_model.startswith(_OPENAI_REASONING_MODEL_PREFIXES)
+    if bare_model.startswith("gpt-5.6"):
+        return _GPT56_REASONING_EFFORTS
+    if bare_model.startswith(("gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro")):
+        return _GPT_PRO_REASONING_EFFORTS
+    if bare_model.startswith("gpt-5-pro"):
+        return frozenset({"high"})
+    if bare_model.startswith(("gpt-5.5", "gpt-5.4", "gpt-5.2")):
+        return _GPT54_55_REASONING_EFFORTS
+    if bare_model.startswith("gpt-5.1"):
+        return _GPT51_REASONING_EFFORTS
+    if (
+        bare_model == "gpt-5"
+        or bare_model.startswith(("gpt-5-", "gpt-5-mini", "gpt-5-nano"))
+    ):
+        return _GPT5_REASONING_EFFORTS
+    return frozenset()
 
 
 def normalize_model_provider_name(provider_name: str) -> str:
@@ -225,7 +250,11 @@ def _sanitize_aisuite_request_kwargs(
     )
     if capabilities.supports_response_format:
         sanitized = dict(kwargs)
-        if not capabilities.supports_reasoning_effort:
+        reasoning_effort = sanitized.get("reasoning_effort")
+        if reasoning_effort is not None and (
+            not capabilities.supports_reasoning_effort
+            or reasoning_effort not in capabilities.supported_reasoning_efforts
+        ):
             sanitized.pop("reasoning_effort", None)
         return sanitized
     return {
@@ -242,15 +271,17 @@ def _aisuite_capabilities_for_model(
     supports_openai_reasoning_effort: bool,
 ) -> ModelProviderCapabilities:
     provider_key = _aisuite_provider_key_for_model(model, default_provider)
+    reasoning_efforts = (
+        _openai_supported_reasoning_efforts(model)
+        if provider_key == "openai" and supports_openai_reasoning_effort
+        else frozenset()
+    )
     return ModelProviderCapabilities(
         provider_key=provider_key,
         supports_response_format=provider_key == "openai",
         supports_completion_token_limit=True,
-        supports_reasoning_effort=(
-            provider_key == "openai"
-            and supports_openai_reasoning_effort
-            and _openai_model_supports_reasoning_effort(model)
-        ),
+        supports_reasoning_effort=bool(reasoning_efforts),
+        supported_reasoning_efforts=reasoning_efforts,
     )
 
 
@@ -285,6 +316,14 @@ class OpenAICompatibleProvider:
         if self.client is None:
             raise ModelProviderConfigurationError("OpenAI-compatible client is not configured.")
 
+        capabilities = self.capabilities_for_model(model)
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort is not None and (
+            not capabilities.supports_reasoning_effort
+            or reasoning_effort not in capabilities.supported_reasoning_efforts
+        ):
+            kwargs = dict(kwargs)
+            kwargs.pop("reasoning_effort", None)
         response = await create_chat_completion(
             self.client,
             model=model,
@@ -364,14 +403,17 @@ class OpenAICompatibleProvider:
         return False
 
     def capabilities_for_model(self, model: str) -> ModelProviderCapabilities:
+        reasoning_efforts = (
+            _openai_supported_reasoning_efforts(model)
+            if self._supports_openai_reasoning_effort
+            else frozenset()
+        )
         return ModelProviderCapabilities(
             provider_key="openai_compatible",
             supports_response_format=True,
             supports_completion_token_limit=True,
-            supports_reasoning_effort=(
-                self._supports_openai_reasoning_effort
-                and _openai_model_supports_reasoning_effort(model)
-            ),
+            supports_reasoning_effort=bool(reasoning_efforts),
+            supported_reasoning_efforts=reasoning_efforts,
         )
 
     def _status_code_from_exception(self, exc: Any) -> Optional[int]:

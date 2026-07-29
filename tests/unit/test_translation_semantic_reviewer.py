@@ -225,6 +225,10 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
     )
     provider = MagicMock()
     provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.capabilities_for_model.return_value = SimpleNamespace(
+        supports_reasoning_effort=True,
+        supported_reasoning_efforts=frozenset({"none", "low", "medium", "high", "xhigh"}),
+    )
     changes = [
         TranslationChange(
             file="resources/mobile_es.properties",

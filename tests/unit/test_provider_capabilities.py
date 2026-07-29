@@ -28,6 +28,16 @@ def test_official_openai_provider_reports_reasoning_capability_for_gpt5():
     assert provider.capabilities_for_model(
         "gpt-5.6-terra"
     ).supports_reasoning_effort is True
+    assert provider.capabilities_for_model(
+        "gpt-5.6-terra"
+    ).supported_reasoning_efforts == frozenset({
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    })
     assert provider.capabilities_for_model("gpt-4o").supports_reasoning_effort is False
 
 
@@ -79,6 +89,41 @@ def test_reasoning_effort_is_only_sent_to_supported_routes():
         "gpt-4o",
         "none",
     ) == {}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5.6-terra",
+        "minimal",
+    ) == {}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5.4-mini",
+        "max",
+    ) == {}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5.4-mini",
+        "none",
+    ) == {"reasoning_effort": "none"}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5-pro",
+        "none",
+    ) == {}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5-pro",
+        "high",
+    ) == {"reasoning_effort": "high"}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5",
+        "none",
+    ) == {}
+    assert chat_reasoning_effort_kwargs(
+        openai_provider,
+        "gpt-5",
+        "minimal",
+    ) == {"reasoning_effort": "minimal"}
     assert chat_reasoning_effort_kwargs(
         openai_provider,
         "gpt-5.6-terra",
