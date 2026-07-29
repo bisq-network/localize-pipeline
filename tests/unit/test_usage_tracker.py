@@ -248,3 +248,20 @@ def test_write_json_can_merge_semantic_review_usage(tmp_path):
     assert data["stages"]["translation_and_holistic_review"]["totals"]["calls"] == 2
     assert data["stages"]["semantic_review"]["totals"]["calls"] == 2
     assert data["stages"]["semantic_review"]["totals"]["total_tokens"] == 550
+
+
+def test_write_json_preserves_stages_without_merging_usage(tmp_path):
+    path = tmp_path / "usage.json"
+    translation = UsageTracker(prices=DEFAULT_PRICES)
+    translation.record("gpt-4o-mini", 1000, 100)
+    translation.write_json(str(path), stage_name="translation")
+
+    semantic_review = UsageTracker(prices=DEFAULT_PRICES)
+    semantic_review.record("gpt-5.4-mini", 300, 30)
+    semantic_review.write_json(str(path), stage_name="semantic_review")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["totals"]["calls"] == 1
+    assert data["totals"]["total_tokens"] == 330
+    assert data["stages"]["translation"]["totals"]["total_tokens"] == 1100
+    assert data["stages"]["semantic_review"]["totals"]["total_tokens"] == 330

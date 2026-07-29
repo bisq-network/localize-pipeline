@@ -255,24 +255,26 @@ class UsageTracker:
         merge_existing: bool = False,
         stage_name: Optional[str] = None,
     ) -> None:
-        """Write usage, optionally merging an earlier stage and stage subtotal."""
+        """Write usage, optionally merging totals and preserving stage subtotals."""
         current_summary = self.summary()
         payload = current_summary
         stages: Dict[str, Any] = {}
-        if merge_existing:
+        existing_summary: Dict[str, Any] = {}
+        if merge_existing or stage_name:
             try:
                 with open(path, "r", encoding="utf-8") as file:
                     existing_summary = json.load(file)
             except FileNotFoundError:
                 existing_summary = {}
+        if merge_existing:
             combined = UsageTracker(prices=self._prices)
             combined.merge_summary(existing_summary)
             combined.merge_summary(current_summary)
             payload = combined.summary()
+        if stage_name:
             raw_stages = existing_summary.get("stages", {})
             if isinstance(raw_stages, dict):
                 stages = dict(raw_stages)
-        if stage_name:
             stage = UsageTracker(prices=self._prices)
             if stage_name in stages:
                 stage.merge_summary(stages[stage_name])
