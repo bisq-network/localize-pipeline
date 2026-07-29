@@ -26,7 +26,9 @@ from localize.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
     ModelProviderConfigurationError,
+    REASONING_EFFORT_VALUES,
     create_model_provider,
+    normalize_reasoning_effort,
     normalize_model_provider_name,
     requires_openai_credentials,
 )
@@ -122,17 +124,6 @@ _PLACEHOLDER_PATHS = frozenset({
     "/path/to/your/git/repo",
     "/path/to/properties/files",
 })
-_REASONING_EFFORT_VALUES = frozenset({
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-})
-
-
 def validate_config(
     config: Dict[str, Any],
     *,
@@ -230,11 +221,11 @@ def validate_config(
     model_name = str(config.get("model_name") or "gpt-4")
     review_model_name = str(config.get("review_model_name") or model_name)
     review_reasoning_effort = str(config.get("review_reasoning_effort") or "").strip()
-    if review_reasoning_effort and review_reasoning_effort not in _REASONING_EFFORT_VALUES:
+    if review_reasoning_effort and review_reasoning_effort not in REASONING_EFFORT_VALUES:
         issues.append(ConfigIssue(
             "error",
             "review_reasoning_effort must be one of: "
-            + ", ".join(sorted(_REASONING_EFFORT_VALUES))
+            + ", ".join(sorted(REASONING_EFFORT_VALUES))
             + ".",
         ))
     model_provider_name = normalize_model_provider_name(
@@ -653,10 +644,10 @@ def load_app_config() -> AppConfig:
     )
     model_name = str(config.get('model_name') or 'gpt-4')
     review_model_name = review_model_env or str(config.get('review_model_name') or model_name)
-    review_reasoning_effort = (
+    review_reasoning_effort = normalize_reasoning_effort(
         review_reasoning_effort_env
-        or str(config.get('review_reasoning_effort') or '').strip()
-        or None
+        if review_reasoning_effort_env is not None
+        else config.get('review_reasoning_effort')
     )
     model_provider_name = normalize_model_provider_name(
         str(config.get('model_provider', DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)

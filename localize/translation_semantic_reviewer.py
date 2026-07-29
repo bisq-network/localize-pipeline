@@ -25,6 +25,7 @@ from localize.model_provider import (
     ModelProviderConfigurationError,
     OpenAICompatibleProvider,
     create_model_provider,
+    normalize_reasoning_effort,
 )
 from localize.semantic_quality import (
     TranslationChange,
@@ -298,7 +299,10 @@ async def review_translation_changes(
 ) -> List[Dict[str, str]]:
     if not changes:
         return []
-    provider = model_provider or OpenAICompatibleProvider(client=client)
+    provider = model_provider or OpenAICompatibleProvider(
+        client=client,
+        supports_openai_reasoning_effort=True,
+    )
     findings: List[Dict[str, str]] = []
     for start in range(0, len(changes), SEMANTIC_REVIEW_BATCH_SIZE):
         batch = list(changes[start:start + SEMANTIC_REVIEW_BATCH_SIZE])
@@ -416,9 +420,8 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
             config.get("review_model_name", config.get("model_name", "gpt-4o")),
         )
     )
-    reasoning_effort = (
-        str(semantic_review_config.get("reasoning_effort") or "").strip()
-        or None
+    reasoning_effort = normalize_reasoning_effort(
+        semantic_review_config.get("reasoning_effort")
     )
     provider_name = str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     api_base_url = os.environ.get("OPENAI_BASE_URL") or config.get("api_base_url")

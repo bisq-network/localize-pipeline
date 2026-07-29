@@ -34,14 +34,50 @@ def test_cost_calculation():
 
 
 def test_default_prices_cover_configured_gpt5_models():
-    assert DEFAULT_PRICES["gpt-5.6"] == {"input": 5.00, "output": 30.00}
-    assert DEFAULT_PRICES["gpt-5.6-sol"] == {"input": 5.00, "output": 30.00}
-    assert DEFAULT_PRICES["gpt-5.6-terra"] == {"input": 2.50, "output": 15.00}
-    assert DEFAULT_PRICES["gpt-5.6-luna"] == {"input": 1.00, "output": 6.00}
-    assert DEFAULT_PRICES["gpt-5.5"] == {"input": 5.00, "output": 30.00}
-    assert DEFAULT_PRICES["gpt-5.4"] == {"input": 2.50, "output": 15.00}
-    assert DEFAULT_PRICES["gpt-5.4-mini"] == {"input": 0.75, "output": 4.50}
-    assert DEFAULT_PRICES["gpt-5.4-nano"] == {"input": 0.20, "output": 1.25}
+    assert DEFAULT_PRICES["gpt-5.6"] == {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 30.00,
+    }
+    assert DEFAULT_PRICES["gpt-5.6-sol"] == {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 30.00,
+    }
+    assert DEFAULT_PRICES["gpt-5.6-terra"] == {
+        "input": 2.50,
+        "cached_input": 0.25,
+        "cache_write": 3.125,
+        "output": 15.00,
+    }
+    assert DEFAULT_PRICES["gpt-5.6-luna"] == {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "cache_write": 1.25,
+        "output": 6.00,
+    }
+    assert DEFAULT_PRICES["gpt-5.5"] == {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "output": 30.00,
+    }
+    assert DEFAULT_PRICES["gpt-5.4"] == {
+        "input": 2.50,
+        "cached_input": 0.25,
+        "output": 15.00,
+    }
+    assert DEFAULT_PRICES["gpt-5.4-mini"] == {
+        "input": 0.75,
+        "cached_input": 0.075,
+        "output": 4.50,
+    }
+    assert DEFAULT_PRICES["gpt-5.4-nano"] == {
+        "input": 0.20,
+        "cached_input": 0.02,
+        "output": 1.25,
+    }
     assert DEFAULT_PRICES["gpt-5.4-pro"] == {"input": 30.00, "output": 180.00}
 
 
@@ -86,6 +122,29 @@ def test_record_response_reads_usage():
     s = t.summary()
     assert s["models"]["gpt-4o-mini"]["prompt_tokens"] == 120
     assert s["models"]["gpt-4o-mini"]["completion_tokens"] == 30
+
+
+def test_record_response_prices_cached_reads_and_writes_separately():
+    t = UsageTracker(prices=DEFAULT_PRICES)
+    resp = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=1_000_000,
+            completion_tokens=100_000,
+            prompt_tokens_details=SimpleNamespace(
+                cached_tokens=400_000,
+                cache_write_tokens=200_000,
+            ),
+        )
+    )
+
+    t.record_response("gpt-5.6-terra", resp)
+
+    model = t.summary()["models"]["gpt-5.6-terra"]
+    assert model["cached_tokens"] == 400_000
+    assert model["cache_write_tokens"] == 200_000
+    # 400K uncached * $2.50 + 400K cached * $0.25
+    # + 200K writes * $3.125 + 100K output * $15.00
+    assert model["estimated_cost_usd"] == 3.225
 
 
 def test_record_response_handles_missing_usage():

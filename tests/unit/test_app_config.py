@@ -524,6 +524,25 @@ class TestLoadAppConfig:
         assert config.review_reasoning_effort == "low"
         assert config.holistic_review_chunk_size == 100  # From environment
 
+    def test_invalid_review_reasoning_effort_is_disabled(self):
+        mock_config = {
+            "model_name": "gpt-4o-mini",
+            "review_reasoning_effort": "medium",
+            "dry_run": True,
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.setup_logger") as mock_logger:
+                mock_logger.return_value = MagicMock()
+                with patch.dict(
+                    os.environ,
+                    {"REVIEW_REASONING_EFFORT": "medum"},
+                    clear=True,
+                ):
+                    config = load_app_config()
+
+        assert config.review_reasoning_effort is None
+
     def test_load_config_with_dotenv_file(self):
         """Test that .env file is loaded properly."""
         mock_config = {"model_name": "gpt-4", "dry_run": True}
