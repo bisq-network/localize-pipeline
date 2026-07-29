@@ -3,6 +3,7 @@ FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d1
 ARG GH_VERSION=2.96.0
 ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
 ARG GRPC_VERSION=1.82.1
+ARG X_TEXT_VERSION=0.40.0
 ENV CGO_ENABLED=0
 
 WORKDIR /src/gh
@@ -10,11 +11,32 @@ RUN git clone --depth 1 --branch "v${GH_VERSION}" \
         https://github.com/cli/cli.git . && \
     test "$(git rev-parse HEAD)" = "$GH_COMMIT" && \
     go get "google.golang.org/grpc@v${GRPC_VERSION}" && \
+    go get "golang.org/x/text@v${X_TEXT_VERSION}" && \
     GH_VERSION="${GH_VERSION}" go run script/build.go bin/gh && \
     install -D bin/gh /out/gh
 RUN go version -m /out/gh > /tmp/gh-buildinfo && \
     grep -E "google[.]golang[.]org/grpc[[:space:]]+v${GRPC_VERSION}([[:space:]]|$)" \
+        /tmp/gh-buildinfo && \
+    grep -E "golang[.]org/x/text[[:space:]]+v${X_TEXT_VERSION}([[:space:]]|$)" \
         /tmp/gh-buildinfo
+
+FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS yq-builder
+
+ARG YQ_VERSION=4.53.3
+ARG YQ_COMMIT=1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d
+ARG X_TEXT_VERSION=0.40.0
+ENV CGO_ENABLED=0
+
+WORKDIR /src/yq
+RUN git clone --depth 1 --branch "v${YQ_VERSION}" \
+        https://github.com/mikefarah/yq.git . && \
+    test "$(git rev-parse HEAD)" = "$YQ_COMMIT" && \
+    go get "golang.org/x/text@v${X_TEXT_VERSION}" && \
+    go build -trimpath -ldflags="-s -w" -o /out/yq .
+RUN /out/yq --version && \
+    go version -m /out/yq > /tmp/yq-buildinfo && \
+    grep -E "golang[.]org/x/text[[:space:]]+v${X_TEXT_VERSION}([[:space:]]|$)" \
+        /tmp/yq-buildinfo
 
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
@@ -49,22 +71,8 @@ RUN apt-get update && \
 COPY --from=gh-builder /out/gh /usr/bin/gh
 RUN gh --version
 
-# Download and install yq for YAML processing
-RUN set -eux; \
-    YQ_VERSION=v4.53.3; \
-    YQ_ARCH="$(dpkg --print-architecture)"; \
-    YQ_BINARY="yq_linux_${YQ_ARCH}"; \
-    curl -sSL -o /usr/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}"; \
-    if [ "$YQ_ARCH" = "amd64" ]; then \
-        YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"; \
-    elif [ "$YQ_ARCH" = "arm64" ]; then \
-        YQ_SHA256="578648e463a11c1b6db6010cbf41eafed6bee79466fcffa1bb446672cf7945ea"; \
-    else \
-        echo "Unsupported architecture for yq: $YQ_ARCH" >&2; \
-        exit 1; \
-    fi; \
-    echo "$YQ_SHA256 /usr/bin/yq" | sha256sum -c -; \
-    chmod +x /usr/bin/yq
+COPY --from=yq-builder /out/yq /usr/bin/yq
+RUN yq --version
 
 # Download and install gosu for user switching
 RUN set -eux; \

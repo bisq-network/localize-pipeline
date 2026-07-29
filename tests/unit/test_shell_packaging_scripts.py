@@ -98,14 +98,20 @@ def test_dockerfile_uses_orchestration_default_command():
     assert 'CMD ["/app/update-translations.sh"]' in dockerfile
 
 
-def test_dockerfile_builds_current_gh_with_fixed_grpc():
+def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
     assert "ARG GH_VERSION=2.96.0" in dockerfile
     assert "ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0" in dockerfile
+    assert "ARG YQ_VERSION=4.53.3" in dockerfile
+    assert "ARG YQ_COMMIT=1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d" in dockerfile
     assert "ARG GRPC_VERSION=1.82.1" in dockerfile
+    assert "ARG X_TEXT_VERSION=0.40.0" in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
+    assert 'test "$(git rev-parse HEAD)" = "$YQ_COMMIT"' in dockerfile
     assert 'go get "google.golang.org/grpc@v${GRPC_VERSION}"' in dockerfile
+    assert dockerfile.count('go get "golang.org/x/text@v${X_TEXT_VERSION}"') == 2
+    assert "COPY --from=yq-builder /out/yq /usr/bin/yq" in dockerfile
 
 
 def test_dockerignore_excludes_local_configs_and_agent_scratch():
