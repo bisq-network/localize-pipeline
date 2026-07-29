@@ -186,6 +186,8 @@ Key settings:
 | `translation_source` | `git` or `transifex`. New projects usually start with `git`. |
 | `model_provider` | `aisuite` by default; `openai_compatible` is the direct SDK fallback. |
 | `model_name`, `review_model_name` | Translation and review models. |
+| `review_reasoning_effort` | Optional reasoning effort for the holistic review model. |
+| `semantic_review.reasoning_effort` | Optional reasoning effort for the semantic review model. |
 | `api_base_url` | OpenAI-compatible endpoint, for example Ollama. |
 | `supported_locales` | Target locales. |
 | `project_context` | Product/domain context injected into prompts. |

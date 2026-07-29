@@ -9,6 +9,8 @@ project_context: >
   preserve product names, and prefer mobile UI wording over long desktop-style
   phrases.
 model_name: "gpt-4o-mini"
+review_model_name: "gpt-5.6-terra"
+review_reasoning_effort: "none"
 translation_queue_folder: "translation_queue"
 translated_queue_folder: "translated_queue"
 dry_run: false
@@ -29,6 +31,7 @@ quality_gate:
 semantic_review:
   enabled: true
   model: "gpt-5.4-mini"
+  reasoning_effort: "none"
   auto_apply_error_suggestions: true
 semantic_quality_rules:
   - id: "trade-history-traders-label"

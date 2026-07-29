@@ -12,6 +12,7 @@ constructor) and treat reported cost as an estimate, not a billing figure.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,10 @@ from localize.atomic_io import write_json_atomic
 
 # USD per 1,000,000 tokens. Verify against current OpenAI pricing before relying.
 DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
+    "gpt-5.6": {"input": 5.00, "output": 30.00},
+    "gpt-5.6-sol": {"input": 5.00, "output": 30.00},
+    "gpt-5.6-terra": {"input": 2.50, "output": 15.00},
+    "gpt-5.6-luna": {"input": 1.00, "output": 6.00},
     "gpt-5.5": {"input": 5.00, "output": 30.00},
     "gpt-5.4": {"input": 2.50, "output": 15.00},
     "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
@@ -82,6 +87,19 @@ class UsageTracker:
 
     def reset(self) -> None:
         self._by_model = {}
+
+    def merge_summary(self, summary: Dict[str, Any]) -> None:
+        """Merge a previously serialized usage summary into this tracker."""
+        models = summary.get("models", {})
+        if not isinstance(models, dict):
+            raise ValueError("Usage summary models must be an object.")
+        for model, raw_usage in models.items():
+            if not isinstance(raw_usage, dict):
+                raise ValueError(f"Usage summary for {model!r} must be an object.")
+            entry = self._by_model.setdefault(str(model), _ModelUsage())
+            entry.calls += int(raw_usage.get("calls", 0) or 0)
+            entry.prompt_tokens += int(raw_usage.get("prompt_tokens", 0) or 0)
+            entry.completion_tokens += int(raw_usage.get("completion_tokens", 0) or 0)
 
     def record(self, model: str, prompt_tokens: int, completion_tokens: int) -> None:
         """Add one API call's token counts for ``model``."""
@@ -160,9 +178,39 @@ class UsageTracker:
         )
         return "\n".join(lines)
 
-    def write_json(self, path: str) -> None:
-        """Write the summary to ``path`` as JSON (creates parent dirs)."""
-        write_json_atomic(path, self.summary())
+    def write_json(
+        self,
+        path: str,
+        *,
+        merge_existing: bool = False,
+        stage_name: Optional[str] = None,
+    ) -> None:
+        """Write usage, optionally merging an earlier stage and stage subtotal."""
+        current_summary = self.summary()
+        payload = current_summary
+        stages: Dict[str, Any] = {}
+        if merge_existing:
+            try:
+                with open(path, "r", encoding="utf-8") as file:
+                    existing_summary = json.load(file)
+            except FileNotFoundError:
+                existing_summary = {}
+            combined = UsageTracker(prices=self._prices)
+            combined.merge_summary(existing_summary)
+            combined.merge_summary(current_summary)
+            payload = combined.summary()
+            raw_stages = existing_summary.get("stages", {})
+            if isinstance(raw_stages, dict):
+                stages = dict(raw_stages)
+        if stage_name:
+            stage = UsageTracker(prices=self._prices)
+            if stage_name in stages:
+                stage.merge_summary(stages[stage_name])
+            stage.merge_summary(current_summary)
+            stages[stage_name] = stage.summary()
+        if stages:
+            payload["stages"] = stages
+        write_json_atomic(path, payload)
 
 
 # Module-level singleton, consistent with the module-global style of the pipeline.

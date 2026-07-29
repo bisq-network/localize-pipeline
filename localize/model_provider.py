@@ -28,6 +28,7 @@ _LOCAL_PROVIDER_PLACEHOLDER_KEY = "not-needed"
 DEFAULT_MODEL_PROVIDER = "aisuite"
 DEFAULT_AISUITE_PROVIDER = "openai"
 _AISUITE_OPENAI_ONLY_REQUEST_KWARGS = frozenset({
+    "reasoning_effort",
     "response_format",
 })
 _MODEL_PROVIDER_ALIASES = {
@@ -44,6 +45,7 @@ class ModelProviderCapabilities:
     provider_key: str
     supports_response_format: bool
     supports_completion_token_limit: bool = True
+    supports_reasoning_effort: bool = False
 
 
 class ModelProviderConfigurationError(RuntimeError):
@@ -86,7 +88,13 @@ class ChatModelProvider(Protocol):
     def record_response(self, model: str, response: Any) -> None:
         """Record token usage from a provider response."""
 
-    def write_usage_summary(self, path: str) -> None:
+    def write_usage_summary(
+        self,
+        path: str,
+        *,
+        merge_existing: bool = False,
+        stage_name: Optional[str] = None,
+    ) -> None:
         """Persist the accumulated provider usage summary."""
 
     def format_usage_summary(self) -> str:
@@ -199,6 +207,7 @@ def _aisuite_capabilities_for_model(model: str, default_provider: str) -> ModelP
         provider_key=provider_key,
         supports_response_format=provider_key == "openai",
         supports_completion_token_limit=True,
+        supports_reasoning_effort=provider_key == "openai",
     )
 
 
@@ -286,8 +295,18 @@ class OpenAICompatibleProvider:
     def record_response(self, model: str, response: Any) -> None:
         self._usage_tracker.record_response(model, response)
 
-    def write_usage_summary(self, path: str) -> None:
-        self._usage_tracker.write_json(path)
+    def write_usage_summary(
+        self,
+        path: str,
+        *,
+        merge_existing: bool = False,
+        stage_name: Optional[str] = None,
+    ) -> None:
+        self._usage_tracker.write_json(
+            path,
+            merge_existing=merge_existing,
+            stage_name=stage_name,
+        )
 
     def format_usage_summary(self) -> str:
         return self._usage_tracker.format_summary()
@@ -304,6 +323,7 @@ class OpenAICompatibleProvider:
             provider_key="openai_compatible",
             supports_response_format=True,
             supports_completion_token_limit=True,
+            supports_reasoning_effort=True,
         )
 
     def _status_code_from_exception(self, exc: Any) -> Optional[int]:

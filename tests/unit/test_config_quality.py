@@ -251,6 +251,9 @@ def test_bisq_mobile_profile_packages_sanitized_production_shape():
     assert "Bisq mobile" in config["project_context"]
     assert config["semantic_review"]["enabled"] is True
     assert config["semantic_review"]["auto_apply_error_suggestions"] is True
+    assert config["semantic_review"]["reasoning_effort"] == "none"
+    assert config["review_model_name"] == "gpt-5.6-terra"
+    assert config["review_reasoning_effort"] == "none"
     assert config["quality_gate"]["semantic_qa_audit_scope"] == "changed"
     assert isinstance(glossary, dict) and {"de", "es", "fr"}.issubset(glossary)
 
@@ -352,6 +355,9 @@ def test_recent_coderabbit_translation_nits_are_encoded_as_style_rules(config_pa
     )
     assert semantic_review.get("enabled") is True
     assert semantic_review.get("model") == "gpt-5.4-mini"
+    assert semantic_review.get("reasoning_effort") == "none"
+    assert config["review_model_name"] == "gpt-5.6-terra"
+    assert config["review_reasoning_effort"] == "none"
     assert "version" in retained_allowlist["da"]
     assert "version" in retained_allowlist["de"]
     assert {"information", "message", "messages", "version"}.issubset(retained_allowlist["fr"])

@@ -34,6 +34,10 @@ def test_cost_calculation():
 
 
 def test_default_prices_cover_configured_gpt5_models():
+    assert DEFAULT_PRICES["gpt-5.6"] == {"input": 5.00, "output": 30.00}
+    assert DEFAULT_PRICES["gpt-5.6-sol"] == {"input": 5.00, "output": 30.00}
+    assert DEFAULT_PRICES["gpt-5.6-terra"] == {"input": 2.50, "output": 15.00}
+    assert DEFAULT_PRICES["gpt-5.6-luna"] == {"input": 1.00, "output": 6.00}
     assert DEFAULT_PRICES["gpt-5.5"] == {"input": 5.00, "output": 30.00}
     assert DEFAULT_PRICES["gpt-5.4"] == {"input": 2.50, "output": 15.00}
     assert DEFAULT_PRICES["gpt-5.4-mini"] == {"input": 0.75, "output": 4.50}
@@ -121,3 +125,34 @@ def test_write_json(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["totals"]["total_tokens"] == 750
     assert data["models"]["gpt-4o-mini"]["calls"] == 1
+
+
+def test_write_json_can_merge_semantic_review_usage(tmp_path):
+    path = tmp_path / "usage.json"
+    translation = UsageTracker(prices=DEFAULT_PRICES)
+    translation.record("gpt-4o-mini", 1000, 100)
+    translation.record("gpt-5.6-terra", 500, 50)
+    translation.write_json(
+        str(path),
+        stage_name="translation_and_holistic_review",
+    )
+
+    semantic_review = UsageTracker(prices=DEFAULT_PRICES)
+    semantic_review.record("gpt-5.4-mini", 300, 30)
+    semantic_review.record("gpt-5.4-mini", 200, 20)
+    semantic_review.write_json(
+        str(path),
+        merge_existing=True,
+        stage_name="semantic_review",
+    )
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["models"]["gpt-4o-mini"]["calls"] == 1
+    assert data["models"]["gpt-5.6-terra"]["calls"] == 1
+    assert data["models"]["gpt-5.4-mini"]["calls"] == 2
+    assert data["totals"]["calls"] == 4
+    assert data["totals"]["total_tokens"] == 2200
+    assert data["totals"]["cost_complete"] is True
+    assert data["stages"]["translation_and_holistic_review"]["totals"]["calls"] == 2
+    assert data["stages"]["semantic_review"]["totals"]["calls"] == 2
+    assert data["stages"]["semantic_review"]["totals"]["total_tokens"] == 550

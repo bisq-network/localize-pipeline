@@ -207,7 +207,8 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
 
     with (
         patch("localize.translate_localization_files.DRY_RUN", False),
-        patch("localize.translate_localization_files.REVIEW_MODEL_NAME", "gpt-5.4-mini"),
+        patch("localize.translate_localization_files.REVIEW_MODEL_NAME", "gpt-5.6-terra"),
+        patch("localize.translate_localization_files.REVIEW_REASONING_EFFORT", "none"),
         patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
     ):
         result = await holistic_review_async(
@@ -222,7 +223,8 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
 
     assert result == {"key1": "Hallo {0}"}
     kwargs = provider.create_chat_completion.await_args.kwargs
-    assert kwargs["model"] == "gpt-5.4-mini"
+    assert kwargs["model"] == "gpt-5.6-terra"
+    assert kwargs["reasoning_effort"] == "none"
     assert kwargs["completion_token_limit"] == 8192
     assert kwargs["response_format"] == {"type": "json_object"}
     assert [message["role"] for message in kwargs["messages"]] == ["system", "user"]

@@ -14,6 +14,20 @@ def chat_json_mode_kwargs(provider: Any, model: str) -> dict[str, dict[str, str]
     return {}
 
 
+def chat_reasoning_effort_kwargs(
+    provider: Any,
+    model: str,
+    reasoning_effort: str | None,
+) -> dict[str, str]:
+    """Return reasoning effort only when configured and supported by the route."""
+    if not reasoning_effort:
+        return {}
+    capabilities = provider.capabilities_for_model(model)
+    if getattr(capabilities, "supports_reasoning_effort", False):
+        return {"reasoning_effort": reasoning_effort}
+    return {}
+
+
 def extract_json_object_text(response_text: str) -> str:
     """Extract the first balanced JSON object from raw or fenced model output."""
     stripped = response_text.strip()
