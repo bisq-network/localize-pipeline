@@ -33,6 +33,7 @@ quality_gate:
 semantic_review:
   enabled: true
   model: "gpt-5.4-mini"
+  reasoning_effort: "none"
   auto_apply_error_suggestions: true
 semantic_quality_rules:
   - id: "trade-history-traders-label"
@@ -343,7 +344,8 @@ logging:
   log_level: "INFO"
   log_file_path: "/app/logs/translation_log.log"
   log_to_console: true
-review_model_name: "gpt-4o"
+review_model_name: "gpt-5.6-terra"
+review_reasoning_effort: "none"
 style_rules:
   da:
     - "Use standard Danish throughout."

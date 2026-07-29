@@ -12,6 +12,7 @@ constructor) and treat reported cost as an estimate, not a billing figure.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -19,13 +20,28 @@ from localize.atomic_io import write_json_atomic
 
 # USD per 1,000,000 tokens. Verify against current OpenAI pricing before relying.
 DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
-    "gpt-5.5": {"input": 5.00, "output": 30.00},
-    "gpt-5.4": {"input": 2.50, "output": 15.00},
-    "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
-    "gpt-5.4-nano": {"input": 0.20, "output": 1.25},
+    "gpt-5.6": {
+        "input": 5.00, "cached_input": 0.50, "cache_write": 6.25, "output": 30.00,
+    },
+    "gpt-5.6-sol": {
+        "input": 5.00, "cached_input": 0.50, "cache_write": 6.25, "output": 30.00,
+    },
+    "gpt-5.6-terra": {
+        "input": 2.50, "cached_input": 0.25, "cache_write": 3.125, "output": 15.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    },
+    "gpt-5.6-luna": {
+        "input": 1.00, "cached_input": 0.10, "cache_write": 1.25, "output": 6.00,
+    },
+    "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
+    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
     "gpt-5.4-pro": {"input": 30.00, "output": 180.00},
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "cached_input": 0.075, "output": 0.60},
+    "gpt-4o": {"input": 2.50, "cached_input": 1.25, "output": 10.00},
     "gpt-4": {"input": 30.00, "output": 60.00},
     "gpt-4-turbo": {"input": 10.00, "output": 30.00},
 }
@@ -44,6 +60,10 @@ def cost_for_tokens(
     prompt_tokens: int,
     completion_tokens: int,
     prices: Optional[Dict[str, Dict[str, float]]] = None,
+    *,
+    cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    apply_long_context_pricing: bool = True,
 ) -> Optional[float]:
     """USD cost for token counts, or ``None`` if ``model`` has no known price.
 
@@ -56,9 +76,29 @@ def cost_for_tokens(
         price = table.get(_price_lookup_model(model))
     if price is None:
         return None
+    cached_tokens = max(0, min(int(cached_tokens or 0), prompt_tokens))
+    remaining_prompt_tokens = prompt_tokens - cached_tokens
+    cache_write_tokens = max(
+        0,
+        min(int(cache_write_tokens or 0), remaining_prompt_tokens),
+    )
+    uncached_tokens = remaining_prompt_tokens - cache_write_tokens
+    cached_input_price = price.get("cached_input", price["input"])
+    cache_write_price = price.get("cache_write", price["input"])
+    input_multiplier = output_multiplier = 1.0
+    long_context_threshold = price.get("long_context_threshold")
+    if (
+        apply_long_context_pricing
+        and long_context_threshold is not None
+        and prompt_tokens > long_context_threshold
+    ):
+        input_multiplier = price.get("long_context_input_multiplier", 1.0)
+        output_multiplier = price.get("long_context_output_multiplier", 1.0)
     return (
-        prompt_tokens / 1_000_000 * price["input"]
-        + completion_tokens / 1_000_000 * price["output"]
+        uncached_tokens / 1_000_000 * price["input"] * input_multiplier
+        + cached_tokens / 1_000_000 * cached_input_price * input_multiplier
+        + cache_write_tokens / 1_000_000 * cache_write_price * input_multiplier
+        + completion_tokens / 1_000_000 * price["output"] * output_multiplier
     )
 
 
@@ -67,6 +107,10 @@ class _ModelUsage:
     calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    cost_complete: bool = True
 
 
 class UsageTracker:
@@ -83,26 +127,68 @@ class UsageTracker:
     def reset(self) -> None:
         self._by_model = {}
 
-    def record(self, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+    def merge_summary(self, summary: Dict[str, Any]) -> None:
+        """Merge a previously serialized usage summary into this tracker."""
+        models = summary.get("models", {})
+        if not isinstance(models, dict):
+            raise ValueError("Usage summary models must be an object.")
+        for model, raw_usage in models.items():
+            if not isinstance(raw_usage, dict):
+                raise ValueError(f"Usage summary for {model!r} must be an object.")
+            entry = self._by_model.setdefault(str(model), _ModelUsage())
+            entry.calls += int(raw_usage.get("calls", 0) or 0)
+            entry.prompt_tokens += int(raw_usage.get("prompt_tokens", 0) or 0)
+            entry.completion_tokens += int(raw_usage.get("completion_tokens", 0) or 0)
+            entry.cached_tokens += int(raw_usage.get("cached_tokens", 0) or 0)
+            entry.cache_write_tokens += int(raw_usage.get("cache_write_tokens", 0) or 0)
+            raw_cost = raw_usage.get("estimated_cost_usd")
+            if raw_cost is None:
+                entry.cost_complete = False
+            else:
+                entry.estimated_cost_usd += float(raw_cost)
+
+    def record(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        *,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
         """Add one API call's token counts for ``model``."""
         entry = self._by_model.setdefault(model, _ModelUsage())
         entry.calls += 1
         entry.prompt_tokens += int(prompt_tokens or 0)
         entry.completion_tokens += int(completion_tokens or 0)
+        entry.cached_tokens += int(cached_tokens or 0)
+        entry.cache_write_tokens += int(cache_write_tokens or 0)
+        cost = cost_for_tokens(
+            model,
+            prompt_tokens,
+            completion_tokens,
+            self._prices,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+        if cost is None:
+            entry.cost_complete = False
+        else:
+            entry.estimated_cost_usd += cost
 
     def record_response(self, model: str, response: Any) -> None:
         """Record usage from an OpenAI ChatCompletion response (no-op if absent)."""
         usage = getattr(response, "usage", None)
         if usage is None:
             return
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
         self.record(
             model,
             getattr(usage, "prompt_tokens", 0) or 0,
             getattr(usage, "completion_tokens", 0) or 0,
+            cached_tokens=getattr(prompt_details, "cached_tokens", 0) or 0,
+            cache_write_tokens=getattr(prompt_details, "cache_write_tokens", 0) or 0,
         )
-
-    def _model_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> Optional[float]:
-        return cost_for_tokens(model, prompt_tokens, completion_tokens, self._prices)
 
     def summary(self) -> Dict[str, Any]:
         """Return a structured summary of usage and estimated cost."""
@@ -111,15 +197,17 @@ class UsageTracker:
         total_cost = 0.0
         cost_known = True
         for model, u in sorted(self._by_model.items()):
-            cost = self._model_cost(model, u.prompt_tokens, u.completion_tokens)
-            if cost is None:
+            cost = u.estimated_cost_usd if u.cost_complete else None
+            if not u.cost_complete:
                 cost_known = False
             else:
-                total_cost += cost
+                total_cost += u.estimated_cost_usd
             models[model] = {
                 "calls": u.calls,
                 "prompt_tokens": u.prompt_tokens,
                 "completion_tokens": u.completion_tokens,
+                "cached_tokens": u.cached_tokens,
+                "cache_write_tokens": u.cache_write_tokens,
                 "total_tokens": u.prompt_tokens + u.completion_tokens,
                 "estimated_cost_usd": round(cost, 6) if cost is not None else None,
             }
@@ -160,9 +248,41 @@ class UsageTracker:
         )
         return "\n".join(lines)
 
-    def write_json(self, path: str) -> None:
-        """Write the summary to ``path`` as JSON (creates parent dirs)."""
-        write_json_atomic(path, self.summary())
+    def write_json(
+        self,
+        path: str,
+        *,
+        merge_existing: bool = False,
+        stage_name: Optional[str] = None,
+    ) -> None:
+        """Write usage, optionally merging totals and preserving stage subtotals."""
+        current_summary = self.summary()
+        payload = current_summary
+        stages: Dict[str, Any] = {}
+        existing_summary: Dict[str, Any] = {}
+        if merge_existing or stage_name:
+            try:
+                with open(path, "r", encoding="utf-8") as file:
+                    existing_summary = json.load(file)
+            except FileNotFoundError:
+                existing_summary = {}
+        if merge_existing:
+            combined = UsageTracker(prices=self._prices)
+            combined.merge_summary(existing_summary)
+            combined.merge_summary(current_summary)
+            payload = combined.summary()
+        if stage_name:
+            raw_stages = existing_summary.get("stages", {})
+            if isinstance(raw_stages, dict):
+                stages = dict(raw_stages)
+            stage = UsageTracker(prices=self._prices)
+            if stage_name in stages:
+                stage.merge_summary(stages[stage_name])
+            stage.merge_summary(current_summary)
+            stages[stage_name] = stage.summary()
+        if stages:
+            payload["stages"] = stages
+        write_json_atomic(path, payload)
 
 
 # Module-level singleton, consistent with the module-global style of the pipeline.

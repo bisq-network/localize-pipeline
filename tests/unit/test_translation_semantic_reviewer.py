@@ -225,6 +225,10 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
     )
     provider = MagicMock()
     provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.capabilities_for_model.return_value = SimpleNamespace(
+        supports_reasoning_effort=True,
+        supported_reasoning_efforts=frozenset({"none", "low", "medium", "high", "xhigh"}),
+    )
     changes = [
         TranslationChange(
             file="resources/mobile_es.properties",
@@ -244,11 +248,13 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
         style_rules=[],
         brand_glossary=[],
         model_provider=provider,
+        reasoning_effort="none",
     )
 
     assert findings == []
     kwargs = provider.create_chat_completion.await_args.kwargs
     assert kwargs["model"] == "gpt-5.4-mini"
+    assert kwargs["reasoning_effort"] == "none"
     assert kwargs["completion_token_limit"] == 4096
     assert kwargs["response_format"] == {"type": "json_object"}
     assert "max_tokens" not in kwargs
@@ -366,6 +372,7 @@ async def test_semantic_reviewer_chunks_and_survives_failed_batch():
 async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"
+    token_usage_summary_path = tmp_path / "token_usage_summary.json"
     config_path.write_text(
         "\n".join(
             [
@@ -425,6 +432,8 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
                 str(config_path),
                 "--validation-summary",
                 str(validation_summary_path),
+                "--token-usage-summary",
+                str(token_usage_summary_path),
                 "--changed-files",
                 "resources/messages_de.properties",
             ]
@@ -433,6 +442,11 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
     assert exit_code == 0
     assert create_provider.call_args.kwargs["provider_name"] == "aisuite"
     assert create_provider.call_args.kwargs["model_names"] == ("gpt-4o",)
+    provider.write_usage_summary.assert_called_once_with(
+        str(token_usage_summary_path),
+        merge_existing=True,
+        stage_name="semantic_review",
+    )
     assert json.loads(validation_summary_path.read_text(encoding="utf-8"))[
         "semantic_review_findings"
     ] == []

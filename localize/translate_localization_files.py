@@ -34,7 +34,11 @@ from tqdm.asyncio import tqdm
 from localize.app_config import load_app_config
 from localize.atomic_io import write_json_atomic, write_text_atomic
 from localize.ignore_keys import is_ignored_key
-from localize.json_response import chat_json_mode_kwargs, loads_json_object
+from localize.json_response import (
+    chat_json_mode_kwargs,
+    chat_reasoning_effort_kwargs,
+    loads_json_object,
+)
 from localize.localization_adapters import (
     get_localization_adapter,
     lint_properties_file as lint_properties_file,
@@ -93,6 +97,7 @@ INPUT_FOLDER = config.input_folder
 GLOSSARY_FILE_PATH = config.glossary_file_path
 MODEL_NAME = config.model_name
 REVIEW_MODEL_NAME = config.review_model_name
+REVIEW_REASONING_EFFORT = config.review_reasoning_effort
 MAX_MODEL_TOKENS = config.max_model_tokens
 DRY_RUN = config.dry_run
 PROCESS_ALL_FILES = config.process_all_files
@@ -1491,6 +1496,11 @@ async def holistic_review_async(
             try:
                 async with rate_limiter:
                     review_json_kwargs = chat_json_mode_kwargs(MODEL_PROVIDER, REVIEW_MODEL_NAME)
+                    review_reasoning_kwargs = chat_reasoning_effort_kwargs(
+                        MODEL_PROVIDER,
+                        REVIEW_MODEL_NAME,
+                        REVIEW_REASONING_EFFORT,
+                    )
                     response = await MODEL_PROVIDER.create_chat_completion(
                         model=REVIEW_MODEL_NAME,
                         messages=[
@@ -1499,6 +1509,7 @@ async def holistic_review_async(
                         ],
                         temperature=0.1,
                         **review_json_kwargs,
+                        **review_reasoning_kwargs,
                         completion_token_limit=_holistic_review_completion_token_limit(keys_to_review),
                         timeout=120.0,
                     )
@@ -2795,7 +2806,10 @@ def write_token_usage_summary(summary_path: str) -> None:
     """Persist and log token usage for the current run."""
     try:
         provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
-        provider.write_usage_summary(summary_path)
+        provider.write_usage_summary(
+            summary_path,
+            stage_name="translation_and_holistic_review",
+        )
         for line in provider.format_usage_summary().splitlines():
             logger.info(line)
         logger.info(f"Wrote token usage summary to {summary_path}")

@@ -28,8 +28,27 @@ _LOCAL_PROVIDER_PLACEHOLDER_KEY = "not-needed"
 DEFAULT_MODEL_PROVIDER = "aisuite"
 DEFAULT_AISUITE_PROVIDER = "openai"
 _AISUITE_OPENAI_ONLY_REQUEST_KWARGS = frozenset({
+    "reasoning_effort",
     "response_format",
 })
+REASONING_EFFORT_VALUES = frozenset({
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+})
+_GPT56_REASONING_EFFORTS = frozenset({
+    "none", "low", "medium", "high", "xhigh", "max",
+})
+_GPT54_55_REASONING_EFFORTS = frozenset({
+    "none", "low", "medium", "high", "xhigh",
+})
+_GPT51_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high"})
+_GPT5_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high"})
+_GPT_PRO_REASONING_EFFORTS = frozenset({"medium", "high", "xhigh"})
 _MODEL_PROVIDER_ALIASES = {
     "aisuite": "aisuite",
     "openai": "openai_compatible",
@@ -44,6 +63,8 @@ class ModelProviderCapabilities:
     provider_key: str
     supports_response_format: bool
     supports_completion_token_limit: bool = True
+    supports_reasoning_effort: bool = False
+    supported_reasoning_efforts: frozenset[str] = frozenset()
 
 
 class ModelProviderConfigurationError(RuntimeError):
@@ -86,7 +107,13 @@ class ChatModelProvider(Protocol):
     def record_response(self, model: str, response: Any) -> None:
         """Record token usage from a provider response."""
 
-    def write_usage_summary(self, path: str) -> None:
+    def write_usage_summary(
+        self,
+        path: str,
+        *,
+        merge_existing: bool = False,
+        stage_name: Optional[str] = None,
+    ) -> None:
         """Persist the accumulated provider usage summary."""
 
     def format_usage_summary(self) -> str:
@@ -97,6 +124,33 @@ class ChatModelProvider(Protocol):
 
     def capabilities_for_model(self, model: str) -> ModelProviderCapabilities:
         """Return request capabilities for a configured model route."""
+
+
+def normalize_reasoning_effort(value: Any) -> Optional[str]:
+    """Return a supported reasoning effort, or disable an invalid value."""
+    normalized = str(value or "").strip()
+    return normalized if normalized in REASONING_EFFORT_VALUES else None
+
+
+def _openai_supported_reasoning_efforts(model: str) -> frozenset[str]:
+    """Return documented effort values for an OpenAI model family."""
+    bare_model = model.split(":", 1)[-1].strip().lower()
+    if bare_model.startswith("gpt-5.6"):
+        return _GPT56_REASONING_EFFORTS
+    if bare_model.startswith(("gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro")):
+        return _GPT_PRO_REASONING_EFFORTS
+    if bare_model.startswith("gpt-5-pro"):
+        return frozenset({"high"})
+    if bare_model.startswith(("gpt-5.5", "gpt-5.4", "gpt-5.2")):
+        return _GPT54_55_REASONING_EFFORTS
+    if bare_model.startswith("gpt-5.1"):
+        return _GPT51_REASONING_EFFORTS
+    if (
+        bare_model == "gpt-5"
+        or bare_model.startswith(("gpt-5-", "gpt-5-mini", "gpt-5-nano"))
+    ):
+        return _GPT5_REASONING_EFFORTS
+    return frozenset()
 
 
 def normalize_model_provider_name(provider_name: str) -> str:
@@ -182,10 +236,27 @@ def _aisuite_provider_config(
     return dict(provider_config)
 
 
-def _sanitize_aisuite_request_kwargs(model: str, kwargs: Dict[str, Any], default_provider: str) -> Dict[str, Any]:
-    capabilities = _aisuite_capabilities_for_model(model, default_provider)
+def _sanitize_aisuite_request_kwargs(
+    model: str,
+    kwargs: Dict[str, Any],
+    default_provider: str,
+    *,
+    supports_openai_reasoning_effort: bool,
+) -> Dict[str, Any]:
+    capabilities = _aisuite_capabilities_for_model(
+        model,
+        default_provider,
+        supports_openai_reasoning_effort=supports_openai_reasoning_effort,
+    )
     if capabilities.supports_response_format:
-        return dict(kwargs)
+        sanitized = dict(kwargs)
+        reasoning_effort = sanitized.get("reasoning_effort")
+        if reasoning_effort is not None and (
+            not capabilities.supports_reasoning_effort
+            or reasoning_effort not in capabilities.supported_reasoning_efforts
+        ):
+            sanitized.pop("reasoning_effort", None)
+        return sanitized
     return {
         key: value
         for key, value in kwargs.items()
@@ -193,12 +264,24 @@ def _sanitize_aisuite_request_kwargs(model: str, kwargs: Dict[str, Any], default
     }
 
 
-def _aisuite_capabilities_for_model(model: str, default_provider: str) -> ModelProviderCapabilities:
+def _aisuite_capabilities_for_model(
+    model: str,
+    default_provider: str,
+    *,
+    supports_openai_reasoning_effort: bool,
+) -> ModelProviderCapabilities:
     provider_key = _aisuite_provider_key_for_model(model, default_provider)
+    reasoning_efforts = (
+        _openai_supported_reasoning_efforts(model)
+        if provider_key == "openai" and supports_openai_reasoning_effort
+        else frozenset()
+    )
     return ModelProviderCapabilities(
         provider_key=provider_key,
         supports_response_format=provider_key == "openai",
         supports_completion_token_limit=True,
+        supports_reasoning_effort=bool(reasoning_efforts),
+        supported_reasoning_efforts=reasoning_efforts,
     )
 
 
@@ -215,10 +298,12 @@ class OpenAICompatibleProvider:
         client: Any,
         usage_tracker: Optional[UsageTracker] = None,
         prices: Optional[Dict[str, Dict[str, float]]] = None,
+        supports_openai_reasoning_effort: bool = False,
     ) -> None:
         self.client = client
         self._prices = prices if prices is not None else DEFAULT_PRICES
         self._usage_tracker = usage_tracker or UsageTracker(prices=self._prices)
+        self._supports_openai_reasoning_effort = supports_openai_reasoning_effort
 
     async def create_chat_completion(
         self,
@@ -231,6 +316,14 @@ class OpenAICompatibleProvider:
         if self.client is None:
             raise ModelProviderConfigurationError("OpenAI-compatible client is not configured.")
 
+        capabilities = self.capabilities_for_model(model)
+        reasoning_effort = kwargs.get("reasoning_effort")
+        if reasoning_effort is not None and (
+            not capabilities.supports_reasoning_effort
+            or reasoning_effort not in capabilities.supported_reasoning_efforts
+        ):
+            kwargs = dict(kwargs)
+            kwargs.pop("reasoning_effort", None)
         response = await create_chat_completion(
             self.client,
             model=model,
@@ -286,8 +379,18 @@ class OpenAICompatibleProvider:
     def record_response(self, model: str, response: Any) -> None:
         self._usage_tracker.record_response(model, response)
 
-    def write_usage_summary(self, path: str) -> None:
-        self._usage_tracker.write_json(path)
+    def write_usage_summary(
+        self,
+        path: str,
+        *,
+        merge_existing: bool = False,
+        stage_name: Optional[str] = None,
+    ) -> None:
+        self._usage_tracker.write_json(
+            path,
+            merge_existing=merge_existing,
+            stage_name=stage_name,
+        )
 
     def format_usage_summary(self) -> str:
         return self._usage_tracker.format_summary()
@@ -300,10 +403,17 @@ class OpenAICompatibleProvider:
         return False
 
     def capabilities_for_model(self, model: str) -> ModelProviderCapabilities:
+        reasoning_efforts = (
+            _openai_supported_reasoning_efforts(model)
+            if self._supports_openai_reasoning_effort
+            else frozenset()
+        )
         return ModelProviderCapabilities(
             provider_key="openai_compatible",
             supports_response_format=True,
             supports_completion_token_limit=True,
+            supports_reasoning_effort=bool(reasoning_efforts),
+            supported_reasoning_efforts=reasoning_efforts,
         )
 
     def _status_code_from_exception(self, exc: Any) -> Optional[int]:
@@ -340,8 +450,14 @@ class AiSuiteProvider(OpenAICompatibleProvider):
         usage_tracker: Optional[UsageTracker] = None,
         prices: Optional[Dict[str, Dict[str, float]]] = None,
         default_provider: str = DEFAULT_AISUITE_PROVIDER,
+        supports_openai_reasoning_effort: bool = False,
     ) -> None:
-        super().__init__(client=client, usage_tracker=usage_tracker, prices=prices)
+        super().__init__(
+            client=client,
+            usage_tracker=usage_tracker,
+            prices=prices,
+            supports_openai_reasoning_effort=supports_openai_reasoning_effort,
+        )
         self.default_provider = default_provider
 
     def _provider_model_name(self, model: str) -> str:
@@ -365,6 +481,7 @@ class AiSuiteProvider(OpenAICompatibleProvider):
             provider_model_name,
             kwargs,
             self.default_provider,
+            supports_openai_reasoning_effort=self._supports_openai_reasoning_effort,
         )
 
         async def call_aisuite(**request_kwargs: Any) -> Any:
@@ -405,7 +522,11 @@ class AiSuiteProvider(OpenAICompatibleProvider):
         return exc_module.startswith("aisuite") or exc_name == "LLMError"
 
     def capabilities_for_model(self, model: str) -> ModelProviderCapabilities:
-        return _aisuite_capabilities_for_model(self._provider_model_name(model), self.default_provider)
+        return _aisuite_capabilities_for_model(
+            self._provider_model_name(model),
+            self.default_provider,
+            supports_openai_reasoning_effort=self._supports_openai_reasoning_effort,
+        )
 
 
 def create_openai_compatible_provider(
@@ -440,7 +561,10 @@ def create_openai_compatible_provider(
 
     client = AsyncOpenAI(**client_kwargs)
     logger.info("OpenAI-compatible model provider initialized successfully")
-    return OpenAICompatibleProvider(client=client)
+    return OpenAICompatibleProvider(
+        client=client,
+        supports_openai_reasoning_effort=not is_custom_endpoint,
+    )
 
 
 def create_aisuite_provider(
@@ -448,6 +572,7 @@ def create_aisuite_provider(
     provider_configs: Dict[str, Any],
     logger: logging.Logger,
     default_provider: str = DEFAULT_AISUITE_PROVIDER,
+    supports_openai_reasoning_effort: bool = False,
 ) -> AiSuiteProvider:
     """Create the AISuite-backed provider used by the default runtime path."""
     try:
@@ -459,7 +584,11 @@ def create_aisuite_provider(
 
     client = aisuite.Client(provider_configs=provider_configs)
     logger.info("AISuite model provider initialized successfully")
-    return AiSuiteProvider(client=client, default_provider=default_provider)
+    return AiSuiteProvider(
+        client=client,
+        default_provider=default_provider,
+        supports_openai_reasoning_effort=supports_openai_reasoning_effort,
+    )
 
 
 def _openai_provider_config(
@@ -523,6 +652,9 @@ def create_model_provider(
             provider_configs=provider_configs,
             logger=logger,
             default_provider=DEFAULT_AISUITE_PROVIDER,
+            supports_openai_reasoning_effort=not bool(
+                openai_provider_config.get("base_url")
+            ),
         )
     raise ModelProviderConfigurationError(
         f"Unsupported model_provider '{provider_name}'. Supported values: openai_compatible, aisuite."

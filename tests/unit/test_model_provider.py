@@ -147,6 +147,9 @@ def test_factory_builds_default_openai_client():
 
     openai.assert_called_once_with(api_key="sk-test")
     assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.capabilities_for_model(
+        "gpt-5.6-terra"
+    ).supports_reasoning_effort is True
 
 
 def test_factory_builds_custom_endpoint_with_placeholder_key():
@@ -163,6 +166,9 @@ def test_factory_builds_custom_endpoint_with_placeholder_key():
     assert kwargs["api_key"]
     assert kwargs["base_url"] == "http://localhost:11434/v1"
     assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.capabilities_for_model(
+        "gpt-5.6-terra"
+    ).supports_reasoning_effort is False
 
 
 def test_normalize_model_provider_name_canonicalizes_aliases():
@@ -314,6 +320,9 @@ def test_provider_factory_can_select_aisuite_backend():
 
     assert provider is create_aisuite.return_value
     create_aisuite.assert_called_once()
+    assert create_aisuite.call_args.kwargs[
+        "supports_openai_reasoning_effort"
+    ] is True
 
 
 def test_provider_factory_defaults_to_aisuite_backend():
@@ -348,6 +357,7 @@ def test_aisuite_factory_adds_openai_placeholder_for_custom_endpoint_without_key
     _, kwargs = create_aisuite.call_args
     assert kwargs["provider_configs"]["openai"]["base_url"] == "http://localhost:11434/v1"
     assert kwargs["provider_configs"]["openai"]["api_key"]
+    assert kwargs["supports_openai_reasoning_effort"] is False
 
 
 def test_aisuite_factory_requires_openai_credentials_for_default_models():

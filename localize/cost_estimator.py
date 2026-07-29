@@ -70,10 +70,18 @@ def estimate_run_cost(
     estimated_completion_tokens = completion_per_pass * _PASSES
 
     translate_cost = cost_for_tokens(
-        translate_model, prompt_per_pass, completion_per_pass, prices
+        translate_model,
+        prompt_per_pass,
+        completion_per_pass,
+        prices,
+        apply_long_context_pricing=False,
     )
     review_cost = cost_for_tokens(
-        review_model, prompt_per_pass, completion_per_pass, prices
+        review_model,
+        prompt_per_pass,
+        completion_per_pass,
+        prices,
+        apply_long_context_pricing=False,
     )
 
     if translate_cost is None or review_cost is None:

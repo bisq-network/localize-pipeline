@@ -524,6 +524,9 @@ def test_pr_body_includes_token_usage_cost_summary():
 
     assert "token_usage_summary.json" in script
     assert "Translation cost" in script
+    assert "--token-usage-summary" in script
+    assert "all AI stages" in script
+    assert ".stages" in script
     # The cost section must be assembled before the PR is created.
     cost_index = script.index("token_usage_summary.json")
     pr_create_index = script.index("gh pr create")

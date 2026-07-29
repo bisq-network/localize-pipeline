@@ -74,6 +74,8 @@ class TestLoadAppConfig:
             "target_project_root": "/custom/target",
             "input_folder": "/custom/input",
             "model_name": "gpt-4o-mini",
+            "review_model_name": "gpt-5.6-terra",
+            "review_reasoning_effort": "none",
             "dry_run": True,
             "retranslate_identical_source_strings": True,
             "translation_key_ledger_file_path": "/tmp/test-ledger.json",
@@ -113,6 +115,8 @@ class TestLoadAppConfig:
         assert config.target_project_root == "/custom/target"
         assert config.input_folder == "/custom/input"
         assert config.model_name == "gpt-4o-mini"
+        assert config.review_model_name == "gpt-5.6-terra"
+        assert config.review_reasoning_effort == "none"
         assert config.dry_run is True
         assert config.retranslate_identical_source_strings is True
         assert config.translation_key_ledger_file_path == "/tmp/test-ledger.json"
@@ -510,13 +514,34 @@ class TestLoadAppConfig:
                         mock_logger.return_value = MagicMock()
                         with patch.dict(os.environ, {
                             "REVIEW_MODEL_NAME": "gpt-4o",
+                            "REVIEW_REASONING_EFFORT": "low",
                             "HOLISTIC_REVIEW_CHUNK_SIZE": "100"
                         }):
                             config = load_app_config()
 
         assert config.model_name == "gpt-4"  # From config file
         assert config.review_model_name == "gpt-4o"  # From environment
+        assert config.review_reasoning_effort == "low"
         assert config.holistic_review_chunk_size == 100  # From environment
+
+    def test_invalid_review_reasoning_effort_is_disabled(self):
+        mock_config = {
+            "model_name": "gpt-4o-mini",
+            "review_reasoning_effort": "medium",
+            "dry_run": True,
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.setup_logger") as mock_logger:
+                mock_logger.return_value = MagicMock()
+                with patch.dict(
+                    os.environ,
+                    {"REVIEW_REASONING_EFFORT": "medum"},
+                    clear=True,
+                ):
+                    config = load_app_config()
+
+        assert config.review_reasoning_effort is None
 
     def test_load_config_with_dotenv_file(self):
         """Test that .env file is loaded properly."""

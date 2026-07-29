@@ -14,13 +14,18 @@ import jsonschema
 import yaml
 from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
-from localize.json_response import chat_json_mode_kwargs, loads_json_object
+from localize.json_response import (
+    chat_json_mode_kwargs,
+    chat_reasoning_effort_kwargs,
+    loads_json_object,
+)
 from localize.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
     ModelProviderConfigurationError,
     OpenAICompatibleProvider,
     create_model_provider,
+    normalize_reasoning_effort,
 )
 from localize.semantic_quality import (
     TranslationChange,
@@ -290,10 +295,14 @@ async def review_translation_changes(
     brand_glossary: Sequence[str],
     model_provider: Optional[ChatModelProvider] = None,
     failed_batches: Optional[List[str]] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     if not changes:
         return []
-    provider = model_provider or OpenAICompatibleProvider(client=client)
+    provider = model_provider or OpenAICompatibleProvider(
+        client=client,
+        supports_openai_reasoning_effort=True,
+    )
     findings: List[Dict[str, str]] = []
     for start in range(0, len(changes), SEMANTIC_REVIEW_BATCH_SIZE):
         batch = list(changes[start:start + SEMANTIC_REVIEW_BATCH_SIZE])
@@ -306,6 +315,7 @@ async def review_translation_changes(
                     changes=batch,
                     style_rules=style_rules,
                     brand_glossary=brand_glossary,
+                    reasoning_effort=reasoning_effort,
                 )
             )
         except Exception as exc:
@@ -326,6 +336,7 @@ async def _review_translation_change_batch(
     changes: Sequence[TranslationChange],
     style_rules: Sequence[str],
     brand_glossary: Sequence[str],
+    reasoning_effort: Optional[str],
 ) -> List[Dict[str, str]]:
     messages = build_semantic_review_messages(
         target_language=target_language,
@@ -341,6 +352,7 @@ async def _review_translation_change_batch(
         ],
         temperature=0,
         **chat_json_mode_kwargs(provider, model),
+        **chat_reasoning_effort_kwargs(provider, model, reasoning_effort),
         completion_token_limit=4096,
         timeout=120.0,
     )
@@ -365,6 +377,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--input-folder", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--validation-summary", required=True)
+    parser.add_argument("--token-usage-summary")
     parser.add_argument("--changed-files", nargs="+", required=True)
     return parser.parse_args(argv)
 
@@ -407,6 +420,9 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
             config.get("review_model_name", config.get("model_name", "gpt-4o")),
         )
     )
+    reasoning_effort = normalize_reasoning_effort(
+        semantic_review_config.get("reasoning_effort")
+    )
     provider_name = str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     api_base_url = os.environ.get("OPENAI_BASE_URL") or config.get("api_base_url")
     aisuite_config = config.get("aisuite", {}) or {}
@@ -441,6 +457,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
                 brand_glossary=brand_glossary,
                 model_provider=provider,
                 failed_batches=failed_batches,
+                reasoning_effort=reasoning_effort,
             )
 
     locale_results = await asyncio.gather(
@@ -483,6 +500,18 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         ]
 
     append_semantic_review_findings(args.validation_summary, findings)
+    if args.token_usage_summary:
+        try:
+            provider.write_usage_summary(
+                args.token_usage_summary,
+                merge_existing=True,
+                stage_name="semantic_review",
+            )
+        except Exception:
+            logger.exception(
+                "Failed to merge semantic review usage into %s",
+                args.token_usage_summary,
+            )
     return 0
 
 
