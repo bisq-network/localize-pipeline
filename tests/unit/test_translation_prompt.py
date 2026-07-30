@@ -53,6 +53,12 @@ def test_translation_system_prompt_requests_grammatical_number_agreement():
     # the model does not reuse the plural wording for the singular case.
     assert ".single" in prompt
     assert ".plural" in prompt
+    # The bisq-mobile i18nPlural convention uses `.1`/`.*` count keys, where
+    # `.*` is a catch-all for every count other than one (bisq-mobile#1669).
+    assert "`.1`" in prompt
+    assert "`.*`" in prompt
+    assert "catch-all" in prompt
+    assert "count-neutral" in prompt
     assert "identical singular and plural target forms are acceptable" in prompt
     # The example must render a real placeholder, not a doubled f-string brace.
     assert "Used {0} time" in prompt
