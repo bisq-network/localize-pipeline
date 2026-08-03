@@ -397,15 +397,15 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
     def test_extract_texts_to_translate_skips_ignored_keys(self):
         """Ignored keys should never be selected for model translation."""
         parsed_lines = [
-            {'type': 'entry', 'key': '/#1', 'value': 'Phrases in basic/Main.tsx', 'line_number': 0},
+            {'type': 'entry', 'key': '/#1', 'value': 'Phrases in app/Main.tsx', 'line_number': 0},
             {'type': 'entry', 'key': '/welcome', 'value': 'Welcome', 'line_number': 1},
         ]
         target_translations = {
-            '/#1': 'Phrases in basic/Main.tsx',
+            '/#1': 'Phrases in app/Main.tsx',
             '/welcome': 'Welcome',
         }
         source_translations = {
-            '/#1': 'Phrases in basic/Main.tsx',
+            '/#1': 'Phrases in app/Main.tsx',
             '/welcome': 'Welcome',
         }
 
@@ -424,15 +424,15 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
     def test_extract_texts_to_translate_is_unchanged_without_ignore_patterns(self):
         """Unset ignore_key_patterns should preserve existing selection behavior."""
         parsed_lines = [
-            {'type': 'entry', 'key': '/#1', 'value': 'Phrases in basic/Main.tsx', 'line_number': 0},
+            {'type': 'entry', 'key': '/#1', 'value': 'Phrases in app/Main.tsx', 'line_number': 0},
             {'type': 'entry', 'key': '/welcome', 'value': 'Welcome', 'line_number': 1},
         ]
         target_translations = {
-            '/#1': 'Phrases in basic/Main.tsx',
+            '/#1': 'Phrases in app/Main.tsx',
             '/welcome': 'Welcome',
         }
         source_translations = {
-            '/#1': 'Phrases in basic/Main.tsx',
+            '/#1': 'Phrases in app/Main.tsx',
             '/welcome': 'Welcome',
         }
 
@@ -457,7 +457,7 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
         """Empty ignore_key_patterns should be byte-for-byte inert."""
         content = textwrap.dedent("""\
             # Existing target file
-            comment.1=Phrases in basic/Main.tsx
+            comment.1=Phrases in app/Main.tsx
             welcome=Willkommen
         """)
         with tempfile.NamedTemporaryFile('w', delete=False, encoding='utf-8') as temp_file:
@@ -472,7 +472,7 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
                 parsed_lines,
                 target_translations,
                 {
-                    'comment.1': 'Phrases in basic/Main.tsx',
+                    'comment.1': 'Phrases in app/Main.tsx',
                     'welcome': 'Welcome',
                 },
                 [],
@@ -486,12 +486,12 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
     def test_per_key_validation_excludes_ignored_keys_from_failures(self):
         valid_translations, summary = run_per_key_validation_with_summary(
             {
-                '/#1': 'Phrases in basic/Main.tsx',
+                '/#1': 'Phrases in app/Main.tsx',
                 '/welcome': 'Willkommen',
                 '/broken': 'Hallo',
             },
             {
-                '/#1': 'Phrases in basic/Main.tsx {{name}}',
+                '/#1': 'Phrases in app/Main.tsx {{name}}',
                 '/welcome': 'Welcome',
                 '/broken': 'Hello {{name}}',
             },
@@ -499,7 +499,7 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
             ignore_key_patterns=compile_ignore_key_patterns([r'^/#\d+$']),
         )
 
-        self.assertEqual(valid_translations['/#1'], 'Phrases in basic/Main.tsx {{name}}')
+        self.assertEqual(valid_translations['/#1'], 'Phrases in app/Main.tsx {{name}}')
         self.assertEqual(valid_translations['/welcome'], 'Willkommen')
         self.assertEqual(valid_translations['/broken'], 'Hello {{name}}')
         self.assertEqual(summary['failed_keys'], ['/broken'])
