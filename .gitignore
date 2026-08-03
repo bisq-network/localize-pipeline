@@ -25,6 +25,10 @@ build/
 /logs/*
 !/logs/.gitkeep
 
+# Test-generated logs. Loading a config writes 'logs/' next to the config file,
+# so any fixture config leaves one behind when a test loads it.
+/tests/**/logs/
+
 # Secrets
 # This directory contains sensitive information like API keys and should never be committed.
 # Ignore contents of secrets, but not the directory itself, so .gitkeep can be tracked.
@@ -51,3 +55,13 @@ docker/docker-compose.override.*.yaml
 /CLAUDE.md
 /.claude/
 /claudedocs/
+
+# Local-only commercial material: prospect research, outreach drafts and staged
+# per-project artifacts. This is a published Action, so none of it belongs in the
+# repository. Kept ignored rather than relocated so 'git add -A' cannot sweep it in.
+/outreach/
+/docs/business-strategy.md
+/docs/codex-prompt-ignore-keys.md
+/docs/customer-development-action-plan.md
+/docs/customer-discovery-targets.md
+/docs/*-dossier.md
