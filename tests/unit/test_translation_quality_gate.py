@@ -128,20 +128,20 @@ def test_source_identical_gate_excludes_ignored_json_pointer_keys(tmp_path):
     _write_json(
         input_folder / "en.json",
         {
-            "#1": "Phrases in basic/Main.tsx",
+            "#1": "Phrases in app/Main.tsx",
             "title": "Open trades",
         },
     )
     _write_json(
         input_folder / "de.json",
         {
-            "#1": "Phrases in basic/Main.tsx",
+            "#1": "Phrases in app/Main.tsx",
             "title": "Open trades",
         },
     )
     diff_text = """diff --git a/locales/de.json b/locales/de.json
 +++ b/locales/de.json
-+  "#1": "Phrases in basic/Main.tsx",
++  "#1": "Phrases in app/Main.tsx",
 +  "title": "Open trades",
 """
 

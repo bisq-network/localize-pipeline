@@ -551,9 +551,9 @@ async def test_process_translation_queue_preserves_ignored_json_comment_keys(int
     env = integration_test_environment
     layout = LocalizationLayout(id="locale_filename", source_locale="en")
     source_content = {
-        "#1": "Phrases in basic/Main.tsx",
-        "#2": "Phrases in basic/BookPage/index.tsx",
-        "welcome": "Welcome to RoboSats",
+        "#1": "Phrases in app/Main.tsx",
+        "#2": "Phrases in app/SettingsPage/index.tsx",
+        "welcome": "Welcome to Acme",
         "amount": "Amount {{amount}} sats",
     }
     target_content = {}
@@ -574,13 +574,13 @@ async def test_process_translation_queue_preserves_ignored_json_comment_keys(int
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
                 content=json.dumps({
                     "/amount": "Betrag {{amount}} sats",
-                    "/welcome": "Willkommen bei RoboSats",
+                    "/welcome": "Willkommen bei Acme",
                 })
             ))])
         if "Key: /amount" in prompt_text:
             content = "Betrag {{amount}} sats"
         elif "Key: /welcome" in prompt_text:
-            content = "Willkommen bei RoboSats"
+            content = "Willkommen bei Acme"
         else:
             raise AssertionError(f"Unexpected model prompt: {prompt_text}")
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
@@ -623,15 +623,15 @@ async def test_process_translation_queue_preserves_ignored_json_comment_keys(int
     assert skipped_files == {}
     assert total_keys == 2
     assert final_payload == {
-        "#1": "Phrases in basic/Main.tsx",
-        "#2": "Phrases in basic/BookPage/index.tsx",
-        "welcome": "Willkommen bei RoboSats",
+        "#1": "Phrases in app/Main.tsx",
+        "#2": "Phrases in app/SettingsPage/index.tsx",
+        "welcome": "Willkommen bei Acme",
         "amount": "Betrag {{amount}} sats",
     }
     assert provider.estimate_run_cost.call_args.kwargs["num_keys"] == 2
     assert all('"#1"' not in prompt for prompt in seen_prompt_texts)
     assert all('"#2"' not in prompt for prompt in seen_prompt_texts)
-    assert all("Phrases in basic" not in prompt for prompt in seen_prompt_texts)
+    assert all("Phrases in app" not in prompt for prompt in seen_prompt_texts)
 
 
 @pytest.mark.asyncio
@@ -639,8 +639,8 @@ async def test_process_translation_queue_writes_only_ignored_json_keys(integrati
     env = integration_test_environment
     layout = LocalizationLayout(id="locale_filename", source_locale="en")
     source_content = {
-        "#1": "Phrases in basic/Main.tsx",
-        "#2": "Phrases in basic/BookPage/index.tsx",
+        "#1": "Phrases in app/Main.tsx",
+        "#2": "Phrases in app/SettingsPage/index.tsx",
     }
     source_file_path = os.path.join(env['input_folder'], 'en.json')
     target_file_path = os.path.join(env['translation_queue_folder'], 'de.json')

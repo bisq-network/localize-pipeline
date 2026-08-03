@@ -52,6 +52,15 @@ claudedocs/
 docs/llm/
 docs/requirements/
 
+# Local-only commercial material. Mirrors .gitignore: this is a published image,
+# so prospect research and outreach drafts must not be baked into it.
+outreach/
+docs/business-strategy.md
+docs/codex-prompt-ignore-keys.md
+docs/customer-development-action-plan.md
+docs/customer-discovery-targets.md
+docs/*-dossier.md
+
 # Documentation & Tests (if not needed in image)
 # docs/
 # tests/
