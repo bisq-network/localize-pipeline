@@ -631,7 +631,7 @@ async def test_process_translation_queue_preserves_ignored_json_comment_keys(int
     assert provider.estimate_run_cost.call_args.kwargs["num_keys"] == 2
     assert all('"#1"' not in prompt for prompt in seen_prompt_texts)
     assert all('"#2"' not in prompt for prompt in seen_prompt_texts)
-    assert all("Phrases in basic" not in prompt for prompt in seen_prompt_texts)
+    assert all("Phrases in app" not in prompt for prompt in seen_prompt_texts)
 
 
 @pytest.mark.asyncio
