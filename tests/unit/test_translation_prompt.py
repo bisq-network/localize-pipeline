@@ -57,3 +57,18 @@ def test_translation_system_prompt_requests_grammatical_number_agreement():
     # The example must render a real placeholder, not a doubled f-string brace.
     assert "Used {0} time" in prompt
     assert "{{0}}" not in prompt
+
+
+def test_translation_system_prompt_warns_against_compound_splitting():
+    prompt = build_translation_system_prompt(
+        target_language="Norwegian",
+        style_rules_text="",
+        project_context="",
+        localization_format=JAVA_PROPERTIES_FORMAT,
+    )
+
+    # Compound-building languages must keep closed compounds joined rather than
+    # splitting them (Norwegian saerskriving), which recurred in wallet keys.
+    assert "compound noun" in prompt
+    assert "Adressenotat" in prompt
+    assert "Adresse notat" in prompt
