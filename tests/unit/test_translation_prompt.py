@@ -80,3 +80,18 @@ def test_translation_system_prompt_requests_ui_label_cross_reference_consistency
     assert "context examples and existing translations" in prompt
     # Guidance must stay product-agnostic; no concrete menu names leak in.
     assert "Bisq" not in prompt
+
+
+def test_translation_system_prompt_warns_against_compound_splitting():
+    prompt = build_translation_system_prompt(
+        target_language="Norwegian",
+        style_rules_text="",
+        project_context="",
+        localization_format=JAVA_PROPERTIES_FORMAT,
+    )
+
+    # Compound-building languages must keep closed compounds joined rather than
+    # splitting them (Norwegian saerskriving), which recurred in wallet keys.
+    assert "compound noun" in prompt
+    assert "Adressenotat" in prompt
+    assert "Adresse notat" in prompt
