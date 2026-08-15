@@ -2575,6 +2575,8 @@ async def process_translation_queue(
             )
             failed_keys = set(per_key_summary["failed_keys"]).union(model_failed_keys)
             increment_run_metric(run_metrics, "model_translation_failed_count", len(failed_keys))
+            per_key_summary["model_translation_failed_count"] = len(model_failed_keys)
+            per_key_summary["model_translation_failed_keys"] = sorted(model_failed_keys)
             if validation_summary is not None:
                 validation_summary[translation_file] = per_key_summary
 
