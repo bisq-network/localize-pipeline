@@ -460,6 +460,18 @@ def test_preimage_is_a_protected_brand_technical_term():
     assert {"Lightning", "Lightning Escrow", "Submarine Swaps"}.issubset(set(brand_glossary))
 
 
+def test_telebirr_is_a_protected_brand_term():
+    """Keep the Telebirr payment-method name in its official spelling.
+
+    bisq2#4904 transliterated Telebirr in thirteen locales even though the
+    source value is a brand name. The protected glossary must make exact
+    source-identical values intentional and keep the model from rewriting it.
+    """
+    config = yaml.safe_load(BISQ_PROFILE_CONFIG.read_text(encoding="utf-8"))
+
+    assert "Telebirr" in config["brand_technical_glossary"]
+
+
 _NETWORK_RULE_IDS = {
     "network-seed-node-not-seed-phrase",
     "network-transport-not-physical-transport",
