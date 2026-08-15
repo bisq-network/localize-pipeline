@@ -95,3 +95,4 @@ def test_translation_system_prompt_warns_against_compound_splitting():
     assert "compound noun" in prompt
     assert "Adressenotat" in prompt
     assert "Adresse notat" in prompt
+    assert "Do not mechanically join" in prompt
