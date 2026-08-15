@@ -484,13 +484,19 @@ def test_network_terminology_rules_from_1606_are_encoded(config_path):
     assert _NETWORK_RULE_IDS.issubset(rules_by_id)
     for rule_id in _NETWORK_RULE_IDS:
         rule = rules_by_id[rule_id]
-        assert rule["source"] == "bisq-mobile#1606 CodeRabbit"
         assert rule["severity"] == "error"
         assert set(rule["locales"]) <= supported
 
     seed_rule = rules_by_id["network-seed-node-not-seed-phrase"]
     assert seed_rule["keys"] == ["mobile.networkInfo.connections.seed"]
+    # French was added after the #1669 regression (glossary term
+    # "seed phrase" -> "Mots de Récupération" leaked into the seed-node label);
+    # keep provenance and locale coverage in lock-step so fr cannot be dropped.
+    assert "#1669" in seed_rule["source"]
+    assert "fr" in seed_rule["locales"]
     transport_rule = rules_by_id["network-transport-not-physical-transport"]
+    assert seed_rule["source"] == "bisq-mobile#1606, #1669 CodeRabbit"
+    assert transport_rule["source"] == "bisq-mobile#1606 CodeRabbit"
     assert set(transport_rule["keys"]) == {
         "mobile.networkInfo.myNode.transport",
         "mobile.networkInfo.overview.transport",
@@ -530,6 +536,8 @@ def test_network_terminology_rules_flag_the_real_1606_mistranslations():
         _seed("id", "Kata Seed"),
         _seed("it", "Parole Seed"),
         _seed("vi", "Từ khóa seed"),
+        # bisq-mobile#1669: French leaked the "seed phrase" glossary term.
+        _seed("fr", "Mots de Récupération"),
         _transport("af_ZA", "Vervoer"),
         _transport("cs", "Doprava"),
         _transport("vi", "Vận chuyển"),
@@ -550,6 +558,7 @@ def test_network_terminology_rules_flag_the_real_1606_mistranslations():
         _seed("vi", "Nút seed"),
         _seed("de", "Seed"),
         _seed("pcm", "Seed node"),
+        _seed("fr", "Nœud seed"),
         _transport("af_ZA", "Transport"),
         _transport("cs", "Přenos"),
         _transport("de", "Transport"),
