@@ -256,6 +256,7 @@ async def test_failed_model_translation_marks_ledger_and_skips_memory(integratio
     target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
     ledger_path = os.path.join(env['input_folder'], 'ledger.json')
     memory_path = os.path.join(env['input_folder'], 'translation_memory.json')
+    validation_summary = {}
 
     with open(source_file_path, 'w', encoding='utf-8') as f:
         f.write("key.fail=Needs translation\n")
@@ -281,11 +282,14 @@ async def test_failed_model_translation_marks_ledger_and_skips_memory(integratio
         await localize.translate_localization_files.process_translation_queue(
             translation_queue_folder=env['translation_queue_folder'],
             translated_queue_folder=env['translated_queue_folder'],
-            glossary_file_path=env['mock_glossary_path_resolved']
+            glossary_file_path=env['mock_glossary_path_resolved'],
+            validation_summary=validation_summary,
         )
 
     ledger = localize.translate_localization_files.load_translation_key_ledger(ledger_path)
     assert ledger["app_de.properties"]["key.fail"]["status"] == "failed"
+    assert validation_summary["app_de.properties"]["model_translation_failed_count"] == 1
+    assert validation_summary["app_de.properties"]["model_translation_failed_keys"] == ["key.fail"]
 
     memory = load_translation_memory(memory_path)
     assert memory.lookup(

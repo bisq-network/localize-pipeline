@@ -482,6 +482,7 @@ def _aggregate_validation(
         "reverted_keys_count": 0,
         "control_character_findings_count": 0,
         "placeholder_failures_count": 0,
+        "model_translation_failed_count": 0,
     }
     for filename, file_summary in validation_summary.get("files", {}).items():
         if changed_relative_files and not _file_matches_changed_files(filename, changed_relative_files):
@@ -491,6 +492,9 @@ def _aggregate_validation(
             file_summary.get("control_character_findings_count", 0)
         )
         totals["placeholder_failures_count"] += int(file_summary.get("placeholder_failures_count", 0))
+        totals["model_translation_failed_count"] += int(
+            file_summary.get("model_translation_failed_count", 0)
+        )
     return totals
 
 
@@ -635,6 +639,8 @@ def build_quality_gate_report(
         blocking_reasons.append("Control-character artifacts require manual resolution.")
     if validation_totals["placeholder_failures_count"]:
         blocking_reasons.append("Placeholder parity failures require manual resolution.")
+    if validation_totals["model_translation_failed_count"]:
+        blocking_reasons.append("Model translation failures require manual resolution.")
 
     if config.block_on_semantic_qa_findings and semantic_stats.errors_count:
         blocking_reasons.append("Semantic translation QA findings require manual resolution.")
@@ -768,6 +774,7 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
             f"| Reverted keys | {validation['reverted_keys_count']} |",
             f"| Control-character findings | {validation['control_character_findings_count']} |",
             f"| Placeholder failures | {validation['placeholder_failures_count']} |",
+            f"| Model translation failures | {validation.get('model_translation_failed_count', 0)} |",
             f"| Pipeline warnings | {report['pipeline_warnings_count']} |",
             "",
         ]
