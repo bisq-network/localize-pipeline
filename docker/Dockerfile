@@ -38,6 +38,26 @@ RUN /out/yq --version && \
     grep -E "golang[.]org/x/text[[:space:]]+v${X_TEXT_VERSION}([[:space:]]|$)" \
         /tmp/yq-buildinfo
 
+FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS tx-builder
+
+ARG TX_VERSION=1.6.17
+ARG TX_COMMIT=30dac142446db7bd1919894e9eb93545f58cc980
+ARG GO_GIT_VERSION=5.19.2
+ENV CGO_ENABLED=0
+
+WORKDIR /src/tx
+RUN git clone --depth 1 --branch "v${TX_VERSION}" \
+        https://github.com/transifex/cli.git . && \
+    test "$(git rev-parse HEAD)" = "$TX_COMMIT" && \
+    go get "github.com/go-git/go-git/v5@v${GO_GIT_VERSION}" && \
+    go build -p=1 -trimpath \
+        -ldflags="-s -w -X github.com/transifex/cli/internal/txlib.Version=v${TX_VERSION}" \
+        -o /out/tx .
+RUN /out/tx --version && \
+    go version -m /out/tx > /tmp/tx-buildinfo && \
+    grep -E "github[.]com/go-git/go-git/v5[[:space:]]+v${GO_GIT_VERSION}([[:space:]]|$)" \
+        /tmp/tx-buildinfo
+
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # Set SHELL to fail on pipeline errors
@@ -74,6 +94,9 @@ RUN gh --version
 COPY --from=yq-builder /out/yq /usr/bin/yq
 RUN yq --version
 
+COPY --from=tx-builder /out/tx /usr/local/bin/tx
+RUN tx --version
+
 # Download and install gosu for user switching
 RUN set -eux; \
     GOSU_VERSION=1.19; \
@@ -97,22 +120,6 @@ RUN groupadd --gid 9999 appuser && \
 
 # Make python3.11 the default python3
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-
-# Install Transifex CLI
-RUN TX_VERSION="v1.6.17" && \
-    CONTAINER_ARCH=$(dpkg --print-architecture) && \
-    if [ "$CONTAINER_ARCH" = "amd64" ]; then \
-        TX_ARCH="linux-amd64"; \
-        TX_SHA256="002dec5b9e71248a7e6a0808118e9da940205828d5a33ce88e04bb57a967164d"; \
-    elif [ "$CONTAINER_ARCH" = "arm64" ]; then \
-        TX_ARCH="linux-arm64"; \
-        TX_SHA256="c380ed9aece5d34316aa0fe2e5afa0633553656f98909f88cb72609e2fa13153"; \
-    else echo "Unsupported architecture for Transifex CLI: $CONTAINER_ARCH"; exit 1; fi && \
-    curl -Lf -O "https://github.com/transifex/cli/releases/download/${TX_VERSION}/tx-${TX_ARCH}.tar.gz" && \
-    echo "$TX_SHA256  tx-${TX_ARCH}.tar.gz" | sha256sum -c - && \
-    tar -xzf "tx-${TX_ARCH}.tar.gz" -C /usr/local/bin tx && \
-    rm "tx-${TX_ARCH}.tar.gz" && \
-    tx --version
 
 # Private deploy and GPG keys are mounted as runtime secrets and installed by
 # docker-entrypoint.sh so they never persist in image layers.

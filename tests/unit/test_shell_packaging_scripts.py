@@ -105,13 +105,19 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0" in dockerfile
     assert "ARG YQ_VERSION=4.53.3" in dockerfile
     assert "ARG YQ_COMMIT=1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d" in dockerfile
+    assert "ARG TX_VERSION=1.6.17" in dockerfile
+    assert "ARG TX_COMMIT=30dac142446db7bd1919894e9eb93545f58cc980" in dockerfile
     assert "ARG GRPC_VERSION=1.82.1" in dockerfile
+    assert "ARG GO_GIT_VERSION=5.19.2" in dockerfile
     assert "ARG X_TEXT_VERSION=0.40.0" in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$YQ_COMMIT"' in dockerfile
+    assert 'test "$(git rev-parse HEAD)" = "$TX_COMMIT"' in dockerfile
     assert 'go get "google.golang.org/grpc@v${GRPC_VERSION}"' in dockerfile
+    assert 'go get "github.com/go-git/go-git/v5@v${GO_GIT_VERSION}"' in dockerfile
     assert dockerfile.count('go get "golang.org/x/text@v${X_TEXT_VERSION}"') == 2
     assert "COPY --from=yq-builder /out/yq /usr/bin/yq" in dockerfile
+    assert "COPY --from=tx-builder /out/tx /usr/local/bin/tx" in dockerfile
 
 
 def test_dockerignore_excludes_local_configs_and_agent_scratch():
@@ -136,13 +142,12 @@ def test_dockerignore_excludes_local_configs_and_agent_scratch():
         assert pattern in dockerignore
 
 
-def test_dockerfile_verifies_transifex_cli_tarball_checksum():
+def test_dockerfile_rebuilds_transifex_cli_instead_of_using_vendor_binary():
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "TX_SHA256" in dockerfile
-    assert "002dec5b9e71248a7e6a0808118e9da940205828d5a33ce88e04bb57a967164d" in dockerfile
-    assert "c380ed9aece5d34316aa0fe2e5afa0633553656f98909f88cb72609e2fa13153" in dockerfile
-    assert 'echo "$TX_SHA256  tx-${TX_ARCH}.tar.gz" | sha256sum -c -' in dockerfile
+    assert "TX_SHA256" not in dockerfile
+    assert "github.com/transifex/cli.git" in dockerfile
+    assert "go version -m /out/tx" in dockerfile
 
 
 def test_run_local_translation_resolves_config_before_chdir():
