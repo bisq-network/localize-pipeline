@@ -476,13 +476,14 @@ def _aggregate_validation(
     validation_summary: Dict[str, Any],
     changed_files: Sequence[str],
     input_folder: str,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     changed_relative_files = _changed_files_relative_to_input(changed_files, input_folder)
     totals = {
         "reverted_keys_count": 0,
         "control_character_findings_count": 0,
         "placeholder_failures_count": 0,
         "model_translation_failed_count": 0,
+        "model_translation_failed_keys": {},
     }
     for filename, file_summary in validation_summary.get("files", {}).items():
         if changed_relative_files and not _file_matches_changed_files(filename, changed_relative_files):
@@ -495,6 +496,13 @@ def _aggregate_validation(
         totals["model_translation_failed_count"] += int(
             file_summary.get("model_translation_failed_count", 0)
         )
+        raw_failed_keys = file_summary.get("model_translation_failed_keys", [])
+        if isinstance(raw_failed_keys, Sequence) and not isinstance(
+            raw_failed_keys, (str, bytes)
+        ):
+            failed_keys = sorted({str(key) for key in raw_failed_keys if str(key)})
+            if failed_keys:
+                totals["model_translation_failed_keys"][str(filename)] = failed_keys
     return totals
 
 
@@ -779,6 +787,21 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
             "",
         ]
     )
+
+    model_failure_keys = validation.get("model_translation_failed_keys", {})
+    if isinstance(model_failure_keys, Mapping) and model_failure_keys:
+        lines.append("### Model Translation Failures")
+        lines.append("")
+        for filename in sorted(model_failure_keys):
+            keys = model_failure_keys[filename]
+            if not isinstance(keys, Sequence) or isinstance(keys, (str, bytes)):
+                continue
+            for key in keys:
+                lines.append(
+                    f"- `{_escape_markdown_report_text(filename, 160)}` "
+                    f"`{_escape_markdown_report_text(key, 160)}`"
+                )
+        lines.append("")
 
     if source.get("examples"):
         lines.append("### Source-Identical Examples")

@@ -533,7 +533,14 @@ def test_model_translation_failures_are_blocking():
 
     assert report["blocking"] is True
     assert report["validation"]["model_translation_failed_count"] == 1
+    assert report["validation"]["model_translation_failed_keys"] == {
+        "mobile_es.properties": ["mobile.example"]
+    }
     assert any("Model translation" in reason for reason in report["blocking_reasons"])
+
+    markdown = render_quality_gate_markdown(report)
+    assert "### Model Translation Failures" in markdown
+    assert "`mobile_es.properties` `mobile.example`" in markdown
 
 
 def test_pipeline_warnings_are_filtered_to_current_batch():
