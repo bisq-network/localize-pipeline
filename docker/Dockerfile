@@ -1,4 +1,4 @@
-FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS gh-builder
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS gh-builder
 
 ARG GH_VERSION=2.96.0
 ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
@@ -20,7 +20,7 @@ RUN go version -m /out/gh > /tmp/gh-buildinfo && \
     grep -E "golang[.]org/x/text[[:space:]]+v${X_TEXT_VERSION}([[:space:]]|$)" \
         /tmp/gh-buildinfo
 
-FROM golang:1.26.4-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS yq-builder
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS yq-builder
 
 ARG YQ_VERSION=4.53.3
 ARG YQ_COMMIT=1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d
@@ -37,6 +37,44 @@ RUN /out/yq --version && \
     go version -m /out/yq > /tmp/yq-buildinfo && \
     grep -E "golang[.]org/x/text[[:space:]]+v${X_TEXT_VERSION}([[:space:]]|$)" \
         /tmp/yq-buildinfo
+
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS tx-builder
+
+ARG TX_VERSION=1.6.17
+ARG TX_COMMIT=30dac142446db7bd1919894e9eb93545f58cc980
+ARG GO_GIT_VERSION=5.19.2
+ENV CGO_ENABLED=0
+
+WORKDIR /src/tx
+RUN git clone --depth 1 --branch "v${TX_VERSION}" \
+        https://github.com/transifex/cli.git . && \
+    test "$(git rev-parse HEAD)" = "$TX_COMMIT" && \
+    go get "github.com/go-git/go-git/v5@v${GO_GIT_VERSION}" && \
+    go build -p=1 -trimpath \
+        -ldflags="-s -w -X github.com/transifex/cli/internal/txlib.Version=v${TX_VERSION}" \
+        -o /out/tx .
+RUN /out/tx --version && \
+    go version -m /out/tx > /tmp/tx-buildinfo && \
+    grep -E "github[.]com/go-git/go-git/v5[[:space:]]+v${GO_GIT_VERSION}([[:space:]]|$)" \
+        /tmp/tx-buildinfo
+
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS gosu-builder
+
+ARG GOSU_VERSION=1.19
+ARG GOSU_COMMIT=6456aaa0f3c854d199d0f037f068eb97515b7513
+ARG X_SYS_VERSION=0.46.0
+ENV CGO_ENABLED=0
+
+WORKDIR /src/gosu
+RUN git clone --depth 1 --branch "${GOSU_VERSION}" \
+        https://github.com/tianon/gosu.git . && \
+    test "$(git rev-parse HEAD)" = "$GOSU_COMMIT" && \
+    go get "golang.org/x/sys@v${X_SYS_VERSION}" && \
+    go build -trimpath -ldflags="-s -w" -o /out/gosu .
+RUN /out/gosu --version && \
+    go version -m /out/gosu > /tmp/gosu-buildinfo && \
+    grep -E "golang[.]org/x/sys[[:space:]]+v${X_SYS_VERSION}([[:space:]]|$)" \
+        /tmp/gosu-buildinfo
 
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
@@ -74,21 +112,11 @@ RUN gh --version
 COPY --from=yq-builder /out/yq /usr/bin/yq
 RUN yq --version
 
-# Download and install gosu for user switching
-RUN set -eux; \
-    GOSU_VERSION=1.19; \
-    GOSU_ARCH="$(dpkg --print-architecture)"; \
-    curl -sSL -o /usr/sbin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$GOSU_ARCH"; \
-    if [ "$GOSU_ARCH" = "amd64" ]; then \
-        GOSU_SHA256="52c8749d0142edd234e9d6bd5237dff2d81e71f43537e2f4f66f75dd4b243dd0"; \
-    elif [ "$GOSU_ARCH" = "arm64" ]; then \
-        GOSU_SHA256="3a8ef022d82c0bc4a98bcb144e77da714c25fcfa64dccc57f6aba7ae47ff1a44"; \
-    else \
-        echo "Unsupported architecture: $GOSU_ARCH" >&2; \
-        exit 1; \
-    fi; \
-    echo "$GOSU_SHA256 /usr/sbin/gosu" | sha256sum -c -; \
-    chmod +x /usr/sbin/gosu
+COPY --from=tx-builder /out/tx /usr/local/bin/tx
+RUN tx --version
+
+COPY --from=gosu-builder /out/gosu /usr/sbin/gosu
+RUN gosu --version
 
 # Create a non-root user 'appuser' with a fixed, non-conflicting UID/GID.
 # The home directory is created at /home/appuser.
@@ -97,22 +125,6 @@ RUN groupadd --gid 9999 appuser && \
 
 # Make python3.11 the default python3
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-
-# Install Transifex CLI
-RUN TX_VERSION="v1.6.17" && \
-    CONTAINER_ARCH=$(dpkg --print-architecture) && \
-    if [ "$CONTAINER_ARCH" = "amd64" ]; then \
-        TX_ARCH="linux-amd64"; \
-        TX_SHA256="002dec5b9e71248a7e6a0808118e9da940205828d5a33ce88e04bb57a967164d"; \
-    elif [ "$CONTAINER_ARCH" = "arm64" ]; then \
-        TX_ARCH="linux-arm64"; \
-        TX_SHA256="c380ed9aece5d34316aa0fe2e5afa0633553656f98909f88cb72609e2fa13153"; \
-    else echo "Unsupported architecture for Transifex CLI: $CONTAINER_ARCH"; exit 1; fi && \
-    curl -Lf -O "https://github.com/transifex/cli/releases/download/${TX_VERSION}/tx-${TX_ARCH}.tar.gz" && \
-    echo "$TX_SHA256  tx-${TX_ARCH}.tar.gz" | sha256sum -c - && \
-    tar -xzf "tx-${TX_ARCH}.tar.gz" -C /usr/local/bin tx && \
-    rm "tx-${TX_ARCH}.tar.gz" && \
-    tx --version
 
 # Private deploy and GPG keys are mounted as runtime secrets and installed by
 # docker-entrypoint.sh so they never persist in image layers.
