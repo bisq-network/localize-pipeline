@@ -53,7 +53,46 @@ def test_translation_system_prompt_requests_grammatical_number_agreement():
     # the model does not reuse the plural wording for the singular case.
     assert ".single" in prompt
     assert ".plural" in prompt
+    # The bisq-mobile i18nPlural convention uses `.1`/`.*` count keys, where
+    # `.*` is a catch-all for every count other than one (bisq-mobile#1669).
+    assert "`.1`" in prompt
+    assert "`.*`" in prompt
+    assert "catch-all" in prompt
+    assert "count-neutral" in prompt
     assert "identical singular and plural target forms are acceptable" in prompt
     # The example must render a real placeholder, not a doubled f-string brace.
     assert "Used {0} time" in prompt
     assert "{{0}}" not in prompt
+
+
+def test_translation_system_prompt_requests_ui_label_cross_reference_consistency():
+    prompt = build_translation_system_prompt(
+        target_language="German",
+        style_rules_text="",
+        project_context="",
+        localization_format=JAVA_PROPERTIES_FORMAT,
+    )
+
+    # Strings that reference other UI elements by name (navigation paths, quoted
+    # menu/button labels) must reuse the existing localized label wording so the
+    # instructions match the controls the user actually sees.
+    assert "Keep references to other UI labels consistent" in prompt
+    assert "context examples and existing translations" in prompt
+    # Guidance must stay product-agnostic; no concrete menu names leak in.
+    assert "Bisq" not in prompt
+
+
+def test_translation_system_prompt_warns_against_compound_splitting():
+    prompt = build_translation_system_prompt(
+        target_language="Norwegian",
+        style_rules_text="",
+        project_context="",
+        localization_format=JAVA_PROPERTIES_FORMAT,
+    )
+
+    # Compound-building languages must keep closed compounds joined rather than
+    # splitting them (Norwegian saerskriving), which recurred in wallet keys.
+    assert "compound noun" in prompt
+    assert "Adressenotat" in prompt
+    assert "Adresse notat" in prompt
+    assert "Do not mechanically join" in prompt
