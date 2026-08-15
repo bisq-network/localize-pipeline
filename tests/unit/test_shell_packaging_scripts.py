@@ -101,23 +101,34 @@ def test_dockerfile_uses_orchestration_default_command():
 def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
+    go_builder = (
+        "FROM golang:1.26.6-bookworm@"
+        "sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36"
+    )
+    assert dockerfile.count(go_builder) == 4
     assert "ARG GH_VERSION=2.96.0" in dockerfile
     assert "ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0" in dockerfile
     assert "ARG YQ_VERSION=4.53.3" in dockerfile
     assert "ARG YQ_COMMIT=1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d" in dockerfile
     assert "ARG TX_VERSION=1.6.17" in dockerfile
     assert "ARG TX_COMMIT=30dac142446db7bd1919894e9eb93545f58cc980" in dockerfile
+    assert "ARG GOSU_VERSION=1.19" in dockerfile
+    assert "ARG GOSU_COMMIT=6456aaa0f3c854d199d0f037f068eb97515b7513" in dockerfile
+    assert "ARG X_SYS_VERSION=0.46.0" in dockerfile
     assert "ARG GRPC_VERSION=1.82.1" in dockerfile
     assert "ARG GO_GIT_VERSION=5.19.2" in dockerfile
     assert "ARG X_TEXT_VERSION=0.40.0" in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$YQ_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$TX_COMMIT"' in dockerfile
+    assert 'test "$(git rev-parse HEAD)" = "$GOSU_COMMIT"' in dockerfile
     assert 'go get "google.golang.org/grpc@v${GRPC_VERSION}"' in dockerfile
     assert 'go get "github.com/go-git/go-git/v5@v${GO_GIT_VERSION}"' in dockerfile
+    assert 'go get "golang.org/x/sys@v${X_SYS_VERSION}"' in dockerfile
     assert dockerfile.count('go get "golang.org/x/text@v${X_TEXT_VERSION}"') == 2
     assert "COPY --from=yq-builder /out/yq /usr/bin/yq" in dockerfile
     assert "COPY --from=tx-builder /out/tx /usr/local/bin/tx" in dockerfile
+    assert "COPY --from=gosu-builder /out/gosu /usr/sbin/gosu" in dockerfile
 
 
 def test_dockerignore_excludes_local_configs_and_agent_scratch():
