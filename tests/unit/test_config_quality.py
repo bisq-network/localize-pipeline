@@ -484,7 +484,6 @@ def test_network_terminology_rules_from_1606_are_encoded(config_path):
     assert _NETWORK_RULE_IDS.issubset(rules_by_id)
     for rule_id in _NETWORK_RULE_IDS:
         rule = rules_by_id[rule_id]
-        assert "bisq-mobile#1606" in rule["source"]
         assert rule["severity"] == "error"
         assert set(rule["locales"]) <= supported
 
@@ -496,6 +495,8 @@ def test_network_terminology_rules_from_1606_are_encoded(config_path):
     assert "#1669" in seed_rule["source"]
     assert "fr" in seed_rule["locales"]
     transport_rule = rules_by_id["network-transport-not-physical-transport"]
+    assert seed_rule["source"] == "bisq-mobile#1606, #1669 CodeRabbit"
+    assert transport_rule["source"] == "bisq-mobile#1606 CodeRabbit"
     assert set(transport_rule["keys"]) == {
         "mobile.networkInfo.myNode.transport",
         "mobile.networkInfo.overview.transport",
