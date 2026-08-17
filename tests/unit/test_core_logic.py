@@ -277,6 +277,51 @@ class TestCoreLogic(unittest.TestCase):
             self.assertIn("key1", context_text)
             self.assertNotIn("key2", context_text)
 
+    def test_build_context_prioritizes_sibling_keys(self):
+        """
+        Tests that build_context surfaces sibling keys (sharing a dotted prefix
+        with the key being translated) even when the token budget only fits one
+        example, and never feeds the key its own prior translation back.
+        """
+        def mock_count_tokens(text: str, model_name: str) -> int:
+            return len(text)
+
+        with patch('localize.translate_localization_files.count_tokens', side_effect=mock_count_tokens):
+            # The sibling terminology key is deliberately last in insertion order.
+            existing_translations = {
+                "app.unrelated.first": "translationA",
+                "app.unrelated.second": "translationB",
+                "trusted.pairingCode.unsupportedVersion": "old value",
+                "trusted.pairingCode.textField": "Kode pasangan",
+            }
+            source_translations = {
+                "app.unrelated.first": "sourceA",
+                "app.unrelated.second": "sourceB",
+                "trusted.pairingCode.unsupportedVersion": "Old value source",
+                "trusted.pairingCode.textField": "Pairing code",
+            }
+            language_glossary = {}
+            model_name = "test-model"
+            sibling_example = 'trusted.pairingCode.textField = "Kode pasangan"'
+            reserved_len = 1000
+            # Budget for exactly one example beyond the reserved block.
+            max_tokens = reserved_len + mock_count_tokens(sibling_example, model_name) + 1
+
+            context_text, _ = build_context(
+                existing_translations,
+                source_translations,
+                language_glossary,
+                max_tokens,
+                model_name,
+                current_key="trusted.pairingCode.unsupportedVersion",
+            )
+
+            self.assertEqual(context_text.count("="), 1)
+            self.assertIn("trusted.pairingCode.textField", context_text)
+            self.assertNotIn("app.unrelated.first", context_text)
+            # The key being translated is never fed back as its own context.
+            self.assertNotIn("trusted.pairingCode.unsupportedVersion", context_text)
+
     def test_normalize_value_logic(self):
         """Tests the `normalize_value` helper function."""
         self.assertEqual(normalize_value("hello\nworld"), "hello<newline>world")
