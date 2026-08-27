@@ -79,6 +79,7 @@ quality_gate:
             "PYTHONPATH": str(PROJECT_ROOT),
             "TRANSLATOR_CONFIG_FILE": str(config_path),
             "ACTION_QUALITY_REPORT_DIR": str(report_folder),
+            "LOCALIZE_ACTION_WORKSPACE": str(repo),
         }
     )
     result = subprocess.run(
@@ -101,3 +102,59 @@ quality_gate:
     )
     assert report["blocking"] is True
     assert report["source_identical"]["unexpected_source_identical_count"] == 1
+
+
+def test_action_gate_rejects_target_repository_outside_workspace_before_git_reset(tmp_path):
+    workspace = tmp_path / "workspace"
+    config_folder = workspace / "translations"
+    outside_repo = tmp_path / "outside"
+    outside_input = outside_repo / "l10n"
+    config_folder.mkdir(parents=True)
+    outside_input.mkdir(parents=True)
+
+    tracked = outside_input / "app.properties"
+    tracked.write_text("key=Original\n", encoding="utf-8")
+    _run(["git", "init", "-q"], cwd=outside_repo)
+    _run(["git", "config", "user.name", "Action Test"], cwd=outside_repo)
+    _run(["git", "config", "user.email", "action@example.invalid"], cwd=outside_repo)
+    _run(["git", "config", "commit.gpgSign", "false"], cwd=outside_repo)
+    _run(["git", "add", "."], cwd=outside_repo)
+    _run(["git", "commit", "-q", "-m", "Seed outside repository"], cwd=outside_repo)
+    tracked.write_text("key=Staged\n", encoding="utf-8")
+    _run(["git", "add", "."], cwd=outside_repo)
+
+    config_path = config_folder / "config.yaml"
+    config_path.write_text(
+        f"target_project_root: {outside_repo}\ninput_folder: l10n\n",
+        encoding="utf-8",
+    )
+
+    action = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    gate_step = next(
+        step for step in action["runs"]["steps"]
+        if step["name"] == "Run translation quality gate"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{PROJECT_ROOT / 'venv' / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PYTHONPATH": str(PROJECT_ROOT),
+            "TRANSLATOR_CONFIG_FILE": str(config_path),
+            "ACTION_QUALITY_REPORT_DIR": str(tmp_path / "reports"),
+            "LOCALIZE_ACTION_WORKSPACE": str(workspace),
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", gate_step["run"]],
+        cwd=workspace,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "must be inside the GitHub workspace" in result.stderr
+    staged = _run(["git", "diff", "--cached", "--name-only"], cwd=outside_repo)
+    assert staged.stdout.splitlines() == ["l10n/app.properties"]

@@ -258,6 +258,8 @@ runs:
         PYTHONPATH: ${{ github.action_path }}
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
         ACTION_QUALITY_REPORT_DIR: ${{ github.action_path }}/logs
+        LOCALIZE_ACTION_WORKSPACE: ${{ github.workspace }}
+        LOCALIZE_PLUGIN_MODULES: ${{ inputs.plugin-modules }}
       run: |
         set -euo pipefail
         gate_paths_file="$(mktemp)"
@@ -279,11 +281,19 @@ runs:
         config_path = Path(os.environ["TRANSLATOR_CONFIG_FILE"]).resolve()
         raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         config_dir = config_path.parent
+        workspace = Path(os.environ["LOCALIZE_ACTION_WORKSPACE"]).resolve()
 
         repo_root = Path(str(raw_config.get("target_project_root") or ".")).expanduser()
         if not repo_root.is_absolute():
             repo_root = config_dir / repo_root
         repo_root = repo_root.resolve()
+        try:
+            repo_root.relative_to(workspace)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Configured target_project_root '{repo_root}' must be inside "
+                f"the GitHub workspace '{workspace}' for Action publication."
+            ) from exc
 
         input_folder = Path(str(raw_config.get("input_folder") or ".")).expanduser()
         if not input_folder.is_absolute():

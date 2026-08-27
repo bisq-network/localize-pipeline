@@ -87,9 +87,12 @@ def test_action_runs_quality_gate_before_opening_pr(action):
     assert translate_index < gate_index < publish_index
     assert gate["env"]["TRANSLATOR_CONFIG_FILE"] == "${{ github.workspace }}/${{ inputs.config-file }}"
     assert gate["env"]["ACTION_QUALITY_REPORT_DIR"] == "${{ github.action_path }}/logs"
+    assert gate["env"]["LOCALIZE_ACTION_WORKSPACE"] == "${{ github.workspace }}"
+    assert gate["env"]["LOCALIZE_PLUGIN_MODULES"] == "${{ inputs.plugin-modules }}"
     assert "python -m localize.cli quality-gate" in gate["run"]
     assert "translation_quality_report.json" in gate["run"]
     assert "translation_quality_report.md" in gate["run"]
+    assert "repo_root.relative_to(workspace)" in gate["run"]
 
 
 def test_action_resolves_target_root_relative_to_config_file(action):

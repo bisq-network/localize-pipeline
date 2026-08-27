@@ -87,6 +87,13 @@ def check_placeholder_parity(base_string: str, target_string: str) -> bool:
     return extract_placeholder_tokens(base_string) == extract_placeholder_tokens(target_string)
 
 
+def _glossary_term_pattern(term: str) -> re.Pattern[str]:
+    """Compile the boundary-aware, case-insensitive glossary matching rule."""
+    prefix = r"(?<!\w)" if term[0].isalnum() or term[0] == "_" else ""
+    suffix = r"(?!\w)" if term[-1].isalnum() or term[-1] == "_" else ""
+    return re.compile(prefix + re.escape(term) + suffix, re.IGNORECASE)
+
+
 def find_glossary_mismatches(
     source_value: str,
     target_value: str,
@@ -103,10 +110,7 @@ def find_glossary_mismatches(
     for source_term, target_term in glossary.items():
         if not source_term or not target_term:
             continue
-        escaped = re.escape(source_term)
-        prefix = r"(?<!\w)" if source_term[0].isalnum() or source_term[0] == "_" else ""
-        suffix = r"(?!\w)" if source_term[-1].isalnum() or source_term[-1] == "_" else ""
-        pattern = re.compile(prefix + escaped + suffix, re.IGNORECASE)
+        pattern = _glossary_term_pattern(source_term)
         for match in pattern.finditer(source_value):
             candidates.append((match.start(), match.end(), source_term, target_term))
 
@@ -122,11 +126,10 @@ def find_glossary_mismatches(
         pair = (source_term, target_term)
         required_counts[pair] = required_counts.get(pair, 0) + 1
 
-    folded_target = target_value.casefold()
     return [
         pair
         for pair, required_count in sorted(required_counts.items(), key=lambda item: item[0][0].casefold())
-        if folded_target.count(pair[1].casefold()) < required_count
+        if len(_glossary_term_pattern(pair[1]).findall(target_value)) < required_count
     ]
 
 def _find_insertion_index_for_missing_key(

@@ -17,6 +17,30 @@ def test_glossary_compliance_requires_verbatim_target_mapping():
     ]
 
 
+def test_glossary_compliance_requires_target_mapping_at_word_boundaries():
+    glossary = {"entry": "Eintrag"}
+
+    assert find_glossary_mismatches("Delete entry", "Eintragsdetails löschen", glossary) == [
+        ("entry", "Eintrag")
+    ]
+    assert find_glossary_mismatches("Delete entry", "(Eintrag) löschen", glossary) == []
+
+
+def test_glossary_compliance_counts_repeated_target_mappings_at_boundaries():
+    glossary = {"entry": "Eintrag"}
+
+    assert find_glossary_mismatches(
+        "Merge entry into entry",
+        "Eintrag mit Eintragsdetails zusammenführen",
+        glossary,
+    ) == [("entry", "Eintrag")]
+    assert find_glossary_mismatches(
+        "Merge entry into entry",
+        "Eintrag mit Eintrag zusammenführen",
+        glossary,
+    ) == []
+
+
 def test_glossary_compliance_is_case_insensitive_at_word_boundaries():
     glossary = {"merge": "zusammenführen"}
 
