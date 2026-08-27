@@ -709,6 +709,22 @@ def count_tokens(text: str, model_name: Optional[str] = None) -> int:
     provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
     return provider.count_tokens(text, model_name or MODEL_NAME)
 
+def _shared_key_prefix_length(key_a: str, key_b: str) -> int:
+    """Return the number of leading dot-separated segments two keys share.
+
+    Used to rank existing translations by how closely related they are to the
+    key currently being translated, so that sibling keys establishing a
+    concept's terminology are preferred when the context window is
+    size-limited.
+    """
+    shared = 0
+    for segment_a, segment_b in zip(key_a.split("."), key_b.split(".")):
+        if segment_a != segment_b:
+            break
+        shared += 1
+    return shared
+
+
 def build_context(
         existing_translations: Dict[str, str],
         source_translations: Dict[str, str],
@@ -716,6 +732,7 @@ def build_context(
         max_tokens: int,
         model_name: str,
         system_prompt_text: str = "",
+        current_key: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Build the context and glossary text for the translation prompt.
@@ -726,6 +743,9 @@ def build_context(
         language_glossary (Dict[str, str]): The glossary for the language.
         max_tokens (int): Maximum allowed tokens.
         model_name (str): The model name.
+        current_key (Optional[str]): The key being translated. When provided,
+            sibling keys sharing a dotted prefix with it are surfaced first so
+            established terminology survives the context-window truncation.
 
     Returns:
         Tuple[str, str]: The context examples text and glossary text.
@@ -743,8 +763,26 @@ def build_context(
     reserved_tokens = 1000 + count_tokens(system_prompt_text, model_name)
     available_tokens = max_tokens - glossary_tokens - reserved_tokens
 
+    # Order existing translations so keys most closely related to the key being
+    # translated come first. The context window is bounded by available_tokens
+    # and is frequently too small to hold every existing translation, so without
+    # prioritisation the sibling keys that establish a concept's terminology
+    # (for example ...pairingCode.textField / ...pairingCode.invalid relative to
+    # ...pairingCode.unsupportedVersion) get truncated away, and the model then
+    # retranslates the shared term independently and drifts from the established
+    # wording. A stable sort by shared dotted-prefix length keeps siblings near
+    # the top while preserving the original order among unrelated keys.
+    ordered_translations = list(existing_translations.items())
+    if current_key:
+        ordered_translations.sort(
+            key=lambda item: _shared_key_prefix_length(item[0], current_key),
+            reverse=True,
+        )
+
     # Iterate over existing translations
-    for key, translated_value in existing_translations.items():
+    for key, translated_value in ordered_translations:
+        if current_key is not None and key == current_key:
+            continue  # Never feed the key its own prior translation back as context
         source_value = source_translations.get(key)
         if not source_value:
             continue  # Skip if source value is missing
@@ -761,7 +799,10 @@ def build_context(
         example = f"{key} = \"{translated_value}\""
         example_tokens = count_tokens(example, model_name)
         if total_tokens + example_tokens > available_tokens:
-            break
+            # A long sibling can exceed the remaining budget while a later,
+            # shorter sibling still fits. Keep searching instead of hiding all
+            # remaining terminology context behind the first oversized entry.
+            continue
         context_examples.append(example)
         total_tokens += example_tokens
 
@@ -1283,6 +1324,7 @@ async def translate_text_async(
             MAX_MODEL_TOKENS,
             MODEL_NAME,
             system_prompt_text=system_prompt,
+            current_key=key,
         )
 
         # Extract and protect placeholders

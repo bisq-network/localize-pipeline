@@ -3,7 +3,8 @@ FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930
 ARG GH_VERSION=2.96.0
 ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
 ARG GRPC_VERSION=1.82.1
-ARG X_TEXT_VERSION=0.40.0
+ARG X_MOD_VERSION=0.40.0
+ARG X_TEXT_VERSION=0.41.0
 ENV CGO_ENABLED=0
 
 WORKDIR /src/gh
@@ -11,11 +12,14 @@ RUN git clone --depth 1 --branch "v${GH_VERSION}" \
         https://github.com/cli/cli.git . && \
     test "$(git rev-parse HEAD)" = "$GH_COMMIT" && \
     go get "google.golang.org/grpc@v${GRPC_VERSION}" && \
+    go get "golang.org/x/mod@v${X_MOD_VERSION}" && \
     go get "golang.org/x/text@v${X_TEXT_VERSION}" && \
     GH_VERSION="${GH_VERSION}" go run script/build.go bin/gh && \
     install -D bin/gh /out/gh
 RUN go version -m /out/gh > /tmp/gh-buildinfo && \
     grep -E "google[.]golang[.]org/grpc[[:space:]]+v${GRPC_VERSION}([[:space:]]|$)" \
+        /tmp/gh-buildinfo && \
+    grep -E "golang[.]org/x/mod[[:space:]]+v${X_MOD_VERSION}([[:space:]]|$)" \
         /tmp/gh-buildinfo && \
     grep -E "golang[.]org/x/text[[:space:]]+v${X_TEXT_VERSION}([[:space:]]|$)" \
         /tmp/gh-buildinfo
