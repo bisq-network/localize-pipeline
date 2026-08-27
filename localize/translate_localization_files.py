@@ -799,7 +799,10 @@ def build_context(
         example = f"{key} = \"{translated_value}\""
         example_tokens = count_tokens(example, model_name)
         if total_tokens + example_tokens > available_tokens:
-            break
+            # A long sibling can exceed the remaining budget while a later,
+            # shorter sibling still fits. Keep searching instead of hiding all
+            # remaining terminology context behind the first oversized entry.
+            continue
         context_examples.append(example)
         total_tokens += example_tokens
 

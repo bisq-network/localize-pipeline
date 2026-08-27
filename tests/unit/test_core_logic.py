@@ -322,6 +322,34 @@ class TestCoreLogic(unittest.TestCase):
             # The key being translated is never fed back as its own context.
             self.assertNotIn("trusted.pairingCode.unsupportedVersion", context_text)
 
+    def test_build_context_skips_oversized_sibling_and_keeps_searching(self):
+        """An oversized high-priority sibling must not hide later siblings."""
+        def mock_count_tokens(text: str, model_name: str) -> int:
+            return len(text)
+
+        with patch('localize.translate_localization_files.count_tokens', side_effect=mock_count_tokens):
+            existing_translations = {
+                "trusted.pairingCode.longExplanation": "x" * 200,
+                "trusted.pairingCode.textField": "Kode pasangan",
+            }
+            source_translations = {
+                "trusted.pairingCode.longExplanation": "Long explanation",
+                "trusted.pairingCode.textField": "Pairing code",
+            }
+            short_example = 'trusted.pairingCode.textField = "Kode pasangan"'
+            max_tokens = 1000 + mock_count_tokens(short_example, "test-model") + 1
+
+            context_text, _ = build_context(
+                existing_translations,
+                source_translations,
+                {},
+                max_tokens,
+                "test-model",
+                current_key="trusted.pairingCode.unsupportedVersion",
+            )
+
+            self.assertEqual(context_text, short_example)
+
     def test_normalize_value_logic(self):
         """Tests the `normalize_value` helper function."""
         self.assertEqual(normalize_value("hello\nworld"), "hello<newline>world")
