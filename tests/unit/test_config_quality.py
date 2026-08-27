@@ -50,6 +50,7 @@ def test_unused_gitpython_dependency_is_absent():
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependency_texts = [
         requirements_in,
+        (PROJECT_ROOT / "requirements-dev.in").read_text(encoding="utf-8"),
         "\n".join(pyproject["project"]["dependencies"]),
         (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8"),
         (PROJECT_ROOT / "requirements-dev.txt").read_text(encoding="utf-8"),
