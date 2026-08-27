@@ -1,0 +1,33 @@
+# External-layout contract fixture.
+#
+# Exercises the layout where the pipeline config does NOT live at the target
+# repository root: it sits in a subdirectory (`translations/`) and points back up
+# via `target_project_root: ".."`. Every relative path must then resolve against
+# the right base — `input_folder` against the target project root, and
+# `glossary_file_path` against the directory holding this file.
+#
+# Regression guarded: a config in a subdirectory that leaves
+# `target_project_root: "."` silently resolves `input_folder` and
+# `glossary_file_path` under `translations/`, producing paths that do not exist.
+target_project_root: ".."
+input_folder: "app/src/main/resources/l10n"
+
+localization_format: "java_properties"
+localization_layout:
+  id: "suffix"
+  base_name: "Messages"
+  source_locale: "en"
+
+translation_source: "git"
+glossary_file_path: "glossary.json"
+
+project_context: "Translate concise UI text for a software product."
+
+model_provider: "aisuite"
+model_name: "gpt-4o-mini"
+review_model_name: "gpt-4o"
+
+dry_run: false
+supported_locales:
+  - code: "de"
+    name: "German"

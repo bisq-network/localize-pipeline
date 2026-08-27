@@ -251,6 +251,117 @@ runs:
         fi
         python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"
 
+    - name: Run translation quality gate
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        PYTHONPATH: ${{ github.action_path }}
+        TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
+        ACTION_QUALITY_REPORT_DIR: ${{ github.action_path }}/logs
+      run: |
+        set -euo pipefail
+        gate_paths_file="$(mktemp)"
+        changed_files_file="$(mktemp)"
+        cleanup_quality_gate() {
+          rm -f "$gate_paths_file" "$changed_files_file"
+        }
+        trap cleanup_quality_gate EXIT
+        export LOCALIZE_GATE_PATHS_FILE="$gate_paths_file"
+        export LOCALIZE_GATE_CHANGED_FILES="$changed_files_file"
+
+        python - <<'PY'
+        import os
+        import subprocess
+        from pathlib import Path
+
+        import yaml
+
+        config_path = Path(os.environ["TRANSLATOR_CONFIG_FILE"]).resolve()
+        raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        config_dir = config_path.parent
+
+        repo_root = Path(str(raw_config.get("target_project_root") or ".")).expanduser()
+        if not repo_root.is_absolute():
+            repo_root = config_dir / repo_root
+        repo_root = repo_root.resolve()
+
+        input_folder = Path(str(raw_config.get("input_folder") or ".")).expanduser()
+        if not input_folder.is_absolute():
+            input_folder = repo_root / input_folder
+        input_folder = input_folder.resolve()
+        try:
+            input_relative = input_folder.relative_to(repo_root)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Configured input_folder '{input_folder}' must be inside "
+                f"target_project_root '{repo_root}' for Action publication."
+            ) from exc
+
+        relative_text = input_relative.as_posix() or "."
+        subprocess.run(["git", "reset", "-q"], cwd=repo_root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "add",
+                "-A",
+                "--",
+                relative_text,
+                f":(exclude,glob){relative_text}/archive/**",
+                f":(exclude,glob){relative_text}/**/archive/**",
+            ],
+            cwd=repo_root,
+            check=True,
+        )
+        changed = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--cached",
+                "--name-only",
+                "--diff-filter=ACMRT",
+                "--",
+                relative_text,
+            ],
+            cwd=repo_root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.splitlines()
+
+        Path(os.environ["LOCALIZE_GATE_PATHS_FILE"]).write_text(
+            f"{repo_root}\n{input_folder}\n",
+            encoding="utf-8",
+        )
+        Path(os.environ["LOCALIZE_GATE_CHANGED_FILES"]).write_text(
+            "".join(f"{path}\n" for path in changed),
+            encoding="utf-8",
+        )
+        PY
+
+        IFS= read -r repo_root < "$gate_paths_file"
+        input_folder="$(sed -n '2p' "$gate_paths_file")"
+        changed_files=()
+        while IFS= read -r changed_file; do
+          if [ -n "$changed_file" ]; then
+            changed_files+=("$changed_file")
+          fi
+        done < "$changed_files_file"
+
+        if [ "${#changed_files[@]}" -eq 0 ]; then
+          echo "No changed localization files; quality gate has nothing to check."
+          exit 0
+        fi
+
+        mkdir -p "$ACTION_QUALITY_REPORT_DIR"
+        python -m localize.cli quality-gate \
+          --repo-root "$repo_root" \
+          --input-folder "$input_folder" \
+          --config "$TRANSLATOR_CONFIG_FILE" \
+          --validation-summary "$ACTION_QUALITY_REPORT_DIR/translation_validation_summary.json" \
+          --output-json "$ACTION_QUALITY_REPORT_DIR/translation_quality_report.json" \
+          --output-markdown "$ACTION_QUALITY_REPORT_DIR/translation_quality_report.md" \
+          --changed-files "${changed_files[@]}"
+
     - name: Open pull request
       if: ${{ inputs.open-pr == 'true' }}
       shell: bash
@@ -332,7 +443,7 @@ runs:
 
         target_root = Path(str(config.get("target_project_root") or "."))
         if not target_root.is_absolute():
-            target_root = workspace / target_root
+            target_root = config_file.parent / target_root
         target_root = target_root.resolve()
 
         input_folder = Path(str(config.get("input_folder") or "."))
@@ -512,6 +623,8 @@ runs:
         path: |
           ${{ github.action_path }}/logs/translation_summary.json
           ${{ github.action_path }}/logs/translation_validation_summary.json
+          ${{ github.action_path }}/logs/translation_quality_report.json
+          ${{ github.action_path }}/logs/translation_quality_report.md
           ${{ github.action_path }}/logs/token_usage_summary.json
           ${{ github.action_path }}/logs/skipped_files_report.log
         if-no-files-found: ignore

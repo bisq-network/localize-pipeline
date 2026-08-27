@@ -248,6 +248,37 @@ class TestTranslationValidator(unittest.TestCase):
             os.remove(source_path)
             os.remove(target_path)
 
+    def test_key_synchronization_preserves_source_raw_java_escapes(self):
+        source_content = (
+            r"Quick\nreference=value" "\n"
+            r"dash\u2014key=value" "\n"
+        )
+        target_content = "existing=translated\n"
+
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as f_source:
+            f_source.write(source_content)
+            source_path = f_source.name
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as f_target:
+            f_target.write(target_content)
+            target_path = f_target.name
+
+        try:
+            synchronize_keys(target_path, source_path)
+            with open(target_path, 'r', encoding='utf-8') as target_file:
+                synchronized = target_file.read()
+
+            self.assertIn(r"Quick\nreference=value", synchronized)
+            self.assertIn(r"dash\u2014key=value", synchronized)
+            self.assertNotIn(r"Quick\\nreference", synchronized)
+            self.assertNotIn(r"dash\\u2014key", synchronized)
+
+            _, translations = parse_properties_file(target_path)
+            self.assertIn("Quick\nreference", translations)
+            self.assertIn("dash—key", translations)
+        finally:
+            os.remove(source_path)
+            os.remove(target_path)
+
 
 if __name__ == '__main__':
     unittest.main()

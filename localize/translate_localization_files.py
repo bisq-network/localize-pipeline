@@ -51,6 +51,7 @@ from localize.placeholder_rules import (
     extract_placeholder_tokens,
     protect_placeholders,
     restore_placeholders as restore_protected_placeholders,
+    set_placeholder_profile,
 )
 from localize.pipeline_core import (
     RUN_METRIC_KEYS,
@@ -68,14 +69,15 @@ from localize.translation_memory import (
 from localize.translation_validator import (
     check_placeholder_parity,
     check_encoding_and_mojibake,
+    find_glossary_mismatches,
     find_disallowed_control_characters,
 )
-
 # --- Constants and Globals ---
 # Load application configuration
 # TODO: Move configuration loading behind the runtime entry point so importing
 # this module no longer reads files or environment variables as a side effect.
 config = load_app_config()
+set_placeholder_profile(config.placeholder_profile)
 
 # Create a dedicated logger for this script to avoid conflicts with the root logger.
 logger = logging.getLogger("translation_script")
@@ -166,7 +168,21 @@ def load_glossary(glossary_file_path: str) -> Dict[str, Dict[str, str]]:
         return {}
     try:
         with open(glossary_file_path, 'r', encoding='utf-8') as f:
-            glossary = json.load(f)
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            logger.error("Glossary file '%s' must contain a JSON object.", glossary_file_path)
+            return {}
+        glossary: Dict[str, Dict[str, str]] = {}
+        for locale, mappings in payload.items():
+            if str(locale).startswith('_'):
+                continue
+            if not isinstance(mappings, dict) or not all(
+                isinstance(source, str) and isinstance(target, str)
+                for source, target in mappings.items()
+            ):
+                logger.warning("Ignoring invalid glossary locale namespace '%s'.", locale)
+                continue
+            glossary[str(locale)] = dict(mappings)
         return glossary
     except json.JSONDecodeError as json_exc:
         logger.error(f"Error decoding JSON glossary file: {json_exc}")
@@ -467,7 +483,8 @@ def extract_texts_to_translate(
     2. The key was newly synchronized in this run and currently equals the source.
        This includes keys added by file key synchronization and keys changed in
        the current git working tree (e.g., inserted by ``tx pull -t -f``).
-    3. (Optional legacy mode) Existing keys with source-identical values are also
+    3. The source is non-empty but the existing target value is empty.
+    4. (Optional legacy mode) Existing keys with source-identical values are also
        translated when ``retranslate_identical_existing`` is enabled.
 
     Args:
@@ -512,6 +529,7 @@ def extract_texts_to_translate(
             current_source_hash = compute_ledger_hash(source_value)
             current_target_hash = compute_ledger_hash(target_value)
             should_translate_newly_added = key in newly_added_keys
+            should_translate_empty_target = bool(source_value.strip()) and not target_value.strip()
             should_translate_legacy_mode = is_source_identical and retranslate_identical_existing
             should_translate_changed_source = (
                 previous_source_hash is not None and previous_source_hash != current_source_hash
@@ -525,6 +543,8 @@ def extract_texts_to_translate(
             should_translate_existing = (
                 # New keys synchronized in this run should always be translated.
                 should_translate_newly_added
+                # Explicitly empty locale values are part of the translation backlog.
+                or should_translate_empty_target
                 # Legacy behavior: also retranslate any source-identical existing key.
                 or should_translate_legacy_mode
                 # Source text changed since the last run for this key.
@@ -1036,6 +1056,7 @@ def run_post_translation_validation(
         localization_format: Optional[LocalizationFormat] = None,
         ignore_key_patterns: Optional[List[Pattern[str]]] = None,
         changed_keys_for_run: Optional[Set[str]] = None,
+        translation_glossary: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """
     Runs a series of validation checks on the final translated file content.
@@ -1055,6 +1076,7 @@ def run_post_translation_validation(
     effective_format = localization_format or LOCALIZATION_FORMAT
     adapter = get_localization_adapter(effective_format)
     ignore_key_patterns = ignore_key_patterns or []
+    translation_glossary = translation_glossary or {}
     try:
         # Create a temporary file with delete=False to control its lifecycle.
         with tempfile.NamedTemporaryFile(
@@ -1100,6 +1122,33 @@ def run_post_translation_validation(
                         logger.error(message)
                     else:
                         logger.warning("Pre-existing post-validation issue ignored for unchanged key: %s", message)
+                    continue
+
+                if normalize_value(source_value) == normalize_value(target_value):
+                    # A failed generated value may have been deliberately
+                    # reverted to its source fallback by per-key validation.
+                    # It is already reported as failed; it is not a generated
+                    # translation that claims glossary compliance.
+                    continue
+                glossary_mismatches = find_glossary_mismatches(
+                    source_value,
+                    target_value,
+                    translation_glossary,
+                )
+                if glossary_mismatches:
+                    required = ", ".join(
+                        f"{source_term!r}→{target_term!r}"
+                        for source_term, target_term in glossary_mismatches
+                    )
+                    message = (
+                        f"Post-translation validation failed for '{filename}': "
+                        f"Glossary mismatch for key '{key}'; required {required}."
+                    )
+                    if changed_keys_for_run is None or key in changed_keys_for_run:
+                        is_valid = False
+                        logger.error(message)
+                    else:
+                        logger.warning("Pre-existing post-validation issue ignored for unchanged key: %s", message)
         except Exception:
             is_valid = False
             logger.exception(
@@ -1134,6 +1183,7 @@ def run_per_key_validation_with_summary(
         source_translations: Dict[str, str],
         filename: str,
         ignore_key_patterns: Optional[List[Pattern[str]]] = None,
+        translation_glossary: Optional[Mapping[str, str]] = None,
 ) -> Tuple[Dict[str, str], Dict[str, object]]:
     """
     Validates each translation key individually and selectively reverts failed keys.
@@ -1158,7 +1208,9 @@ def run_per_key_validation_with_summary(
     control_character_keys = []
     placeholder_mismatch_keys = []
     empty_target_keys = []
+    glossary_mismatch_keys = []
     ignore_key_patterns = ignore_key_patterns or []
+    translation_glossary = translation_glossary or {}
 
     for key, target_value in final_translations.items():
         source_value = source_translations.get(key, "")
@@ -1186,6 +1238,27 @@ def run_per_key_validation_with_summary(
                 f"{' ...' if len(control_character_findings) > 3 else ''}.\n"
                 f"  Source: {source_value}\n"
                 f"  Translation: {target_value}"
+            )
+            valid_translations[key] = source_value
+            continue
+
+        glossary_mismatches = find_glossary_mismatches(
+            source_value,
+            target_value,
+            translation_glossary,
+        )
+        if glossary_mismatches:
+            failed_keys.append(key)
+            glossary_mismatch_keys.append(key)
+            required = ", ".join(
+                f"{source_term!r}→{target_term!r}"
+                for source_term, target_term in glossary_mismatches
+            )
+            logger.warning(
+                "Key '%s' failed glossary validation in '%s' - reverting to source; required %s.",
+                key,
+                filename,
+                required,
             )
             valid_translations[key] = source_value
             continue
@@ -1231,10 +1304,12 @@ def run_per_key_validation_with_summary(
         "control_character_keys": control_character_keys,
         "placeholder_mismatch_keys": placeholder_mismatch_keys,
         "empty_target_keys": empty_target_keys,
+        "glossary_mismatch_keys": glossary_mismatch_keys,
         "reverted_keys_count": len(failed_keys),
         "control_character_findings_count": len(control_character_keys),
         "placeholder_failures_count": len(placeholder_mismatch_keys),
         "empty_target_failures_count": len(empty_target_keys),
+        "glossary_failures_count": len(glossary_mismatch_keys),
     }
     return valid_translations, summary
 
@@ -1244,6 +1319,7 @@ def run_per_key_validation(
         source_translations: Dict[str, str],
         filename: str,
         ignore_key_patterns: Optional[List[Pattern[str]]] = None,
+        translation_glossary: Optional[Mapping[str, str]] = None,
 ) -> Tuple[Dict[str, str], List[str]]:
     """
     Backward-compatible wrapper returning only the failed key list.
@@ -1253,6 +1329,7 @@ def run_per_key_validation(
         source_translations,
         filename,
         ignore_key_patterns=ignore_key_patterns,
+        translation_glossary=translation_glossary,
     )
     return valid_translations, list(summary["failed_keys"])
 
@@ -1363,7 +1440,7 @@ Provide the translation **of the Value only**, following the instructions above.
                                 brand_glossary_text=brand_glossary_text,
                                 glossary_text=glossary_text,
                                 context_examples_text=context_examples_text,
-                                key=key,
+                                key=_display_translation_key(key),
                                 processed_text=processed_text
                             ))
                         ],
@@ -1410,9 +1487,19 @@ def _build_holistic_review_system_prompt(
         translated_content: str,
         style_rules_text: str,  # Pass pre-computed rules
         localization_format: LocalizationFormat = LOCALIZATION_FORMAT,
+        translation_glossary: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Builds the system prompt for the holistic review API call."""
-    keys_to_review_text = "\n".join([f"- {k}" for k in keys_to_review])
+    keys_to_review_text = "\n".join([f"- {_display_translation_key(k)}" for k in keys_to_review])
+    glossary_rules = "\n".join(
+        f'- When the English source contains "{source_term}", the translation must contain "{target_term}".'
+        for source_term, target_term in (translation_glossary or {}).items()
+    )
+    glossary_section = (
+        "**Mandatory Translation Glossary**:\n" + glossary_rules + "\n\n"
+        if glossary_rules
+        else ""
+    )
 
     return f"""
 You are a lead editor and quality assurance specialist for software localization. Your task is to review a list of newly translated keys within a {localization_format.display_name} file for {target_language}. You are given the full source and translated files for context, but you MUST only review and return the keys specified.
@@ -1433,7 +1520,7 @@ You are a lead editor and quality assurance specialist for software localization
 6.  **Output JSON Only**: Your final output **must** be a single, valid JSON object that adheres to the required schema. This object should contain ONLY the keys listed in the "Strictly Limited Scope" section above, with their final, corrected translations as the values.
 7.  **Do Not Add Explanations**: Do not output any text, markdown, or explanations before or after the JSON object.
 
-{style_rules_text}
+{glossary_section}{style_rules_text}
 
 **JSON Output Example**:
 ```json
@@ -1443,6 +1530,28 @@ You are a lead editor and quality assurance specialist for software localization
 }}
 ```
 """
+
+
+def _display_translation_key(key: str) -> str:
+    """Render control characters visibly without changing ordinary prompt keys."""
+    if any(character in key for character in ("\t", "\n", "\r", "\f")):
+        return json.dumps(key, ensure_ascii=False)[1:-1]
+    return key
+
+
+def _prefer_glossary_compliant_draft(
+    source_value: str,
+    draft_value: str,
+    reviewed_value: str,
+    translation_glossary: Mapping[str, str],
+) -> str:
+    """Keep a compliant draft when holistic review breaks a required mapping."""
+    if (
+        find_glossary_mismatches(source_value, reviewed_value, translation_glossary)
+        and not find_glossary_mismatches(source_value, draft_value, translation_glossary)
+    ):
+        return draft_value
+    return reviewed_value
 
 
 def _build_holistic_review_user_prompt(
@@ -1483,6 +1592,7 @@ async def holistic_review_async(
         rate_limiter: AsyncLimiter,
         style_rules_text: str,
         localization_format: Optional[LocalizationFormat] = None,
+        translation_glossary: Optional[Mapping[str, str]] = None,
 ) -> Optional[Dict[str, str]]:
     """
     Performs a holistic review of an entire translated file and returns corrections
@@ -1523,6 +1633,7 @@ async def holistic_review_async(
             translated_content=protected_translated,
             style_rules_text=style_rules_text,
             localization_format=localization_format or LOCALIZATION_FORMAT,
+            translation_glossary=translation_glossary,
         )
         review_user_prompt = _build_holistic_review_user_prompt(
             target_language=target_language,
@@ -2214,6 +2325,12 @@ async def process_translation_queue(
                 logger.warning(f"Skipping file {translation_file}: unsupported language code '{language_code}'.")
                 continue
             style_rules_text_for_review = PRECOMPUTED_STYLE_RULES_TEXT.get(language_code, "")
+            raw_language_glossary = glossary.get(language_code, {})
+            language_glossary = (
+                raw_language_glossary
+                if isinstance(raw_language_glossary, Mapping)
+                else {}
+            )
             memory_context_fingerprint = translation_memory_context_fingerprint(
                 locale=language_code,
                 glossary=glossary,
@@ -2334,6 +2451,7 @@ async def process_translation_queue(
                             localization_format,
                             ignore_key_patterns=IGNORE_KEY_PATTERNS,
                             changed_keys_for_run=set(ignored_keys_requiring_output),
+                            translation_glossary=language_glossary,
                     ):
                         logger.error(
                             "Skipping write for '%s' because post-translation validation failed.",
@@ -2500,6 +2618,7 @@ async def process_translation_queue(
                     rate_limiter=rate_limiter,
                     style_rules_text=style_rules_text_for_review,
                     localization_format=localization_format,
+                    translation_glossary=language_glossary,
                 ) for key_chunk in key_chunks],
                 return_exceptions=True,
             )
@@ -2526,11 +2645,23 @@ async def process_translation_queue(
                         continue
                     if corrected_chunk:
                         key_chunk_set = set(key_chunk)
-                        scoped = {
-                            key: value
-                            for key, value in corrected_chunk.items()
-                            if key in key_chunk_set
-                        }
+                        scoped = {}
+                        for key, value in corrected_chunk.items():
+                            if key not in key_chunk_set:
+                                continue
+                            selected_value = _prefer_glossary_compliant_draft(
+                                source_translations.get(key, ""),
+                                draft_translations.get(key, ""),
+                                value,
+                                language_glossary,
+                            )
+                            if selected_value != value:
+                                logger.warning(
+                                    "Holistic review broke a required glossary mapping for key '%s'; "
+                                    "keeping the compliant draft.",
+                                    key,
+                                )
+                            scoped[key] = selected_value
                         dropped = set(corrected_chunk) - key_chunk_set
                         if dropped:
                             logger.warning(
@@ -2614,6 +2745,7 @@ async def process_translation_queue(
                 source_translations,
                 translation_file,
                 ignore_key_patterns=IGNORE_KEY_PATTERNS,
+                translation_glossary=language_glossary,
             )
             failed_keys = set(per_key_summary["failed_keys"]).union(model_failed_keys)
             increment_run_metric(run_metrics, "model_translation_failed_count", len(failed_keys))
@@ -2653,6 +2785,7 @@ async def process_translation_queue(
                     localization_format,
                     ignore_key_patterns=IGNORE_KEY_PATTERNS,
                     changed_keys_for_run=set(keys_to_translate),
+                    translation_glossary=language_glossary,
             ):
                 logger.error("Skipping write for '%s' because post-translation validation failed.", translation_file)
                 skipped_files[translation_file] = ["Post-translation validation failed."]

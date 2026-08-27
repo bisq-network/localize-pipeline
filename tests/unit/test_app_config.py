@@ -356,6 +356,55 @@ class TestLoadAppConfig:
         assert config.localization_layout.source_locale == "en"
         assert config.localization_profiles[0].localization_format.id == "custom_json"
 
+    def test_load_config_records_profile_without_mutating_placeholder_state(self):
+        import localize.placeholder_rules as placeholder_rules
+
+        mock_config = {
+            "dry_run": True,
+            "placeholder_profile": "java-indexed",
+        }
+
+        with placeholder_rules.placeholder_profile("standard"):
+            with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+                with patch("os.path.exists", return_value=False):
+                    with patch("localize.app_config.setup_logger") as mock_logger:
+                        mock_logger.return_value = MagicMock()
+                        with patch.dict(os.environ, {}, clear=True):
+                            config = load_app_config()
+
+            assert config.placeholder_profile == "java-indexed"
+            from collections import Counter
+
+            from localize.placeholder_rules import extract_placeholder_tokens
+
+            assert extract_placeholder_tokens("%0 of %1") == Counter()
+
+    def test_load_config_defaults_to_standard_placeholder_profile(self):
+        mock_config = {"dry_run": True}
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("localize.app_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        config = load_app_config()
+
+        assert config.placeholder_profile == "standard"
+
+    def test_load_config_rejects_unknown_placeholder_profile(self):
+        mock_config = {
+            "dry_run": True,
+            "placeholder_profile": "no-such-profile",
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("localize.app_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        with pytest.raises(SystemExit):
+                            load_app_config()
+
     def test_load_config_compiles_ignore_key_patterns(self):
         mock_config = {
             "dry_run": True,
@@ -752,6 +801,20 @@ class TestValidateConfig:
     def test_valid_config_has_no_errors(self):
         issues = validate_config(self.GOOD, path_exists=lambda p: True)
         assert self._errors(issues) == []
+
+    def test_unknown_placeholder_profile_is_validation_error(self):
+        config = {**self.GOOD, "placeholder_profile": "no-such-profile"}
+
+        errors = self._errors(validate_config(config, path_exists=lambda p: True))
+
+        assert any("Unknown placeholder profile" in error for error in errors)
+
+    def test_unknown_translation_source_is_validation_error(self):
+        config = {**self.GOOD, "translation_source": "crowdin"}
+
+        errors = self._errors(validate_config(config, path_exists=lambda p: True))
+
+        assert any("translation_source" in error for error in errors)
 
     def test_missing_required_paths_are_errors(self):
         issues = validate_config({"supported_locales": self.GOOD["supported_locales"]},

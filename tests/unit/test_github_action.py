@@ -77,6 +77,31 @@ def test_action_runs_preflight_check_before_translation(action):
     assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
 
 
+def test_action_runs_quality_gate_before_opening_pr(action):
+    steps = action["runs"]["steps"]
+    translate_index = next(i for i, step in enumerate(steps) if step["name"] == "Translate changed strings")
+    gate_index = next(i for i, step in enumerate(steps) if step["name"] == "Run translation quality gate")
+    publish_index = next(i for i, step in enumerate(steps) if step["name"] == "Open pull request")
+    gate = steps[gate_index]
+
+    assert translate_index < gate_index < publish_index
+    assert gate["env"]["TRANSLATOR_CONFIG_FILE"] == "${{ github.workspace }}/${{ inputs.config-file }}"
+    assert gate["env"]["ACTION_QUALITY_REPORT_DIR"] == "${{ github.action_path }}/logs"
+    assert "python -m localize.cli quality-gate" in gate["run"]
+    assert "translation_quality_report.json" in gate["run"]
+    assert "translation_quality_report.md" in gate["run"]
+
+
+def test_action_resolves_target_root_relative_to_config_file(action):
+    publish = next(
+        step for step in action["runs"]["steps"]
+        if step["name"] == "Open pull request"
+    )
+
+    assert "target_root = config_file.parent / target_root" in publish["run"]
+    assert "target_root = workspace / target_root" not in publish["run"]
+
+
 def test_action_rejects_unsafe_pr_contexts_before_setup(action):
     steps = action["runs"]["steps"]
     guard = next(step for step in steps if step["name"] == "Validate workflow context")
@@ -222,6 +247,8 @@ def test_generated_pr_uses_summary_body_and_uploads_artifacts(action):
     paths = upload["with"]["path"]
     assert "translation_summary.json" in paths
     assert "translation_validation_summary.json" in paths
+    assert "translation_quality_report.json" in paths
+    assert "translation_quality_report.md" in paths
     assert "token_usage_summary.json" in paths
     assert "skipped_files_report.log" in paths
     assert upload["with"]["if-no-files-found"] == "ignore"

@@ -3,16 +3,16 @@ r"""Parse and reassemble Java ``.properties`` files.
 Parsing follows the Java properties separator rules used by this project:
 ``=``, ``:``, and unescaped whitespace can separate keys from values. Escaped
 key separators are unescaped for dictionary access and re-escaped on output
-when a line is rewritten. Unicode escape sequences such as ``\uXXXX`` are left
-as-is; duplicate keys keep the last parsed value in the returned translation
-mapping.
+when a line is rewritten. Valid Java character and Unicode escapes are decoded
+for canonical key comparison while the original raw spelling is retained for
+byte-stable reassembly; duplicate keys keep the last parsed value in the
+returned translation mapping.
 
 Line continuations are collapsed for translation values. Unchanged multiline
 entries keep their original physical-line formatting when reassembled; changed
 entries are serialized as a single logical value.
 """
 
-import re
 from typing import Dict, List, Tuple
 
 
@@ -55,15 +55,92 @@ def _strip_unescaped_boundary_whitespace(raw_key: str) -> str:
     return raw_key[start:end]
 
 
+_JAVA_CHARACTER_ESCAPES = {
+    't': '\t',
+    'n': '\n',
+    'r': '\r',
+    'f': '\f',
+}
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _combine_surrogate_pairs(value: str) -> str:
+    """Normalize adjacent UTF-16 surrogate escapes to a Python scalar value."""
+    normalized: list[str] = []
+    index = 0
+    while index < len(value):
+        codepoint = ord(value[index])
+        if 0xD800 <= codepoint <= 0xDBFF and index + 1 < len(value):
+            low = ord(value[index + 1])
+            if 0xDC00 <= low <= 0xDFFF:
+                normalized.append(chr(0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)))
+                index += 2
+                continue
+        normalized.append(value[index])
+        index += 1
+    return ''.join(normalized)
+
+
 def _unescape_key(raw_key: str) -> str:
+    """Return the Java logical key while tolerating malformed Unicode escapes.
+
+    Valid escapes mirror ``java.util.Properties.loadConvert``. Unlike Java,
+    malformed ``\\uXXXX`` input is preserved literally so one bad upstream key
+    cannot abort an otherwise recoverable localization run.
+    """
     stripped_key = _strip_unescaped_boundary_whitespace(raw_key)
-    return re.sub(r'\\([:=\s\\])', r'\1', stripped_key)
+    unescaped: list[str] = []
+    index = 0
+    while index < len(stripped_key):
+        char = stripped_key[index]
+        if char != '\\':
+            unescaped.append(char)
+            index += 1
+            continue
+
+        if index + 1 >= len(stripped_key):
+            # loadConvert discards a trailing lone backslash.
+            index += 1
+            continue
+
+        next_char = stripped_key[index + 1]
+        if next_char in _JAVA_CHARACTER_ESCAPES:
+            unescaped.append(_JAVA_CHARACTER_ESCAPES[next_char])
+            index += 2
+            continue
+
+        if next_char == 'u':
+            digits = stripped_key[index + 2:index + 6]
+            if len(digits) == 4 and all(digit in _HEX_DIGITS for digit in digits):
+                unescaped.append(chr(int(digits, 16)))
+                index += 6
+                continue
+            # Fault-tolerant divergence: Java raises for malformed Unicode
+            # escapes; retain the literal spelling and let validation/reporting
+            # continue instead of taking down the whole run.
+            unescaped.extend(('\\', 'u'))
+            index += 2
+            continue
+
+        # loadConvert drops the backslash for every other escaped character.
+        unescaped.append(next_char)
+        index += 2
+
+    return _combine_surrogate_pairs(''.join(unescaped))
 
 
 def _escape_key(key: str) -> str:
     escaped = []
     for char in key:
-        if char in ('\\', ':', '=') or char.isspace():
+        if char == '\t':
+            escaped.append('\\t')
+        elif char == '\n':
+            escaped.append('\\n')
+        elif char == '\r':
+            escaped.append('\\r')
+        elif char == '\f':
+            escaped.append('\\f')
+        elif char in ('\\', ':', '=') or char.isspace():
             escaped.append('\\' + char)
         else:
             escaped.append(char)
@@ -183,7 +260,10 @@ def parse_properties_file(file_path: str) -> Tuple[List[Dict], Dict[str, str]]:
                 })
             else:
                 # Handle lines without a separator (e.g., a key with no value)
-                key_raw = line.strip()
+                # Preserve escaped boundary whitespace. _unescape_key removes
+                # only unescaped syntactic padding, so `key\ ` remains the
+                # logical key "key " just as java.util.Properties requires.
+                key_raw = line
                 key = _unescape_key(key_raw)
                 if key:  # only if it is not a blank line
                     target_translations[key] = ''

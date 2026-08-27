@@ -43,6 +43,7 @@ class LocalizationLayout:
 
     id: str
     source_locale: str = "en"
+    base_name: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.id not in {"suffix", "locale_directory", "locale_filename"}:
@@ -52,6 +53,17 @@ class LocalizationLayout:
             )
         if not self.source_locale:
             raise ValueError("localization_layout.source_locale must not be empty.")
+        if self.base_name is not None and self.id != "suffix":
+            raise ValueError("localization_layout.base_name is only supported by the suffix layout.")
+
+    def _named_suffix_filename(
+        self,
+        locale: str,
+        localization_format: LocalizationFormat,
+    ) -> Optional[str]:
+        if not self.base_name:
+            return None
+        return f"{self.base_name}_{locale}{localization_format.file_extension}"
 
     def extract_locale(
         self,
@@ -63,6 +75,16 @@ class LocalizationLayout:
         path = _as_posix(relative_path)
         supported = sorted((str(code) for code in supported_codes), key=len, reverse=True)
         if self.id == "suffix":
+            if self.base_name:
+                filename = PurePath(path).name
+                return next(
+                    (
+                        code
+                        for code in supported
+                        if filename == self._named_suffix_filename(code, localization_format)
+                    ),
+                    None,
+                )
             return localization_format.extract_supported_locale_suffix(PurePath(path).name, list(supported))
         if self.id == "locale_directory":
             match = _locale_directory_segment(path, supported)
@@ -95,6 +117,11 @@ class LocalizationLayout:
         if not localization_format.is_supported_file(path):
             return False
         if self.id == "suffix":
+            if self.base_name:
+                return PurePath(path).name == self._named_suffix_filename(
+                    self.source_locale,
+                    localization_format,
+                )
             return localization_format.extract_locale_suffix(PurePath(path).name) is None
         if self.id == "locale_directory":
             return _locale_directory_segment(path, [self.source_locale]) is not None
@@ -112,6 +139,9 @@ class LocalizationLayout:
         path = _as_posix(relative_path)
         pure_path = PurePath(path)
         if self.id == "suffix":
+            if self.base_name:
+                source_name = self._named_suffix_filename(self.source_locale, localization_format)
+                return pure_path.with_name(str(source_name)).as_posix()
             source_name = localization_format.source_filename(pure_path.name, list(supported_codes))
             return pure_path.with_name(source_name).as_posix()
         if self.id == "locale_directory":
@@ -153,10 +183,19 @@ def load_localization_layout(raw_value: Any, *, source_locale: str = "en") -> Lo
         return LocalizationLayout(id=base.id, source_locale=source_locale)
 
     if isinstance(raw_value, Mapping):
+        supported_keys = {"id", "source_locale", "base_name"}
+        unknown_keys = sorted(set(raw_value) - supported_keys)
+        if unknown_keys:
+            raise ValueError(
+                "Unsupported localization_layout key(s): " + ", ".join(unknown_keys) + "."
+            )
         layout_id = str(raw_value.get("id") or SUFFIX_LAYOUT.id)
+        raw_base_name = raw_value.get("base_name")
+        base_name = str(raw_base_name).strip() if raw_base_name is not None else None
         return LocalizationLayout(
             id=layout_id,
             source_locale=str(raw_value.get("source_locale") or source_locale),
+            base_name=base_name or None,
         )
 
     raise ValueError("localization_layout must be a string id or mapping.")

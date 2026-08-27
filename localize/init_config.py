@@ -424,10 +424,13 @@ def build_config(
 
 
 def _layout_config(layout: LocalizationLayout) -> Dict[str, str]:
-    return {
+    config = {
         "id": layout.id,
         "source_locale": layout.source_locale,
     }
+    if layout.base_name:
+        config["base_name"] = layout.base_name
+    return config
 
 
 def _profile_config_entry(

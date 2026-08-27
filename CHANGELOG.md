@@ -7,6 +7,31 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.9] - 2026-08-27
+
+### Added
+
+- Add an opt-in `java-indexed` placeholder profile for `%0`, `%1`, and similar
+  tokens, with async-safe profile selection and unchanged default behavior.
+- Add `localization_layout.base_name` for suffix layouts whose source file also
+  carries a locale suffix, such as `Messages_en.properties`.
+
+### Fixed
+
+- Canonicalize Java property keys using `java.util.Properties` escape semantics
+  while preserving their original spelling during synchronization and
+  reassembly; malformed Unicode escapes remain recoverable instead of aborting
+  a run.
+- Enforce configured translation-glossary mappings after both model passes,
+  exclude metadata namespaces from locale data, and include explicit empty
+  target values in backlog runs.
+- Run the translation quality gate before the GitHub Action publishes a pull
+  request, and resolve subdirectory configs relative to the config file.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.9`.
+
 ## [0.1.8] - 2026-08-27
 
 ### Fixed

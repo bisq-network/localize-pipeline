@@ -25,6 +25,13 @@ localization_format: "java_properties"
 localization_layout:
   id: "suffix"
   source_locale: "en"
+  # Optional when both source and targets carry locale suffixes, for example
+  # Messages_en.properties and Messages_de.properties.
+  # base_name: "Messages"
+
+# Placeholder detection is conservative by default. Opt into java-indexed only
+# when the application uses %0, %1, ... as runtime substitution tokens.
+placeholder_profile: "standard"
 
 # Mixed projects can replace the singular settings above with a profile list.
 # Every runtime sidecar uses the same profile list: parsing, validation, semantic

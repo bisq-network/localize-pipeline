@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from localize.ignore_keys import compile_ignore_key_patterns
 from localize.logging_config import setup_logger
+from localize.placeholder_rules import DEFAULT_PLACEHOLDER_PROFILE, validate_placeholder_profile
 from localize.localization_formats import (
     JAVA_PROPERTIES_FORMAT,
     LocalizationFormat,
@@ -109,6 +110,10 @@ class AppConfig:
     ))
     review_reasoning_effort: Optional[str] = None
 
+    # Placeholder-detection profile ("standard" or "java-indexed"). Runtime
+    # entry points activate it after loading so this loader remains state-free.
+    placeholder_profile: str = DEFAULT_PLACEHOLDER_PROFILE
+
 
 @dataclass(frozen=True)
 class ConfigIssue:
@@ -196,6 +201,21 @@ def validate_config(
         load_localization_profiles(config)
     except ValueError as exc:
         issues.append(ConfigIssue("error", str(exc)))
+
+    placeholder_profile = str(
+        config.get("placeholder_profile") or DEFAULT_PLACEHOLDER_PROFILE
+    ).strip()
+    try:
+        validate_placeholder_profile(placeholder_profile)
+    except ValueError as exc:
+        issues.append(ConfigIssue("error", str(exc)))
+
+    translation_source = str(config.get("translation_source") or "transifex").strip().lower()
+    if translation_source not in {"git", "transifex"}:
+        issues.append(ConfigIssue(
+            "error",
+            "translation_source must be either 'git' or 'transifex'.",
+        ))
 
     # style_rules referencing locales that are not declared is almost always a typo.
     style_rules = config.get("style_rules") or {}
@@ -662,6 +682,14 @@ def load_app_config() -> AppConfig:
         default=False,
     )
     ignore_key_patterns = compile_ignore_key_patterns(config.get('ignore_key_patterns') or [])
+    placeholder_profile = str(
+        config.get('placeholder_profile') or DEFAULT_PLACEHOLDER_PROFILE
+    ).strip()
+    try:
+        validate_placeholder_profile(placeholder_profile)
+    except ValueError as exc:
+        logger.critical("CRITICAL: %s", exc)
+        sys.exit(1)
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(
         source_identical_min_block_count=_as_positive_int(
@@ -820,4 +848,5 @@ def load_app_config() -> AppConfig:
         localization_layout=localization_layout,
         localization_profiles=localization_profiles,
         review_reasoning_effort=review_reasoning_effort,
+        placeholder_profile=placeholder_profile,
     )

@@ -31,7 +31,7 @@ localize validate --config config.yaml
 localize run --config config.yaml --dry-run
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.8
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.9
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
@@ -100,12 +100,26 @@ Generated configs default to `dry_run: true` so first runs can validate
 discovery, queueing, and reports without model calls. Set `dry_run: false` when
 you are ready to let the pipeline write translations.
 
+For suffix layouts where both source and target filenames carry locales, set a
+shared base name explicitly:
+
+```yaml
+localization_layout:
+  id: suffix
+  base_name: Messages
+  source_locale: en
+```
+
+Placeholder detection defaults to `standard`. Set
+`placeholder_profile: java-indexed` only for applications whose runtime treats
+`%0`, `%1`, and similar tokens as substitutions.
+
 ## Bootstrap Pull Requests
 
 Use `bootstrap-pr` when onboarding another repository:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.8
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.9
 ```
 
 The command refuses dirty worktrees, creates `localize/onboarding`, writes
@@ -127,7 +141,7 @@ For custom adapters:
 ```bash
 localize bootstrap-pr \
   --target-project-root path/to/repo \
-  --action-ref v0.1.8 \
+  --action-ref v0.1.9 \
   --plugin-module my_project.localize_adapter \
   --plugin-install-command "python -m pip install ."
 ```
