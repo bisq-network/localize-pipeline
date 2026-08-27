@@ -7,6 +7,8 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.8] - 2026-08-27
+
 ### Fixed
 
 - Split generated translation PRs at 90 files instead of 150. CodeRabbit now
@@ -14,14 +16,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   lead batch that merged with no review at all (`bisq-network/bisq2#4891`
   carried 150 files and 205 of 217 changed values past review). Deployments
   that pin `MAX_FILES_PER_PR` in `docker/.env` must lower it to match.
-- Require GitPython 3.1.55 or newer, refresh both lockfiles, and build GitHub
-  CLI 2.96.0 with gRPC-Go 1.82.1 so dependency and image audits reject the
-  July 2026 advisories.
+- Remove the unused GitPython dependency from the package, GitHub Action, and
+  production image so its current command-execution and denial-of-service
+  advisories are absent rather than suppressed.
+- Build GitHub CLI 2.96.0 with gRPC-Go 1.82.1 so dependency and image audits
+  reject the July 2026 advisories.
 - Reject Vietnamese horn-vowel contamination in non-Vietnamese Bisq locales,
   including canonically equivalent decomposed Unicode text.
 
 ### Changed
 
+- The default bootstrap action ref is now `v0.1.8`.
 - The translation system prompt now instructs the model to match the
   grammatical number of the English source and to keep singular/plural count
   templates (e.g. keys ending in `.single`/`.plural`) distinct, reducing

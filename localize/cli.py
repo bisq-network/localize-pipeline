@@ -579,7 +579,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_parser.add_argument("--branch", default="localize/onboarding", help="Onboarding branch name.")
     bootstrap_parser.add_argument("--base-branch", default=None, help="Optional base branch to check out first.")
-    bootstrap_parser.add_argument("--action-ref", default="v0.1.7", help="Action ref to use in the generated workflow.")
+    bootstrap_parser.add_argument("--action-ref", default="v0.1.8", help="Action ref to use in the generated workflow.")
     bootstrap_parser.add_argument(
         "--onboarding-guide-file",
         default="docs/localize-pipeline.md",

@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.7
+      - uses: bisq-network/localize-pipeline@v0.1.8
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -99,7 +99,7 @@ a dedicated machine user:
 5. Pass the signing inputs to the action:
 
 ```yaml
-      - uses: bisq-network/localize-pipeline@v0.1.7
+      - uses: bisq-network/localize-pipeline@v0.1.8
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -154,7 +154,7 @@ profile list.
 Use `api-base-url` for any OpenAI-compatible endpoint:
 
 ```yaml
-      - uses: bisq-network/localize-pipeline@v0.1.7
+      - uses: bisq-network/localize-pipeline@v0.1.8
         with:
           config-file: config.yaml
           api-base-url: http://localhost:11434/v1
@@ -173,7 +173,7 @@ For custom adapters, install the package and list the adapter modules with the
 first-class plugin inputs:
 
 ```yaml
-      - uses: bisq-network/localize-pipeline@v0.1.7
+      - uses: bisq-network/localize-pipeline@v0.1.8
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.7
+      - uses: bisq-network/localize-pipeline@v0.1.8
         with:
           config-file: config.yaml
           diff-base: ${{ github.event.pull_request.base.sha }}
