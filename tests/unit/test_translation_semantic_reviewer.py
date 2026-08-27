@@ -39,7 +39,10 @@ def test_semantic_reviewer_prompt_is_json_only_and_context_rich():
 
     assert "JSON only" in combined
     assert "source_value" in combined
-    assert "old_target_value" in combined
+    assert "old_target_value" not in combined
+    assert "Dirección de red clara" not in combined
+    assert "only authority" in combined
+    assert "Do not infer or restore" in combined
     assert "new_target_value" in combined
     assert '"file": "relative/path/to/locale-file"' in combined
     assert "Clear network address: {0}" in combined
