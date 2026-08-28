@@ -7,6 +7,18 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.13] - 2026-08-28
+
+### Fixed
+
+- Restore holistic-review placeholders against both protected inputs before
+  checking for unresolved tokens. Reviewers may legitimately reuse a token
+  from the source text instead of the draft translation.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.13`.
+
 ## [0.1.12] - 2026-08-28
 
 ### Fixed

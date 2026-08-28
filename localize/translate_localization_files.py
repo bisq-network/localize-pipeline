@@ -1684,14 +1684,19 @@ async def holistic_review_async(
                     has_tokens = "__PH_" in ai_value
                     logger.debug(f"AI returned for '{sample_key}': '{ai_value}' (has_tokens={has_tokens})")
 
-                # Restore placeholders in the reviewed translations
-                # AI might use tokens from EITHER source or translated content, so restore with both
+                # The reviewer may use tokens from either protected input. Restore
+                # against one combined map so the unresolved-token assertion runs
+                # only after both namespaces have been considered.
+                review_placeholder_map = {
+                    **source_placeholder_map,
+                    **translated_placeholder_map,
+                }
                 restored_json = {}
                 for key, value in parsed_json.items():
-                    # First restore with translated map, then with source map for any remaining tokens
-                    restored_value = restore_placeholders_in_properties(value, translated_placeholder_map)
-                    restored_value = restore_placeholders_in_properties(restored_value, source_placeholder_map)
-                    restored_json[key] = restored_value
+                    restored_json[key] = restore_placeholders_in_properties(
+                        value,
+                        review_placeholder_map,
+                    )
 
                 # Debug: Check restoration results
                 for sample_key in sample_ai_keys:
