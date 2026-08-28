@@ -494,6 +494,7 @@ def _extract_plugin_args(raw_argv: Sequence[str]) -> tuple[list[str], list[str]]
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser and all supported subcommands."""
     parser = argparse.ArgumentParser(
         prog="localize",
         description="Validate and run the AI localization translation pipeline.",
@@ -579,7 +580,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_parser.add_argument("--branch", default="localize/onboarding", help="Onboarding branch name.")
     bootstrap_parser.add_argument("--base-branch", default=None, help="Optional base branch to check out first.")
-    bootstrap_parser.add_argument("--action-ref", default="v0.1.9", help="Action ref to use in the generated workflow.")
+    bootstrap_parser.add_argument("--action-ref", default="v0.1.10", help="Action ref to use in the generated workflow.")
     bootstrap_parser.add_argument(
         "--onboarding-guide-file",
         default="docs/localize-pipeline.md",

@@ -90,7 +90,7 @@ def lint_properties_file(file_path: str) -> List[str]:
                     raw_key, _separator_group, value = split_line
                     key = _unescape_key(raw_key)
 
-                    if '..' in key:
+                    if re.search(r'(?<!\.)\.\.(?!\.)', key):
                         errors.append(f"Linter Error: Malformed key '{key}' with double dots found on line {i}.")
 
                     value_to_check = value.rstrip('\r\n')

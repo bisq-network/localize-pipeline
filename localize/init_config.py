@@ -2,7 +2,7 @@
 
 Auto-detects target locales from existing localization files and writes a small,
 generic config that defaults to the git translation source and OpenAI
-gpt-4o-mini/gpt-4o. The goal is a 5-minute first run without editing a 400-line
+gpt-4o-mini/GPT-5.6 Terra. The goal is a 5-minute first run without editing a 400-line
 example by hand.
 
 Usage::
@@ -388,7 +388,7 @@ def build_config(
     input_folder: str,
     locales: List[Dict[str, str]],
     model_name: str = "gpt-4o-mini",
-    review_model_name: str = "gpt-4o",
+    review_model_name: str = "gpt-5.6-terra",
     api_base_url: Optional[str] = None,
     localization_format: object = JAVA_PROPERTIES_FORMAT.id,
     localization_layout: object = SUFFIX_LAYOUT.id,
@@ -403,6 +403,7 @@ def build_config(
         "translation_source": "git",
         "model_name": model_name,
         "review_model_name": review_model_name,
+        "review_reasoning_effort": "none",
         "dry_run": dry_run,
         "translation_memory_enabled": True,
         "translation_memory_file_path": "logs/translation_memory.json",

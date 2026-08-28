@@ -7,6 +7,22 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.10] - 2026-08-28
+
+### Fixed
+
+- Accept three-dot ellipses in natural-language Java property keys while still
+  rejecting malformed exact double dots.
+- Update GPT-5.6 Sol, Terra, and Luna usage estimates to the current OpenAI
+  token rates, including cache writes and long-context multipliers.
+
+### Changed
+
+- Use GPT-5.6 Terra with reasoning disabled as the generic scaffold and example
+  review default, matching the production quality profile while retaining
+  GPT-4o mini for the initial translation pass.
+- The default bootstrap action ref is now `v0.1.10`.
+
 ## [0.1.9] - 2026-08-27
 
 ### Added

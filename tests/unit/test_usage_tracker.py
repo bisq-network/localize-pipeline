@@ -3,6 +3,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from localize.usage_tracker import DEFAULT_PRICES, UsageTracker, cost_for_tokens
 
 
@@ -34,32 +36,42 @@ def test_cost_calculation():
 
 
 def test_default_prices_cover_configured_gpt5_models():
+    """The built-in price table covers every supported GPT-5 tier."""
     assert DEFAULT_PRICES["gpt-5.6"] == {
-        "input": 5.00,
-        "cached_input": 0.50,
-        "cache_write": 6.25,
-        "output": 30.00,
+        "input": 4.00,
+        "cached_input": 0.40,
+        "cache_write": 5.00,
+        "output": 20.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     }
     assert DEFAULT_PRICES["gpt-5.6-sol"] == {
-        "input": 5.00,
-        "cached_input": 0.50,
-        "cache_write": 6.25,
-        "output": 30.00,
+        "input": 4.00,
+        "cached_input": 0.40,
+        "cache_write": 5.00,
+        "output": 20.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     }
     assert DEFAULT_PRICES["gpt-5.6-terra"] == {
-        "input": 2.50,
-        "cached_input": 0.25,
-        "cache_write": 3.125,
-        "output": 15.00,
+        "input": 2.00,
+        "cached_input": 0.20,
+        "cache_write": 2.50,
+        "output": 12.00,
         "long_context_threshold": 272_000,
         "long_context_input_multiplier": 2.0,
         "long_context_output_multiplier": 1.5,
     }
     assert DEFAULT_PRICES["gpt-5.6-luna"] == {
-        "input": 1.00,
-        "cached_input": 0.10,
-        "cache_write": 1.25,
-        "output": 6.00,
+        "input": 0.20,
+        "cached_input": 0.02,
+        "cache_write": 0.25,
+        "output": 1.20,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     }
     assert DEFAULT_PRICES["gpt-5.5"] == {
         "input": 5.00,
@@ -128,6 +140,7 @@ def test_record_response_reads_usage():
 
 
 def test_record_response_prices_cached_reads_and_writes_separately():
+    """Cached reads and cache writes use their distinct token rates."""
     t = UsageTracker(prices=DEFAULT_PRICES)
     resp = SimpleNamespace(
         usage=SimpleNamespace(
@@ -146,10 +159,11 @@ def test_record_response_prices_cached_reads_and_writes_separately():
     assert model["cached_tokens"] == 400_000
     assert model["cache_write_tokens"] == 200_000
     # The 1M-token prompt uses Terra's long-context rates for the full request.
-    assert model["estimated_cost_usd"] == 5.7
+    assert model["estimated_cost_usd"] == 4.56
 
 
 def test_gpt56_long_context_pricing_boundary():
+    """The surcharge begins only above the documented token threshold."""
     base_cost = cost_for_tokens(
         "gpt-5.6-terra",
         272_000,
@@ -165,11 +179,23 @@ def test_gpt56_long_context_pricing_boundary():
         cache_write_tokens=50_000,
     )
 
-    assert base_cost == 1.98625
-    assert long_cost == 3.222505
+    assert base_cost == pytest.approx(1.589)
+    assert long_cost == pytest.approx(2.578004)
+
+
+def test_gpt56_long_context_pricing_covers_every_tier():
+    """Every GPT-5.6 tier applies the documented long-context surcharge."""
+    for model in ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        base_cost = cost_for_tokens(model, 272_000, 100_000)
+        long_cost = cost_for_tokens(model, 272_001, 100_000)
+
+        assert base_cost is not None
+        assert long_cost is not None
+        assert long_cost > base_cost
 
 
 def test_long_context_pricing_is_applied_per_call_not_aggregate():
+    """Separate short calls do not trigger aggregate long-context pricing."""
     tracker = UsageTracker(prices=DEFAULT_PRICES)
 
     tracker.record("gpt-5.6-terra", 200_000, 10_000)
@@ -177,7 +203,7 @@ def test_long_context_pricing_is_applied_per_call_not_aggregate():
 
     model = tracker.summary()["models"]["gpt-5.6-terra"]
     assert model["prompt_tokens"] == 400_000
-    assert model["estimated_cost_usd"] == 1.3
+    assert model["estimated_cost_usd"] == 1.04
 
 
 def test_record_response_handles_missing_usage():
