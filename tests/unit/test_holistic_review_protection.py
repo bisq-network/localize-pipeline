@@ -245,6 +245,46 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
 
 
 @pytest.mark.asyncio
+async def test_holistic_review_restores_source_side_protection_tokens():
+    """A review may reuse a token from the protected source text."""
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"key1": "Hallo __PH_source__"})
+                )
+            )
+        ]
+    )
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.is_retryable_error.return_value = False
+
+    with (
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
+        patch(
+            "localize.translate_localization_files.protect_placeholders_in_properties",
+            side_effect=[
+                ("key1=Hello __PH_source__", {"__PH_source__": "%0"}),
+                ("key1=Hallo __PH_draft__", {"__PH_draft__": "%0"}),
+            ],
+        ),
+    ):
+        result = await holistic_review_async(
+            source_content="key1=Hello %0",
+            translated_content="key1=Hallo %0",
+            target_language="German",
+            keys_to_review=["key1"],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {"key1": "Hallo %0"}
+
+
+@pytest.mark.asyncio
 async def test_holistic_review_omits_json_mode_when_provider_does_not_support_it():
     response = SimpleNamespace(
         choices=[
