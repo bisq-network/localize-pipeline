@@ -91,6 +91,31 @@ class TestValidationLogic(unittest.TestCase):
 
         self.assertEqual(errors, [])
 
+    def test_linting_accepts_ellipsis_in_natural_language_keys(self):
+        """Display-string keys may contain ellipses without being malformed."""
+        content = (
+            r"Processing...=Обработка..." "\n"
+            r"Download\ referenced\ files\ (PDFs,\ ...)=Скачать связанные файлы (PDF, ...)" "\n"
+            r"key.one..bad=Still malformed" "\n"
+        )
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            delete=False,
+            suffix=".properties",
+            encoding="utf-8",
+        ) as properties_file:
+            properties_file.write(content)
+            temp_path = properties_file.name
+
+        try:
+            errors = lint_properties_file(temp_path)
+        finally:
+            os.remove(temp_path)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Malformed key 'key.one..bad'", errors[0])
+
     def test_linting_detects_multiple_malformed_suppress_comments(self):
         """Each malformed suppress comment should produce its own error."""
         content = (
