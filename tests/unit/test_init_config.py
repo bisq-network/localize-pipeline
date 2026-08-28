@@ -246,6 +246,7 @@ class TestCodeToName:
 
 class TestBuildConfig:
     def test_defaults_to_git_source(self):
+        """Generated configs use the production-proven two-pass model defaults."""
         cfg = build_config(
             target_project_root="/repo", input_folder="i18n",
             locales=[{"code": "de", "name": "German"}],

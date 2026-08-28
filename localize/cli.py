@@ -494,6 +494,7 @@ def _extract_plugin_args(raw_argv: Sequence[str]) -> tuple[list[str], list[str]]
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser and all supported subcommands."""
     parser = argparse.ArgumentParser(
         prog="localize",
         description="Validate and run the AI localization translation pipeline.",

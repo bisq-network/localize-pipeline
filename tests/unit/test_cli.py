@@ -427,6 +427,7 @@ def test_cli_bootstrap_pr_delegates_to_onboarding_generator(capsys):
 
 
 def test_cli_bootstrap_pr_defaults_to_latest_release_ref(capsys):
+    """The CLI forwards the latest released Action ref by default."""
     result = SimpleNamespace(
         branch_name="localize/onboarding",
         commit_sha="abc123",
@@ -587,6 +588,7 @@ def test_cli_memory_suggest_rejects_negative_limit(capsys):
 
 
 def test_pyproject_exposes_localize_console_script():
+    """Package metadata exposes the CLI and current package version."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["name"] == "localize-pipeline"

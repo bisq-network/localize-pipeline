@@ -33,6 +33,7 @@ def _init_repo(repo: Path) -> None:
 
 
 def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
+    """Bootstrap output uses the current release and remains executable."""
     repo = tmp_path / "target"
     _init_repo(repo)
 

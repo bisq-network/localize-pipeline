@@ -36,6 +36,7 @@ def test_cost_calculation():
 
 
 def test_default_prices_cover_configured_gpt5_models():
+    """The built-in price table covers every supported GPT-5 tier."""
     assert DEFAULT_PRICES["gpt-5.6"] == {
         "input": 4.00,
         "cached_input": 0.40,
@@ -139,6 +140,7 @@ def test_record_response_reads_usage():
 
 
 def test_record_response_prices_cached_reads_and_writes_separately():
+    """Cached reads and cache writes use their distinct token rates."""
     t = UsageTracker(prices=DEFAULT_PRICES)
     resp = SimpleNamespace(
         usage=SimpleNamespace(
@@ -161,6 +163,7 @@ def test_record_response_prices_cached_reads_and_writes_separately():
 
 
 def test_gpt56_long_context_pricing_boundary():
+    """The surcharge begins only above the documented token threshold."""
     base_cost = cost_for_tokens(
         "gpt-5.6-terra",
         272_000,
@@ -181,6 +184,7 @@ def test_gpt56_long_context_pricing_boundary():
 
 
 def test_gpt56_long_context_pricing_covers_every_tier():
+    """Every GPT-5.6 tier applies the documented long-context surcharge."""
     for model in ("gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
         base_cost = cost_for_tokens(model, 272_000, 100_000)
         long_cost = cost_for_tokens(model, 272_001, 100_000)
@@ -191,6 +195,7 @@ def test_gpt56_long_context_pricing_covers_every_tier():
 
 
 def test_long_context_pricing_is_applied_per_call_not_aggregate():
+    """Separate short calls do not trigger aggregate long-context pricing."""
     tracker = UsageTracker(prices=DEFAULT_PRICES)
 
     tracker.record("gpt-5.6-terra", 200_000, 10_000)
