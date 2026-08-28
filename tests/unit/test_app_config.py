@@ -391,6 +391,21 @@ class TestLoadAppConfig:
 
         assert config.placeholder_profile == "standard"
 
+    def test_load_config_accepts_prompt_only_glossary_enforcement(self):
+        mock_config = {
+            "dry_run": True,
+            "translation_glossary_enforcement": "prompt-only",
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("os.path.exists", return_value=False):
+                with patch("localize.app_config.setup_logger") as mock_logger:
+                    mock_logger.return_value = MagicMock()
+                    with patch.dict(os.environ, {}, clear=True):
+                        config = load_app_config()
+
+        assert config.translation_glossary_enforcement == "prompt-only"
+
     def test_load_config_rejects_unknown_placeholder_profile(self):
         mock_config = {
             "dry_run": True,
@@ -808,6 +823,13 @@ class TestValidateConfig:
         errors = self._errors(validate_config(config, path_exists=lambda p: True))
 
         assert any("Unknown placeholder profile" in error for error in errors)
+
+    def test_unknown_glossary_enforcement_is_validation_error(self):
+        config = {**self.GOOD, "translation_glossary_enforcement": "sometimes"}
+
+        errors = self._errors(validate_config(config, path_exists=lambda p: True))
+
+        assert any("translation_glossary_enforcement must be one of" in error for error in errors)
 
     def test_unknown_translation_source_is_validation_error(self):
         config = {**self.GOOD, "translation_source": "crowdin"}

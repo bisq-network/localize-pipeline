@@ -7,6 +7,19 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.14] - 2026-08-28
+
+### Added
+
+- Add `translation_glossary_enforcement: prompt-only` for inflected languages.
+  Both model passes still receive preferred glossary lemmas, while deterministic
+  validation no longer rejects grammatical surface forms that differ from the
+  configured dictionary form. Existing profiles remain `exact` by default.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.14`.
+
 ## [0.1.13] - 2026-08-28
 
 ### Fixed

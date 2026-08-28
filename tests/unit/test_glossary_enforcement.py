@@ -1,6 +1,7 @@
 from localize.translation_validator import find_glossary_mismatches
 from localize.translate_localization_files import (
     _build_holistic_review_system_prompt,
+    _glossary_for_deterministic_enforcement,
     _prefer_glossary_compliant_draft,
     load_glossary,
     run_post_translation_validation,
@@ -89,6 +90,30 @@ def test_holistic_review_prompt_receives_mandatory_glossary():
     assert "Mandatory Translation Glossary" in prompt
     assert '"entry"' in prompt
     assert '"Eintrag"' in prompt
+
+
+def test_holistic_review_prompt_allows_grammatical_inflection():
+    prompt = _build_holistic_review_system_prompt(
+        target_language="Russian",
+        keys_to_review=["Entry"],
+        source_content="Entry=Entry",
+        translated_content="Entry=Запись",
+        style_rules_text="",
+        translation_glossary={"entry": "запись"},
+        translation_glossary_enforcement="prompt-only",
+    )
+
+    assert "Preferred Translation Glossary" in prompt
+    assert "preferred base term" in prompt
+    assert "inflect or adapt" in prompt
+    assert "must contain" not in prompt
+
+
+def test_prompt_only_glossary_is_not_exactly_enforced():
+    glossary = {"entry": "запись"}
+
+    assert _glossary_for_deterministic_enforcement(glossary, "exact") == glossary
+    assert _glossary_for_deterministic_enforcement(glossary, "prompt-only") == {}
 
 
 def test_compliant_draft_wins_when_review_breaks_glossary():

@@ -36,6 +36,9 @@ from localize.model_provider import (
 from localize.semantic_quality import normalize_retained_source_word_allowlist
 
 
+TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES = frozenset({"exact", "prompt-only"})
+
+
 @dataclass
 class QualityGateConfig:
     """Configuration for generated translation PR quality gates."""
@@ -113,6 +116,10 @@ class AppConfig:
     # Placeholder-detection profile ("standard" or "java-indexed"). Runtime
     # entry points activate it after loading so this loader remains state-free.
     placeholder_profile: str = DEFAULT_PLACEHOLDER_PROFILE
+
+    # "exact" deterministically requires the configured target text;
+    # "prompt-only" treats values as terminology lemmas that models may inflect.
+    translation_glossary_enforcement: str = "exact"
 
 
 @dataclass(frozen=True)
@@ -209,6 +216,17 @@ def validate_config(
         validate_placeholder_profile(placeholder_profile)
     except ValueError as exc:
         issues.append(ConfigIssue("error", str(exc)))
+
+    translation_glossary_enforcement = str(
+        config.get("translation_glossary_enforcement") or "exact"
+    ).strip().lower()
+    if translation_glossary_enforcement not in TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES:
+        issues.append(ConfigIssue(
+            "error",
+            "translation_glossary_enforcement must be one of: "
+            + ", ".join(sorted(TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES))
+            + ".",
+        ))
 
     translation_source = str(config.get("translation_source") or "transifex").strip().lower()
     if translation_source not in {"git", "transifex"}:
@@ -690,6 +708,15 @@ def load_app_config() -> AppConfig:
     except ValueError as exc:
         logger.critical("CRITICAL: %s", exc)
         sys.exit(1)
+    translation_glossary_enforcement = str(
+        config.get('translation_glossary_enforcement') or 'exact'
+    ).strip().lower()
+    if translation_glossary_enforcement not in TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES:
+        logger.critical(
+            "CRITICAL: translation_glossary_enforcement must be one of: %s.",
+            ", ".join(sorted(TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES)),
+        )
+        sys.exit(1)
     quality_gate_config = config.get('quality_gate', {}) or {}
     quality_gate = QualityGateConfig(
         source_identical_min_block_count=_as_positive_int(
@@ -849,4 +876,5 @@ def load_app_config() -> AppConfig:
         localization_profiles=localization_profiles,
         review_reasoning_effort=review_reasoning_effort,
         placeholder_profile=placeholder_profile,
+        translation_glossary_enforcement=translation_glossary_enforcement,
     )

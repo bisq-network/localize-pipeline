@@ -277,6 +277,20 @@ class TestCoreLogic(unittest.TestCase):
             self.assertIn("key1", context_text)
             self.assertNotIn("key2", context_text)
 
+    def test_build_context_marks_prompt_only_terms_as_inflectable(self):
+        _, glossary_text = build_context(
+            {},
+            {},
+            {"entry": "запись"},
+            4000,
+            "gpt-4o-mini",
+            translation_glossary_enforcement="prompt-only",
+        )
+
+        self.assertIn("preferred base term", glossary_text)
+        self.assertIn("inflect or adapt", glossary_text)
+        self.assertNotIn("should be translated as", glossary_text)
+
     def test_build_context_prioritizes_sibling_keys(self):
         """
         Tests that build_context surfaces sibling keys (sharing a dotted prefix
