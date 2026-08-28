@@ -123,6 +123,7 @@ TRANSLATION_KEY_LEDGER_FILE_PATH = config.translation_key_ledger_file_path
 TRANSLATION_MEMORY_FILE_PATH = config.translation_memory_file_path
 TRANSLATION_MEMORY_ENABLED = config.translation_memory_enabled
 PRESERVE_QUEUES_FOR_DEBUG = config.preserve_queues_for_debug
+TRANSLATION_GLOSSARY_ENFORCEMENT = config.translation_glossary_enforcement
 MODEL_PROVIDER = config.model_provider
 client = config.openai_client
 _FALLBACK_PROVIDER = OpenAICompatibleProvider(client=None)
@@ -224,6 +225,7 @@ def translation_memory_context_fingerprint(
         glossary: Mapping[str, Dict[str, str]],
         brand_glossary: List[str],
         style_rules_text: str = "",
+        translation_glossary_enforcement: str = "exact",
 ) -> str:
     """Hash context that can materially change the correct target string."""
     payload = {
@@ -231,6 +233,7 @@ def translation_memory_context_fingerprint(
         "glossary": glossary.get(locale, {}),
         "brand_glossary": sorted(set(brand_glossary)),
         "style_rules_text": style_rules_text,
+        "translation_glossary_enforcement": translation_glossary_enforcement,
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -753,6 +756,7 @@ def build_context(
         model_name: str,
         system_prompt_text: str = "",
         current_key: Optional[str] = None,
+        translation_glossary_enforcement: str = "exact",
 ) -> Tuple[str, str]:
     """
     Build the context and glossary text for the translation prompt.
@@ -774,7 +778,16 @@ def build_context(
     total_tokens = 0
 
     # Build glossary entries
-    glossary_entries = [f'"{k}" should be translated as "{v}"' for k, v in language_glossary.items()]
+    if translation_glossary_enforcement == "prompt-only":
+        glossary_entries = [
+            f'"{k}" preferred base term: "{v}" (inflect or adapt for grammar)'
+            for k, v in language_glossary.items()
+        ]
+    else:
+        glossary_entries = [
+            f'"{k}" should be translated as "{v}"'
+            for k, v in language_glossary.items()
+        ]
     glossary_text = '\n'.join(glossary_entries)
     glossary_tokens = count_tokens(glossary_text, model_name)
 
@@ -1391,6 +1404,7 @@ async def translate_text_async(
             style_rules_text=style_rules_text,
             project_context=PROJECT_CONTEXT,
             localization_format=localization_format or LOCALIZATION_FORMAT,
+            translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
         )
 
         # Build the context and glossary text
@@ -1402,6 +1416,7 @@ async def translate_text_async(
             MODEL_NAME,
             system_prompt_text=system_prompt,
             current_key=key,
+            translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
         )
 
         # Extract and protect placeholders
@@ -1488,18 +1503,24 @@ def _build_holistic_review_system_prompt(
         style_rules_text: str,  # Pass pre-computed rules
         localization_format: LocalizationFormat = LOCALIZATION_FORMAT,
         translation_glossary: Optional[Mapping[str, str]] = None,
+        translation_glossary_enforcement: str = "exact",
 ) -> str:
     """Builds the system prompt for the holistic review API call."""
     keys_to_review_text = "\n".join([f"- {_display_translation_key(k)}" for k in keys_to_review])
-    glossary_rules = "\n".join(
-        f'- When the English source contains "{source_term}", the translation must contain "{target_term}".'
-        for source_term, target_term in (translation_glossary or {}).items()
-    )
-    glossary_section = (
-        "**Mandatory Translation Glossary**:\n" + glossary_rules + "\n\n"
-        if glossary_rules
-        else ""
-    )
+    if translation_glossary_enforcement == "prompt-only":
+        glossary_rules = "\n".join(
+            f'- When the English source contains "{source_term}", use "{target_term}" '
+            "as the preferred base term; inflect or adapt it when grammar requires."
+            for source_term, target_term in (translation_glossary or {}).items()
+        )
+        glossary_heading = "**Preferred Translation Glossary**:\n"
+    else:
+        glossary_rules = "\n".join(
+            f'- When the English source contains "{source_term}", the translation must contain "{target_term}".'
+            for source_term, target_term in (translation_glossary or {}).items()
+        )
+        glossary_heading = "**Mandatory Translation Glossary**:\n"
+    glossary_section = glossary_heading + glossary_rules + "\n\n" if glossary_rules else ""
 
     return f"""
 You are a lead editor and quality assurance specialist for software localization. Your task is to review a list of newly translated keys within a {localization_format.display_name} file for {target_language}. You are given the full source and translated files for context, but you MUST only review and return the keys specified.
@@ -1554,6 +1575,14 @@ def _prefer_glossary_compliant_draft(
     return reviewed_value
 
 
+def _glossary_for_deterministic_enforcement(
+    translation_glossary: Mapping[str, str],
+    enforcement: str,
+) -> Mapping[str, str]:
+    """Return exact mappings only when the configured policy requires them."""
+    return translation_glossary if enforcement == "exact" else {}
+
+
 def _build_holistic_review_user_prompt(
         target_language: str,
         source_content: str,
@@ -1593,6 +1622,7 @@ async def holistic_review_async(
         style_rules_text: str,
         localization_format: Optional[LocalizationFormat] = None,
         translation_glossary: Optional[Mapping[str, str]] = None,
+        translation_glossary_enforcement: str = "exact",
 ) -> Optional[Dict[str, str]]:
     """
     Performs a holistic review of an entire translated file and returns corrections
@@ -1634,6 +1664,7 @@ async def holistic_review_async(
             style_rules_text=style_rules_text,
             localization_format=localization_format or LOCALIZATION_FORMAT,
             translation_glossary=translation_glossary,
+            translation_glossary_enforcement=translation_glossary_enforcement,
         )
         review_user_prompt = _build_holistic_review_user_prompt(
             target_language=target_language,
@@ -2336,11 +2367,16 @@ async def process_translation_queue(
                 if isinstance(raw_language_glossary, Mapping)
                 else {}
             )
+            enforced_language_glossary = _glossary_for_deterministic_enforcement(
+                language_glossary,
+                TRANSLATION_GLOSSARY_ENFORCEMENT,
+            )
             memory_context_fingerprint = translation_memory_context_fingerprint(
                 locale=language_code,
                 glossary=glossary,
                 brand_glossary=BRAND_GLOSSARY,
                 style_rules_text=style_rules_text_for_review,
+                translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
             )
 
             # Define full paths
@@ -2456,7 +2492,7 @@ async def process_translation_queue(
                             localization_format,
                             ignore_key_patterns=IGNORE_KEY_PATTERNS,
                             changed_keys_for_run=set(ignored_keys_requiring_output),
-                            translation_glossary=language_glossary,
+                            translation_glossary=enforced_language_glossary,
                     ):
                         logger.error(
                             "Skipping write for '%s' because post-translation validation failed.",
@@ -2624,6 +2660,7 @@ async def process_translation_queue(
                     style_rules_text=style_rules_text_for_review,
                     localization_format=localization_format,
                     translation_glossary=language_glossary,
+                    translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
                 ) for key_chunk in key_chunks],
                 return_exceptions=True,
             )
@@ -2658,7 +2695,7 @@ async def process_translation_queue(
                                 source_translations.get(key, ""),
                                 draft_translations.get(key, ""),
                                 value,
-                                language_glossary,
+                                enforced_language_glossary,
                             )
                             if selected_value != value:
                                 logger.warning(
@@ -2750,7 +2787,7 @@ async def process_translation_queue(
                 source_translations,
                 translation_file,
                 ignore_key_patterns=IGNORE_KEY_PATTERNS,
-                translation_glossary=language_glossary,
+                translation_glossary=enforced_language_glossary,
             )
             failed_keys = set(per_key_summary["failed_keys"]).union(model_failed_keys)
             increment_run_metric(run_metrics, "model_translation_failed_count", len(failed_keys))
@@ -2790,7 +2827,7 @@ async def process_translation_queue(
                     localization_format,
                     ignore_key_patterns=IGNORE_KEY_PATTERNS,
                     changed_keys_for_run=set(keys_to_translate),
-                    translation_glossary=language_glossary,
+                    translation_glossary=enforced_language_glossary,
             ):
                 logger.error("Skipping write for '%s' because post-translation validation failed.", translation_file)
                 skipped_files[translation_file] = ["Post-translation validation failed."]

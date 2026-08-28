@@ -29,6 +29,20 @@ def test_translation_system_prompt_includes_configured_project_context():
     assert "Acme Cloud" in prompt
 
 
+def test_translation_system_prompt_describes_prompt_only_glossary_as_lemmas():
+    prompt = build_translation_system_prompt(
+        target_language="Russian",
+        style_rules_text="",
+        project_context="",
+        localization_format=JAVA_PROPERTIES_FORMAT,
+        translation_glossary_enforcement="prompt-only",
+    )
+
+    assert "preferred terminology guidance" in prompt
+    assert "Inflect or adapt" in prompt
+    assert "non-negotiable" not in prompt
+
+
 def test_translation_system_prompt_mentions_format_metadata():
     prompt = build_translation_system_prompt(
         target_language="German",

@@ -14,7 +14,10 @@ from localize.translation_memory import (
     save_translation_memory,
     translation_memory_suggestions,
 )
-from localize.translate_localization_files import apply_translation_memory
+from localize.translate_localization_files import (
+    apply_translation_memory,
+    translation_memory_context_fingerprint,
+)
 
 
 def test_translation_memory_roundtrip_and_lookup(tmp_path):
@@ -300,4 +303,20 @@ def test_translation_memory_context_fingerprint_invalidates_stale_entries():
             context_fingerprint="new",
         )
         is None
+    )
+
+
+def test_glossary_enforcement_policy_changes_memory_context_fingerprint():
+    kwargs = {
+        "locale": "ru",
+        "glossary": {"ru": {"entry": "запись"}},
+        "brand_glossary": ["JabRef"],
+    }
+
+    assert translation_memory_context_fingerprint(
+        **kwargs,
+        translation_glossary_enforcement="exact",
+    ) != translation_memory_context_fingerprint(
+        **kwargs,
+        translation_glossary_enforcement="prompt-only",
     )

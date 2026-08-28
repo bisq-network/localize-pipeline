@@ -93,6 +93,10 @@ review_reasoning_effort: "none"    # deterministic, low-latency review behavior
 # --- Glossary (optional but recommended) ---
 # JSON file of per-language term mappings. See glossary.example.json for the format.
 glossary_file_path: "glossary.example.json"
+# "exact" (default) deterministically requires the configured target text.
+# Use "prompt-only" when mappings are grammatical lemmas whose surface form
+# must be inflected in the target language (for example Russian nouns).
+translation_glossary_enforcement: "exact"
 
 # Brand/technical terms that must never be translated.
 brand_technical_glossary:

@@ -8,6 +8,7 @@ def build_translation_system_prompt(
         style_rules_text: str,
         project_context: str,
         localization_format: LocalizationFormat,
+        translation_glossary_enforcement: str = "exact",
 ) -> str:
     """Build the reusable system prompt for a single localization value."""
     project_context = project_context.strip()
@@ -18,6 +19,19 @@ def build_translation_system_prompt(
 {project_context}
 """
 
+    if translation_glossary_enforcement == "prompt-only":
+        translation_glossary_rule = (
+            "The Translation Glossary is preferred terminology guidance. Use each "
+            "target value as the preferred base term. Inflect or adapt it when "
+            "target-language grammar requires; do not force an ungrammatical exact "
+            "surface form."
+        )
+    else:
+        translation_glossary_rule = (
+            "These terms are non-negotiable. You MUST use the provided translation, "
+            "matching the source term case-insensitively."
+        )
+
     return f"""
 You are an expert translator specializing in software localization. Translate the following {localization_format.display_name} value from English to {target_language}, considering the context and glossary provided.
 
@@ -26,7 +40,7 @@ You are an expert translator specializing in software localization. Translate th
 - **CRITICAL - Translate ALL other text**: You MUST translate all regular text, even if it appears between, before, or after placeholder tokens. Do not skip text just because it is near placeholders.
 - **Strictly follow all glossaries**:
   - **Brand/Technical Glossary**: These terms MUST NOT be translated. Preserve their original casing and form.
-  - **Translation Glossary**: These terms are non-negotiable. You MUST use the provided translation, matching the source term case-insensitively.
+  - **Translation Glossary**: {translation_glossary_rule}
 - **Preserve formatting**: Keep special characters and formatting such as `\\n` and `\\t`.
 - **Do not add** any additional characters or punctuation (e.g., no square brackets, quotation marks, etc.).
 - **Provide only** the translated text corresponding to the Value.
