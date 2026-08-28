@@ -7,6 +7,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.12] - 2026-08-28
+
+### Fixed
+
+- Delegate local-runner config validation to the typed Python loader so quoted
+  YAML values and all supported config shapes use the runtime's exact semantics.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.12`.
+
 ## [0.1.11] - 2026-08-28
 
 ### Fixed

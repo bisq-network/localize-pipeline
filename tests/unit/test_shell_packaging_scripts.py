@@ -165,8 +165,8 @@ def test_dockerfile_rebuilds_transifex_cli_instead_of_using_vendor_binary():
     assert "go version -m /out/tx" in dockerfile
 
 
-def test_run_local_translation_resolves_config_before_chdir():
-    """The wrapper mirrors config-relative target and input path semantics."""
+def test_run_local_translation_delegates_config_validation_to_python():
+    """The wrapper uses the typed loader instead of reparsing YAML in shell."""
     script = (REPO_ROOT / "run-local-translation.sh").read_text(encoding="utf-8")
 
     assert 'CALLER_CWD=$(pwd)' in script
@@ -174,9 +174,8 @@ def test_run_local_translation_resolves_config_before_chdir():
     assert 'CONFIG_FILE_PATH=$(resolve_to_absolute "$1")' in script
     assert 'CONFIG_FILE_PATH=$(resolve_to_absolute "$TRANSLATOR_CONFIG_FILE")' in script
     assert 'if [ -n "${1:-}" ]; then' in script
-    assert 'CONFIG_BASE_DIR=$(cd "$(dirname "$CONFIG_FILE_PATH")"' in script
-    assert 'TARGET_ROOT="$CONFIG_BASE_DIR/$TARGET_ROOT"' in script
-    assert 'INPUT_FOLDER="$TARGET_ROOT/$INPUT_FOLDER"' in script
+    assert '"$VENV_PYTHON" -m localize.cli check --config "$CONFIG_FILE_PATH"' in script
+    assert "yaml_get()" not in script
     assert "TRANSLATOR_CONFIG_FILE" in script
     assert "./setup.sh" not in script
 

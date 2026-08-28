@@ -41,28 +41,10 @@ PIP_SYNC_BIN="$VENV_DIR/bin/pip-sync"
 
 echo "[info] Using configuration file: $CONFIG_FILE_PATH"
 
-# Helper function to parse simple key: value pairs from the YAML config file.
-yaml_get() {
-    local key="$1"
-    # This parser is intentionally simple. It handles unquoted, single-quoted,
-    # and double-quoted values, strips inline comments, and trims whitespace.
-    local value
-    value=$(grep -E "^[[:space:]]*${key}:" "$CONFIG_FILE_PATH" | head -1 |
-      sed -nE "s/^[[:space:]]*${key}:[[:space:]]*(\"([^\"]*)\"|'([^']*)'|([^#]*))([[:space:]]*#.*)?$/\2\3\4/p" |
-      sed -E 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    echo "$value"
-}
-
 # --- Pre-flight Checks ---
 if [ ! -f "$CONFIG_FILE_PATH" ]; then
     echo "[error] Configuration file not found: $CONFIG_FILE_PATH"
     exit 1
-fi
-
-# Read the optional glob filter from the config and export it for the Python script
-TRANSLATION_FILTER_GLOB="$(yaml_get "translation_file_filter_glob" || echo "")"
-if [ -n "$TRANSLATION_FILTER_GLOB" ] && [ "$TRANSLATION_FILTER_GLOB" != "null" ]; then
-  export TRANSLATION_FILTER_GLOB
 fi
 
 if [ ! -d "$VENV_DIR" ]; then
@@ -82,30 +64,10 @@ if ! "$PIP_SYNC_BIN" requirements-dev.txt --quiet; then
     exit 1
 fi
 
-TARGET_ROOT="$(yaml_get "target_project_root" || echo "")"
-INPUT_FOLDER="$(yaml_get "input_folder" || echo "")"
-
-if [ -z "$TARGET_ROOT" ] || [ -z "$INPUT_FOLDER" ]; then
-    echo "[error] 'target_project_root' or 'input_folder' not defined in $CONFIG_FILE_PATH"
-    exit 1
-fi
-
-# Match the Python loader: a relative target root is based at the config file,
-# then a relative input folder is based at the resolved target project root.
-CONFIG_BASE_DIR=$(cd "$(dirname "$CONFIG_FILE_PATH")" &>/dev/null && pwd)
-if [[ "$TARGET_ROOT" != /* ]]; then
-    TARGET_ROOT="$CONFIG_BASE_DIR/$TARGET_ROOT"
-fi
-if [[ "$INPUT_FOLDER" != /* ]]; then
-    INPUT_FOLDER="$TARGET_ROOT/$INPUT_FOLDER"
-fi
-
-if [ ! -d "$TARGET_ROOT" ] || [ ! -d "$INPUT_FOLDER" ]; then
-    echo "[error] Target project root or input folder not found. Check paths in $CONFIG_FILE_PATH"
-    echo "  - target_project_root: $TARGET_ROOT"
-    echo "  - input_folder: $INPUT_FOLDER"
-    exit 1
-fi
+# Use the same typed YAML loader and validation path as the runtime. This keeps
+# quoted values, relative paths, provider settings, and future config keys in
+# one implementation instead of duplicating YAML semantics in shell.
+"$VENV_PYTHON" -m localize.cli check --config "$CONFIG_FILE_PATH"
 
 # --- Script Execution ---
 echo "[info] Starting translation process..."
