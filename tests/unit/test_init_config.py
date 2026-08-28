@@ -279,6 +279,24 @@ class TestBuildConfig:
 
         assert cfg["localization_layout"] == {"id": "locale_directory", "source_locale": "en"}
 
+    def test_preserves_suffix_base_name(self):
+        cfg = build_config(
+            target_project_root="/repo",
+            input_folder="i18n",
+            locales=[{"code": "de", "name": "German"}],
+            localization_layout={
+                "id": "suffix",
+                "source_locale": "en",
+                "base_name": "Messages",
+            },
+        )
+
+        assert cfg["localization_layout"] == {
+            "id": "suffix",
+            "source_locale": "en",
+            "base_name": "Messages",
+        }
+
     def test_optional_base_url_included_when_provided(self):
         cfg = build_config(
             target_project_root="/repo", input_folder="i18n", locales=[],

@@ -24,6 +24,25 @@ def test_suffix_layout_keeps_existing_properties_conventions():
     ) == "nested/messages.properties"
 
 
+def test_suffix_layout_supports_source_locale_suffix_with_base_name():
+    layout = load_localization_layout({
+        "id": "suffix",
+        "base_name": "Messages",
+        "source_locale": "en",
+    })
+
+    assert layout.extract_locale("Messages_de.properties", ["de"], JAVA_PROPERTIES_FORMAT) == "de"
+    assert layout.is_target_file("Messages_de.properties", ["de"], JAVA_PROPERTIES_FORMAT)
+    assert not layout.is_target_file("Other_de.properties", ["de"], JAVA_PROPERTIES_FORMAT)
+    assert layout.is_source_file("Messages_en.properties", ["de"], JAVA_PROPERTIES_FORMAT)
+    assert not layout.is_source_file("Messages.properties", ["de"], JAVA_PROPERTIES_FORMAT)
+    assert layout.source_path_for_target(
+        "Messages_de.properties",
+        ["de"],
+        JAVA_PROPERTIES_FORMAT,
+    ) == "Messages_en.properties"
+
+
 def test_locale_directory_layout_maps_locale_segment_to_source_locale():
     layout = LocalizationLayout(id="locale_directory", source_locale="en")
 

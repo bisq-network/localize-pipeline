@@ -1,4 +1,4 @@
-from typing import Dict, Set, Tuple, List
+from typing import Dict, List, Mapping, Set, Tuple
 import re
 from localize.properties_parser import parse_properties_file, reassemble_file
 from localize.placeholder_rules import extract_placeholder_tokens
@@ -85,6 +85,52 @@ def check_placeholder_parity(base_string: str, target_string: str) -> bool:
         True if the set of placeholders in both strings is identical, False otherwise.
     """
     return extract_placeholder_tokens(base_string) == extract_placeholder_tokens(target_string)
+
+
+def _glossary_term_pattern(term: str) -> re.Pattern[str]:
+    """Compile the boundary-aware, case-insensitive glossary matching rule."""
+    prefix = r"(?<!\w)" if term[0].isalnum() or term[0] == "_" else ""
+    suffix = r"(?!\w)" if term[-1].isalnum() or term[-1] == "_" else ""
+    return re.compile(prefix + re.escape(term) + suffix, re.IGNORECASE)
+
+
+def find_glossary_mismatches(
+    source_value: str,
+    target_value: str,
+    glossary: Mapping[str, str],
+) -> List[Tuple[str, str]]:
+    """Return applicable EN→target mappings missing from ``target_value``.
+
+    Matching is case-insensitive and respects word boundaries. When glossary
+    source terms overlap, the longest term wins so a phrase such as
+    ``AI functionality`` does not also require the standalone ``functionality``
+    mapping.
+    """
+    candidates: List[Tuple[int, int, str, str]] = []
+    for source_term, target_term in glossary.items():
+        if not source_term or not target_term:
+            continue
+        pattern = _glossary_term_pattern(source_term)
+        for match in pattern.finditer(source_value):
+            candidates.append((match.start(), match.end(), source_term, target_term))
+
+    selected: List[Tuple[int, int, str, str]] = []
+    for candidate in sorted(candidates, key=lambda item: (-(item[1] - item[0]), item[0])):
+        start, end, _source_term, _target_term = candidate
+        if any(start < selected_end and end > selected_start for selected_start, selected_end, *_ in selected):
+            continue
+        selected.append(candidate)
+
+    required_counts: Dict[Tuple[str, str], int] = {}
+    for _start, _end, source_term, target_term in selected:
+        pair = (source_term, target_term)
+        required_counts[pair] = required_counts.get(pair, 0) + 1
+
+    return [
+        pair
+        for pair, required_count in sorted(required_counts.items(), key=lambda item: item[0][0].casefold())
+        if len(_glossary_term_pattern(pair[1]).findall(target_value)) < required_count
+    ]
 
 def _find_insertion_index_for_missing_key(
         key: str,
@@ -210,6 +256,10 @@ def synchronize_keys(target_file_path: str, source_file_path: str) -> Tuple[Set[
         final_parsed_lines.insert(insertion_index, {
             'type': 'entry',
             'key': key,
+            # Preserve the source spelling (`\n`, `\uXXXX`, optional escapes,
+            # etc.). The canonical key is Java-decoded for comparison, while
+            # reassembly must not invent a different logical key.
+            'raw_key': source_entry.get('raw_key'),
             'value': source_translations[key],
             'original_value': source_translations[key],
             'line_number': source_entry.get('line_number', insertion_index),

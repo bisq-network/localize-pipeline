@@ -27,6 +27,11 @@ from localize.model_provider import (
     create_model_provider,
     normalize_reasoning_effort,
 )
+from localize.placeholder_rules import (
+    DEFAULT_PLACEHOLDER_PROFILE,
+    set_placeholder_profile,
+    validate_placeholder_profile,
+)
 from localize.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
@@ -388,6 +393,15 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 async def _run(argv: Optional[Sequence[str]]) -> int:
     args = _parse_args(argv)
     config = _load_config(args.config)
+    placeholder_profile = str(
+        config.get("placeholder_profile") or DEFAULT_PLACEHOLDER_PROFILE
+    ).strip()
+    try:
+        validate_placeholder_profile(placeholder_profile)
+    except ValueError as exc:
+        logging.getLogger(__name__).error("Semantic review configuration failed: %s", exc)
+        return 1
+    set_placeholder_profile(placeholder_profile)
     semantic_review_config = config.get("semantic_review", {}) or {}
     if not bool(semantic_review_config.get("enabled", False)):
         return 0

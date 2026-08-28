@@ -597,6 +597,27 @@ class TestRetryHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(indices, [0])
         self.assertEqual(keys, ['key_existing'])
 
+    def test_extract_texts_to_translate_includes_nonempty_source_with_empty_target(self):
+        parsed_lines = [
+            {'type': 'entry', 'key': 'needs.translation', 'value': '', 'line_number': 0},
+            {'type': 'entry', 'key': 'intentionally.empty', 'value': '', 'line_number': 1},
+        ]
+        target_translations = {'needs.translation': '', 'intentionally.empty': ''}
+        source_translations = {
+            'needs.translation': 'Copy citation key',
+            'intentionally.empty': '',
+        }
+
+        texts, indices, keys = extract_texts_to_translate(
+            parsed_lines,
+            source_translations,
+            target_translations,
+        )
+
+        self.assertEqual(texts, ['Copy citation key'])
+        self.assertEqual(indices, [0])
+        self.assertEqual(keys, ['needs.translation'])
+
     def test_extract_texts_to_translate_includes_existing_key_when_source_hash_changed(self):
         """Existing keys should be translated when source text changed since last run."""
         parsed_lines = [

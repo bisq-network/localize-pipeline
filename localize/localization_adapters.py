@@ -14,6 +14,7 @@ from localize.localization_formats import (
     unregister_localization_format,
 )
 from localize.properties_parser import (
+    _escape_key,
     _has_unescaped_trailing_backslash,
     _split_property_line,
     _unescape_key,
@@ -148,7 +149,7 @@ def _escape_messageformat_if_needed(src_text: str, value: str) -> str:
 
 
 def _build_properties_review_content(translations: Translations, keys: Sequence[str]) -> str:
-    return "\n".join([f"{key}={translations.get(key, '')}" for key in keys])
+    return "\n".join([f"{_escape_key(key)}={translations.get(key, '')}" for key in keys])
 
 
 def _json_pointer_escape(segment: str) -> str:

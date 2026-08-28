@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.8
+      - uses: bisq-network/localize-pipeline@v0.1.9
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -158,6 +158,16 @@ localization_layout:
   source_locale: "en"
 ```
 
+Suffix layouts can set `base_name` when the source file also carries its locale:
+
+```yaml
+localization_layout:
+  id: "suffix"
+  base_name: "Messages"
+  source_locale: "en"
+placeholder_profile: "java-indexed" # opt-in support for %0, %1, ...
+```
+
 Mixed-format projects use profiles:
 
 ```yaml
@@ -181,9 +191,10 @@ Key settings:
 | `target_project_root` | Repository that contains the localization files. |
 | `input_folder` | Localization folder, absolute or relative to `target_project_root`. |
 | `localization_format` | Built-in format id for single-format projects. |
-| `localization_layout` | `suffix`, `locale_directory`, or `locale_filename`. |
+| `localization_layout` | `suffix`, `locale_directory`, or `locale_filename`; suffix layouts optionally accept `base_name`. |
 | `localization_formats` | Profile list for mixed-format projects. |
 | `translation_source` | `git` or `transifex`. New projects usually start with `git`. |
+| `placeholder_profile` | `standard` by default; use `java-indexed` for `%0`, `%1`, ... runtime tokens. |
 | `model_provider` | `aisuite` by default; `openai_compatible` is the direct SDK fallback. |
 | `model_name`, `review_model_name` | Translation and review models. |
 | `review_reasoning_effort` | Optional reasoning effort for the holistic review model. |
@@ -218,7 +229,7 @@ localize validate --config config.yaml
 localize run --dry-run --config config.yaml
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.8
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.9
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
@@ -238,7 +249,7 @@ Full guide: [docs/localization-cli.md](docs/localization-cli.md).
 To onboard another repository without hand-copying files, run:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.8
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.9
 ```
 
 The command refuses dirty worktrees, creates a `localize/onboarding` branch, and
@@ -320,7 +331,7 @@ matches only.
 Pin a tagged release for production workflows once tags are available:
 
 ```yaml
-- uses: bisq-network/localize-pipeline@v0.1.8
+- uses: bisq-network/localize-pipeline@v0.1.9
 ```
 
 Use `@main` only when you intentionally want the latest unreleased changes.
