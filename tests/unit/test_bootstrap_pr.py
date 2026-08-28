@@ -66,7 +66,7 @@ def test_bootstrap_pr_creates_onboarding_branch_commit_and_files(tmp_path):
     workflow = (repo / ".github/workflows/translate.yml").read_text(encoding="utf-8")
     assert "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5" in workflow
     assert "actions/checkout@v4" not in workflow
-    assert "bisq-network/localize-pipeline@v0.1.14" in workflow
+    assert "bisq-network/localize-pipeline@v0.1.15" in workflow
     assert "dry-run: true" in workflow
 
     glossary = yaml.safe_load((repo / "glossary.json").read_text(encoding="utf-8"))

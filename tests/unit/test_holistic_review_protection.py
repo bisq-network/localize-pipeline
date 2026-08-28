@@ -196,7 +196,7 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content=json.dumps({"key1": "Hallo {0}"})
+                    content=json.dumps({"review_item_0001": "Hallo {0}"})
                 )
             )
         ]
@@ -240,6 +240,7 @@ async def test_holistic_review_uses_compatible_completion_token_limit():
     assert kwargs["response_format"] == {"type": "json_object"}
     assert [message["role"] for message in kwargs["messages"]] == ["system", "user"]
     assert "Return a JSON object" in kwargs["messages"][1]["content"]
+    assert "review_item_0001" in kwargs["messages"][0]["content"]
     assert "max_tokens" not in kwargs
     assert "max_completion_tokens" not in kwargs
 
@@ -251,7 +252,7 @@ async def test_holistic_review_restores_source_side_protection_tokens():
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content=json.dumps({"key1": "Hallo __PH_source__"})
+                    content=json.dumps({"review_item_0001": "Hallo __PH_source__"})
                 )
             )
         ]
@@ -285,12 +286,127 @@ async def test_holistic_review_restores_source_side_protection_tokens():
 
 
 @pytest.mark.asyncio
+async def test_holistic_review_accepts_logical_newlines_in_keys():
+    """Java character escapes can decode to newlines in logical keys."""
+    logical_key = "Line one\nLine two"
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"review_item_0001": "Zeile eins\nZeile zwei"})
+                )
+            )
+        ]
+    )
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.is_retryable_error.return_value = False
+
+    with (
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
+        patch("localize.translate_localization_files._handle_retry", AsyncMock(return_value=False)),
+    ):
+        result = await holistic_review_async(
+            source_content="Line one\\nLine two=Line one\\nLine two",
+            translated_content="Line one\\nLine two=Zeile eins\\nZeile zwei",
+            target_language="German",
+            keys_to_review=[logical_key],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {logical_key: "Zeile eins\nZeile zwei"}
+
+
+@pytest.mark.asyncio
+async def test_holistic_review_uses_opaque_ids_for_escaped_java_keys():
+    """Reviewer output never has to reproduce escaped or multiline source keys."""
+    logical_key = "Line one\nLine two"
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"review_item_0001": "Zeile eins\nZeile zwei"})
+                )
+            )
+        ]
+    )
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=response)
+    provider.is_retryable_error.return_value = False
+
+    with (
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
+        patch("localize.translate_localization_files._handle_retry", AsyncMock(return_value=False)),
+    ):
+        result = await holistic_review_async(
+            source_content="Line one\\nLine two=Line one\\nLine two",
+            translated_content="Line one\\nLine two=Zeile eins\\nZeile zwei",
+            target_language="German",
+            keys_to_review=[logical_key],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {logical_key: "Zeile eins\nZeile zwei"}
+    system_prompt = provider.create_chat_completion.await_args.kwargs["messages"][0]["content"]
+    assert "review_item_0001" in system_prompt
+    assert "Line one\\nLine two" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_holistic_review_retries_until_response_has_exact_requested_keys():
+    """A review is complete only when it returns every requested key and no others."""
+    responses = [
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"original.key": "Falsch"}))
+                )
+            ]
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"review_item_0001": "Richtig"}))
+                )
+            ]
+        ),
+    ]
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=responses)
+    provider.is_retryable_error.return_value = False
+
+    with (
+        patch("localize.translate_localization_files.DRY_RUN", False),
+        patch("localize.translate_localization_files.MODEL_PROVIDER", provider),
+        patch("localize.translate_localization_files._handle_retry", AsyncMock(return_value=True)),
+    ):
+        result = await holistic_review_async(
+            source_content="original.key=Original",
+            translated_content="original.key=Entwurf",
+            target_language="German",
+            keys_to_review=["original.key"],
+            semaphore=asyncio.Semaphore(1),
+            rate_limiter=_NullAsyncContext(),
+            style_rules_text="",
+        )
+
+    assert result == {"original.key": "Richtig"}
+    assert provider.create_chat_completion.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_holistic_review_omits_json_mode_when_provider_does_not_support_it():
     response = SimpleNamespace(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content='```json\n{"key1": "Hallo {0}"}\n```'
+                    content='```json\n{"review_item_0001": "Hallo {0}"}\n```'
                 )
             )
         ]
@@ -324,11 +440,14 @@ async def test_holistic_review_omits_json_mode_when_provider_does_not_support_it
 
 @pytest.mark.asyncio
 async def test_holistic_review_completion_limit_scales_with_chunk_size():
+    keys = [f"key{i}" for i in range(40)]
+    reviewed = {f"review_item_{i + 1:04d}": f"Wert {i}" for i in range(len(keys))}
+    expected = {key: f"Wert {i}" for i, key in enumerate(keys)}
     response = SimpleNamespace(
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content=json.dumps({"key0": "Wert 0"})
+                    content=json.dumps(reviewed)
                 )
             )
         ]
@@ -336,7 +455,6 @@ async def test_holistic_review_completion_limit_scales_with_chunk_size():
     provider = MagicMock()
     provider.create_chat_completion = AsyncMock(return_value=response)
     provider.is_retryable_error.return_value = False
-    keys = [f"key{i}" for i in range(40)]
 
     with (
         patch("localize.translate_localization_files.DRY_RUN", False),
@@ -352,7 +470,7 @@ async def test_holistic_review_completion_limit_scales_with_chunk_size():
             style_rules_text="",
         )
 
-    assert result == {"key0": "Wert 0"}
+    assert result == expected
     kwargs = provider.create_chat_completion.await_args.kwargs
     assert kwargs["completion_token_limit"] > 8192
 
@@ -366,7 +484,7 @@ async def test_holistic_review_retries_empty_content_without_name_error():
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
-                    content=json.dumps({"key1": "Hallo"})
+                    content=json.dumps({"review_item_0001": "Hallo"})
                 )
             )
         ]

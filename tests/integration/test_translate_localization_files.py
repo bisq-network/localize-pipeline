@@ -311,6 +311,47 @@ async def test_failed_model_translation_marks_ledger_and_skips_memory(integratio
 
 
 @pytest.mark.asyncio
+async def test_failed_holistic_review_marks_keys_failed(integration_test_environment):
+    """A draft is not a successful two-pass translation when review failed."""
+    env = integration_test_environment
+    source_file_path = os.path.join(env['input_folder'], 'app.properties')
+    target_file_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+    ledger_path = os.path.join(env['input_folder'], 'ledger.json')
+    validation_summary = {}
+
+    with open(source_file_path, 'w', encoding='utf-8') as f:
+        f.write("key.review=Needs review\n")
+    with open(target_file_path, 'w', encoding='utf-8') as f:
+        f.write("")
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Braucht Prüfung"))]
+    ))
+    provider.count_tokens.side_effect = lambda text, model: len(text.split())
+    provider.estimate_run_cost.return_value = MagicMock()
+    provider.format_estimate.return_value = "estimate"
+    provider.is_retryable_error.return_value = False
+
+    with patch('localize.translate_localization_files.MODEL_PROVIDER', provider), \
+         patch('localize.translate_localization_files.TRANSLATION_KEY_LEDGER_FILE_PATH', ledger_path), \
+         patch('localize.translate_localization_files.get_working_tree_changed_keys', return_value=set()), \
+         patch('localize.translate_localization_files.holistic_review_async', new_callable=AsyncMock) as review:
+        review.return_value = None
+        await localize.translate_localization_files.process_translation_queue(
+            translation_queue_folder=env['translation_queue_folder'],
+            translated_queue_folder=env['translated_queue_folder'],
+            glossary_file_path=env['mock_glossary_path_resolved'],
+            validation_summary=validation_summary,
+        )
+
+    ledger = localize.translate_localization_files.load_translation_key_ledger(ledger_path)
+    assert ledger["app_de.properties"]["key.review"]["status"] == "failed"
+    assert validation_summary["app_de.properties"]["model_translation_failed_count"] == 1
+    assert validation_summary["app_de.properties"]["model_translation_failed_keys"] == ["key.review"]
+
+
+@pytest.mark.asyncio
 async def test_key_ledger_preserves_full_file_baseline_after_partial_translation(integration_test_environment):
     env = integration_test_environment
     source_file_path = os.path.join(env['input_folder'], 'app.properties')

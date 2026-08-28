@@ -7,6 +7,23 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.15] - 2026-08-28
+
+### Fixed
+
+- Address holistic-review entries by opaque item IDs, preventing models from
+  translating, normalizing, or corrupting natural-language localization keys.
+- Retry non-empty holistic-review responses that omit requested item IDs or
+  return out-of-scope IDs instead of silently keeping draft values.
+- Mark every key in an exhausted holistic-review chunk as failed, so ledgers
+  retry it and the quality gate cannot silently accept a one-pass fallback.
+- Accept logical localization keys containing decoded Java character escapes;
+  reviewer responses no longer need to reproduce their serialized spelling.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.15`.
+
 ## [0.1.14] - 2026-08-28
 
 ### Added
