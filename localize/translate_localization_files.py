@@ -86,10 +86,7 @@ logger = logging.getLogger("translation_script")
 # This ensures that the AI returns a dictionary where every value is a string.
 LOCALIZATION_SCHEMA = {
     "type": "object",
-    "patternProperties": {
-        "^.*$": {"type": "string"}
-    },
-    "additionalProperties": False
+    "additionalProperties": {"type": "string"},
 }
 
 # Extract configuration values for convenience
@@ -1506,7 +1503,11 @@ def _build_holistic_review_system_prompt(
         translation_glossary_enforcement: str = "exact",
 ) -> str:
     """Builds the system prompt for the holistic review API call."""
-    keys_to_review_text = "\n".join([f"- {_display_translation_key(k)}" for k in keys_to_review])
+    review_items = _holistic_review_items(keys_to_review)
+    keys_to_review_text = "\n".join(
+        f'- "{item_id}" identifies source key "{_display_translation_key(key)}"'
+        for item_id, key in review_items.items()
+    )
     if translation_glossary_enforcement == "prompt-only":
         glossary_rules = "\n".join(
             f'- When the English source contains "{source_term}", use "{target_term}" '
@@ -1526,7 +1527,7 @@ def _build_holistic_review_system_prompt(
 You are a lead editor and quality assurance specialist for software localization. Your task is to review a list of newly translated keys within a {localization_format.display_name} file for {target_language}. You are given the full source and translated files for context, but you MUST only review and return the keys specified.
 
 **Critical Instructions**:
-1.  **Strictly Limited Scope**: You MUST only review and provide corrected translations for the following keys. Do NOT output any other keys in your final JSON.
+1.  **Strictly Limited Scope**: Review every item below. The left side is an opaque item ID; the right side is the source localization key used to find its values in the supplied files.
     ```
     {keys_to_review_text}
     ```
@@ -1538,7 +1539,7 @@ You are a lead editor and quality assurance specialist for software localization
 3.  **CRITICAL - Translate ALL Other Text**: You MUST ensure that ALL regular text (text that is NOT a placeholder token) is properly translated, even if it appears between, before, or after placeholder tokens. Do not leave any translatable text untranslated just because it is near placeholders.
 4.  **Apply All Quality Rules**: Meticulously apply the language-specific quality checklist to every key in your scope.
 5.  **Preserve Format Semantics**: Return plain translated string values. The system will serialize and escape values according to the target localization format. For Java `MessageFormat` strings, return single quotes (') as literal characters; the system handles required escaping.
-6.  **Output JSON Only**: Your final output **must** be a single, valid JSON object that adheres to the required schema. This object should contain ONLY the keys listed in the "Strictly Limited Scope" section above, with their final, corrected translations as the values.
+6.  **Output JSON Only**: Your final output **must** be a single, valid JSON object that adheres to the required schema. Return every opaque item ID listed in the "Strictly Limited Scope" section exactly once, with its final corrected translation as the value. JSON property names MUST be the opaque item IDs, never the source localization keys.
 7.  **Do Not Add Explanations**: Do not output any text, markdown, or explanations before or after the JSON object.
 
 {glossary_section}{style_rules_text}
@@ -1546,8 +1547,8 @@ You are a lead editor and quality assurance specialist for software localization
 **JSON Output Example**:
 ```json
 {{
-  "key.one": "Corrected translation for key one.",
-  "key.two": "Corrected translation for key two."
+  "review_item_0001": "Corrected translation for the first item.",
+  "review_item_0002": "Corrected translation for the second item."
 }}
 ```
 """
@@ -1612,6 +1613,39 @@ def _holistic_review_completion_token_limit(keys_to_review: List[str]) -> int:
     return max(8192, min(16384, len(keys_to_review) * 512))
 
 
+def _holistic_review_items(keys_to_review: List[str]) -> Dict[str, str]:
+    """Assign stable opaque response IDs so models never have to reproduce keys."""
+    return {
+        f"review_item_{index:04d}": key
+        for index, key in enumerate(keys_to_review, start=1)
+    }
+
+
+def _validate_holistic_review_response_keys(
+        parsed_json: Mapping[str, str],
+        keys_to_review: List[str],
+) -> None:
+    """Reject partial reviews and model-renamed or out-of-scope keys.
+
+    An empty object remains the established explicit "no corrections" response.
+    """
+    if not parsed_json:
+        return
+    expected_keys = set(keys_to_review)
+    actual_keys = set(parsed_json)
+    missing_keys = expected_keys - actual_keys
+    unexpected_keys = actual_keys - expected_keys
+    if missing_keys or unexpected_keys:
+        details = []
+        if missing_keys:
+            details.append(f"missing {len(missing_keys)} requested key(s)")
+        if unexpected_keys:
+            details.append(f"returned {len(unexpected_keys)} out-of-scope key(s)")
+        raise jsonschema.ValidationError(
+            "Holistic review key set mismatch: " + "; ".join(details),
+        )
+
+
 async def holistic_review_async(
         source_content: str,
         translated_content: str,
@@ -1651,6 +1685,7 @@ async def holistic_review_async(
     # Protect placeholders in both source and translated content before sending to AI
     protected_source, source_placeholder_map = protect_placeholders_in_properties(source_content)
     protected_translated, translated_placeholder_map = protect_placeholders_in_properties(translated_content)
+    review_items = _holistic_review_items(keys_to_review)
 
     logger.debug(f"Protected {len(source_placeholder_map)} placeholders in source content")
     logger.debug(f"Protected {len(translated_placeholder_map)} placeholders in translated content")
@@ -1707,6 +1742,7 @@ async def holistic_review_async(
                 # The response should be a JSON string. Parse and validate it.
                 parsed_json = loads_json_object(response_text)
                 jsonschema.validate(instance=parsed_json, schema=LOCALIZATION_SCHEMA)
+                _validate_holistic_review_response_keys(parsed_json, list(review_items))
 
                 # Debug: Check what AI returned before restoration
                 sample_ai_keys = list(parsed_json.keys())[:2]
@@ -1723,14 +1759,15 @@ async def holistic_review_async(
                     **translated_placeholder_map,
                 }
                 restored_json = {}
-                for key, value in parsed_json.items():
-                    restored_json[key] = restore_placeholders_in_properties(
+                for item_id, value in parsed_json.items():
+                    restored_json[review_items[item_id]] = restore_placeholders_in_properties(
                         value,
                         review_placeholder_map,
                     )
 
                 # Debug: Check restoration results
-                for sample_key in sample_ai_keys:
+                for sample_item_id in sample_ai_keys:
+                    sample_key = review_items[sample_item_id]
                     if sample_key in restored_json:
                         restored_value = restored_json[sample_key]
                         has_tokens = "__PH_" in restored_value
@@ -2665,6 +2702,7 @@ async def process_translation_queue(
                 return_exceptions=True,
             )
 
+            review_failed_keys = set()
             for i, (corrected_chunk, key_chunk) in enumerate(zip(review_results, key_chunks)):
                 if isinstance(corrected_chunk, Exception):
                     logger.error(
@@ -2673,6 +2711,7 @@ async def process_translation_queue(
                         translation_file,
                         exc_info=(type(corrected_chunk), corrected_chunk, corrected_chunk.__traceback__),
                     )
+                    review_failed_keys.update(key_chunk)
                     for key in key_chunk:
                         final_corrected_translations[key] = draft_translations.get(key, "")
                 elif corrected_chunk is not None:
@@ -2682,6 +2721,7 @@ async def process_translation_queue(
                             type(corrected_chunk).__name__,
                             i + 1,
                         )
+                        review_failed_keys.update(key_chunk)
                         for key in key_chunk:
                             final_corrected_translations[key] = draft_translations.get(key, "")
                         continue
@@ -2711,14 +2751,27 @@ async def process_translation_queue(
                                 len(dropped),
                             )
                         final_corrected_translations.update(scoped)
+                        missing = key_chunk_set - set(scoped)
+                        if missing:
+                            logger.warning(
+                                "Holistic review omitted %d key(s) from chunk %d; keeping draft values.",
+                                len(missing),
+                                i + 1,
+                            )
+                            review_failed_keys.update(missing)
+                            for key in missing:
+                                final_corrected_translations[key] = draft_translations.get(key, "")
                     else:
                         logger.info("Holistic review returned no corrections for this chunk; keeping draft values.")
                         for key in key_chunk:
                             final_corrected_translations[key] = draft_translations.get(key, "")
                 else:
                     logger.warning(f"Holistic review for chunk {i + 1} failed; keeping draft values for this chunk.")
+                    review_failed_keys.update(key_chunk)
                     for key in key_chunk:
                         final_corrected_translations[key] = draft_translations.get(key, "")
+
+            model_failed_keys.update(review_failed_keys)
 
             # Always apply the results from the review stage, which includes fallbacks to draft for failed chunks.
             logger.info("Applying corrected translations (including any draft fallbacks).")
