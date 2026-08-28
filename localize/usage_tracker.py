@@ -18,22 +18,32 @@ from typing import Any, Dict, Optional
 
 from localize.atomic_io import write_json_atomic
 
-# USD per 1,000,000 tokens. Verify against current OpenAI pricing before relying.
+# USD per 1,000,000 tokens. GPT-5.6 rates verified against OpenAI's model
+# documentation on 2026-08-28; Sol pricing is promotional through 2026-11-21.
 DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
     "gpt-5.6": {
-        "input": 5.00, "cached_input": 0.50, "cache_write": 6.25, "output": 30.00,
+        "input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     },
     "gpt-5.6-sol": {
-        "input": 5.00, "cached_input": 0.50, "cache_write": 6.25, "output": 30.00,
+        "input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     },
     "gpt-5.6-terra": {
-        "input": 2.50, "cached_input": 0.25, "cache_write": 3.125, "output": 15.00,
+        "input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 12.00,
         "long_context_threshold": 272_000,
         "long_context_input_multiplier": 2.0,
         "long_context_output_multiplier": 1.5,
     },
     "gpt-5.6-luna": {
-        "input": 1.00, "cached_input": 0.10, "cache_write": 1.25, "output": 6.00,
+        "input": 0.20, "cached_input": 0.02, "cache_write": 0.25, "output": 1.20,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
     },
     "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
     "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},

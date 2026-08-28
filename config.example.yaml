@@ -57,15 +57,15 @@ translation_source: "git"
 # --- Model / provider ---
 model_provider: "aisuite"           # Default AISuite-backed provider abstraction.
 model_name: "gpt-4o-mini"          # fast initial translation
-review_model_name: "gpt-4o"        # holistic review pass (set equal to model_name to save cost)
-# review_reasoning_effort: "none"   # reasoning-capable review models only
+review_model_name: "gpt-5.6-terra" # balanced holistic review pass
+review_reasoning_effort: "none"    # deterministic, low-latency review behavior
 
 # Optional semantic sidecar. If auto_apply_error_suggestions is true, only
 # error-level findings with concrete suggested_value are applied, and only after
 # deterministic placeholder/control-character checks pass.
 # semantic_review:
 #   enabled: true
-#   model: "gpt-4o"
+#   model: "gpt-5.4-mini"
 #   reasoning_effort: "none"        # reasoning-capable semantic models only
 #   auto_apply_error_suggestions: false
 
