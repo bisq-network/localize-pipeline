@@ -31,7 +31,7 @@ localize validate --config config.yaml
 localize run --config config.yaml --dry-run
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.11
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.12
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
@@ -119,7 +119,7 @@ Placeholder detection defaults to `standard`. Set
 Use `bootstrap-pr` when onboarding another repository:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.11
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.12
 ```
 
 The command refuses dirty worktrees, creates `localize/onboarding`, writes
@@ -141,7 +141,7 @@ For custom adapters:
 ```bash
 localize bootstrap-pr \
   --target-project-root path/to/repo \
-  --action-ref v0.1.11 \
+  --action-ref v0.1.12 \
   --plugin-module my_project.localize_adapter \
   --plugin-install-command "python -m pip install ."
 ```
