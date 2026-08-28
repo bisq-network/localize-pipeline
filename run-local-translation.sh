@@ -90,6 +90,16 @@ if [ -z "$TARGET_ROOT" ] || [ -z "$INPUT_FOLDER" ]; then
     exit 1
 fi
 
+# Match the Python loader: a relative target root is based at the config file,
+# then a relative input folder is based at the resolved target project root.
+CONFIG_BASE_DIR=$(cd "$(dirname "$CONFIG_FILE_PATH")" &>/dev/null && pwd)
+if [[ "$TARGET_ROOT" != /* ]]; then
+    TARGET_ROOT="$CONFIG_BASE_DIR/$TARGET_ROOT"
+fi
+if [[ "$INPUT_FOLDER" != /* ]]; then
+    INPUT_FOLDER="$TARGET_ROOT/$INPUT_FOLDER"
+fi
+
 if [ ! -d "$TARGET_ROOT" ] || [ ! -d "$INPUT_FOLDER" ]; then
     echo "[error] Target project root or input folder not found. Check paths in $CONFIG_FILE_PATH"
     echo "  - target_project_root: $TARGET_ROOT"
