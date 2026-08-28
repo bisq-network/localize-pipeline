@@ -158,6 +158,7 @@ def test_dockerignore_excludes_local_configs_and_agent_scratch():
 
 
 def test_dockerfile_rebuilds_transifex_cli_instead_of_using_vendor_binary():
+    """The image builds a pinned, auditable Transifex CLI from source."""
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
 
     assert "TX_SHA256" not in dockerfile
