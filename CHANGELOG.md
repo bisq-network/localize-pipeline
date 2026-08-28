@@ -7,6 +7,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.11] - 2026-08-28
+
+### Fixed
+
+- Resolve a relative `input_folder` against `target_project_root` in the local
+  runner preflight, matching the Python config loader and GitHub Action.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.11`.
+
 ## [0.1.10] - 2026-08-28
 
 ### Fixed
