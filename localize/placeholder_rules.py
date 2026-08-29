@@ -101,6 +101,13 @@ def extract_placeholder_tokens(text: str) -> Counter[str]:
     return Counter(match.group(0) for match in _active_pattern().finditer(text))
 
 
+def strip_placeholder_tokens(text: str) -> str:
+    """Remove tokens recognized by the active placeholder profile."""
+    if not isinstance(text, str):
+        raise ValueError("Input text must be a string.")
+    return _active_pattern().sub("", text)
+
+
 def protect_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
     """Replace detected placeholders with opaque tokens and return the mapping."""
     if not isinstance(text, str):

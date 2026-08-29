@@ -7,6 +7,18 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.16] - 2026-08-30
+
+### Fixed
+
+- Make semantic-remediation numeric checks use the active placeholder profile,
+  so opt-in Java-indexed `%N` placeholders are never mistaken for numeric
+  literals.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.16`.
+
 ## [0.1.15] - 2026-08-28
 
 ### Fixed

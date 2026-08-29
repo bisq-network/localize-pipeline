@@ -1,6 +1,7 @@
 import json
 
 from localize.localization_profiles import load_localization_profiles
+from localize.placeholder_rules import placeholder_profile
 from localize.semantic_remediation import apply_semantic_review_suggestions
 
 
@@ -61,6 +62,7 @@ def test_semantic_remediation_skips_suggestions_that_break_placeholders(tmp_path
 
 
 def test_semantic_remediation_rejects_source_absent_numeric_constraints(tmp_path):
+    """Suggested requirements may not introduce numbers absent from source."""
     resources = tmp_path / "resources"
     resources.mkdir()
     (resources / "messages.properties").write_text(
@@ -94,6 +96,43 @@ def test_semantic_remediation_rejects_source_absent_numeric_constraints(tmp_path
     assert target_path.read_text(encoding="utf-8") == (
         "validation.invalidAmount=Ungültiger Betrag\n"
     )
+
+
+def test_semantic_remediation_excludes_java_indexed_placeholders_from_numbers(tmp_path):
+    """Java placeholder indices must not authorize new literal numbers."""
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "messages.properties").write_text(
+        "path=Write to %0\n",
+        encoding="utf-8",
+    )
+    target_path = resources / "messages_ru.properties"
+    target_path.write_text("path=Записать в %0\n", encoding="utf-8")
+
+    with placeholder_profile("java-indexed"):
+        result = apply_semantic_review_suggestions(
+            repo_root=str(tmp_path),
+            input_folder=str(resources),
+            findings=[
+                {
+                    "file": "messages_ru.properties",
+                    "key": "path",
+                    "severity": "error",
+                    "suggested_value": "Записать в %0, код 0",
+                }
+            ],
+            locale_codes=["ru"],
+            localization_profiles=load_localization_profiles(
+                {"localization_format": "java_properties"}
+            ),
+            changed_identities={("messages_ru.properties", "path")},
+        )
+
+    assert result.applied_count == 0
+    assert result.skipped[0]["reason"] == (
+        "suggestion introduces numeric literals absent from source"
+    )
+    assert target_path.read_text(encoding="utf-8") == "path=Записать в %0\n"
 
 
 def test_semantic_remediation_allows_localized_source_numeric_literals(tmp_path):

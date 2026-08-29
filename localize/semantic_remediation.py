@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 
 from localize.localization_adapters import get_localization_adapter
 from localize.localization_profiles import LocalizationProfile
-from localize.placeholder_rules import PLACEHOLDER_PATTERN
+from localize.placeholder_rules import strip_placeholder_tokens
 from localize.translation_validator import (
     check_placeholder_parity,
     find_disallowed_control_characters,
@@ -106,6 +106,7 @@ def _matching_profile(
 
 
 def _skip(result: SemanticRemediationResult, finding: Mapping[str, Any], reason: str) -> None:
+    """Record one rejected remediation candidate with its concrete reason."""
     result.skipped.append({
         "file": str(finding.get("file", "")),
         "key": str(finding.get("key", "")),
@@ -114,7 +115,8 @@ def _skip(result: SemanticRemediationResult, finding: Mapping[str, Any], reason:
 
 
 def _numeric_literals(value: str) -> set[str]:
-    without_placeholders = PLACEHOLDER_PATTERN.sub("", value)
+    """Return normalized decimal literals outside active-profile placeholders."""
+    without_placeholders = strip_placeholder_tokens(value)
     return {
         "".join(str(unicodedata.decimal(character)) for character in match.group())
         for match in re.finditer(r"\d+", without_placeholders)
