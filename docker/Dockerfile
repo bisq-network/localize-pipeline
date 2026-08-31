@@ -47,6 +47,7 @@ FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930
 ARG TX_VERSION=1.6.17
 ARG TX_COMMIT=30dac142446db7bd1919894e9eb93545f58cc980
 ARG GO_GIT_VERSION=5.19.2
+ARG X_CRYPTO_VERSION=0.55.0
 ENV CGO_ENABLED=0
 
 WORKDIR /src/tx
@@ -54,12 +55,15 @@ RUN git clone --depth 1 --branch "v${TX_VERSION}" \
         https://github.com/transifex/cli.git . && \
     test "$(git rev-parse HEAD)" = "$TX_COMMIT" && \
     go get "github.com/go-git/go-git/v5@v${GO_GIT_VERSION}" && \
+    go get "golang.org/x/crypto@v${X_CRYPTO_VERSION}" && \
     go build -p=1 -trimpath \
         -ldflags="-s -w -X github.com/transifex/cli/internal/txlib.Version=v${TX_VERSION}" \
         -o /out/tx .
 RUN /out/tx --version && \
     go version -m /out/tx > /tmp/tx-buildinfo && \
     grep -E "github[.]com/go-git/go-git/v5[[:space:]]+v${GO_GIT_VERSION}([[:space:]]|$)" \
+        /tmp/tx-buildinfo && \
+    grep -E "golang[.]org/x/crypto[[:space:]]+v${X_CRYPTO_VERSION}([[:space:]]|$)" \
         /tmp/tx-buildinfo
 
 FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS gosu-builder
