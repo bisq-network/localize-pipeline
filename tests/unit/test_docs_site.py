@@ -67,6 +67,8 @@ def test_docs_homepage_is_packaged_for_github_pages():
     assert "battle-tested" in html
     assert "localize bootstrap-pr" in html
     assert "localize memory stats" in html
+    assert "Self-hosted PR Guardian" in html
+    assert "operator-owned review loop" in html
     assert "GitHub Action" in html
     assert "Java .properties" in html
     assert "JSON" in html
@@ -103,6 +105,7 @@ def test_docs_homepage_links_to_primary_guides():
     assert "new-project-deployment.md" in links
     assert "repository-structure.md" in links
     assert "adding-new-locales.md" in links
+    assert "guardian.md" in links
 
 
 def test_docs_homepage_internal_links_exist():

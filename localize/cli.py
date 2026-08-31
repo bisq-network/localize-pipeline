@@ -294,6 +294,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return init_config_main(list(args.init_args))
 
 
+def _cmd_guardian(args: argparse.Namespace) -> int:
+    """Delegate Guardian commands without importing its runtime for other CLIs."""
+
+    guardian_cli = importlib.import_module("localize.guardian.cli")
+    return int(guardian_cli.main(list(args.guardian_args)))
+
+
 def _cmd_bootstrap_pr(args: argparse.Namespace) -> int:
     try:
         result = create_bootstrap_pr(
@@ -554,6 +561,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     init_parser.set_defaults(func=_cmd_init, init_args=())
 
+    guardian_parser = subparsers.add_parser(
+        "guardian",
+        add_help=False,
+        help="Operate the optional, self-hosted review Guardian.",
+    )
+    guardian_parser.set_defaults(func=_cmd_guardian, guardian_args=())
+
     bootstrap_parser = subparsers.add_parser(
         "bootstrap-pr",
         help="Create an onboarding branch with config, glossary, and GitHub workflow.",
@@ -580,7 +594,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_parser.add_argument("--branch", default="localize/onboarding", help="Onboarding branch name.")
     bootstrap_parser.add_argument("--base-branch", default=None, help="Optional base branch to check out first.")
-    bootstrap_parser.add_argument("--action-ref", default="v0.1.16", help="Action ref to use in the generated workflow.")
+    bootstrap_parser.add_argument("--action-ref", default="v0.1.17", help="Action ref to use in the generated workflow.")
     bootstrap_parser.add_argument(
         "--onboarding-guide-file",
         default="docs/localize-pipeline.md",
@@ -685,9 +699,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, forwarded_args = parser.parse_known_args(command_argv)
     if args.command == "init":
         args.init_args = forwarded_args
+    elif args.command == "guardian":
+        if plugin_args:
+            parser.error("Guardian commands do not load translation plugins.")
+        args.guardian_args = forwarded_args
     elif forwarded_args:
         parser.error(f"unrecognized arguments: {' '.join(forwarded_args)}")
-    load_plugins(plugin_args)
+    if args.command != "guardian":
+        load_plugins(plugin_args)
     return int(args.func(args))
 
 

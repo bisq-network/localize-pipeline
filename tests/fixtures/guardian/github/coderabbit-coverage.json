@@ -1,0 +1,5 @@
+{
+  "reviewed": "## Walkthrough\nI reviewed the changed localization values and left two findings.",
+  "skipped": "## Review skipped\nToo many files! This pull request is over the review limit.",
+  "rate_limited": "## Review skipped\nReview limit reached; this review was rate limited."
+}

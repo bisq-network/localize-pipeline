@@ -1,0 +1,816 @@
+"""Production assembly tests for one Localize Guardian poll."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import os
+from pathlib import Path
+import stat
+from types import SimpleNamespace
+from typing import Iterator
+
+import httpx
+import pytest
+
+from localize.guardian.controller import PollOutcome
+from localize.guardian.credentials import CredentialError
+from localize.guardian.github import GitHubAuthenticationError
+from localize.guardian.models import (
+    AllowedHeadRepository,
+    CodexAuthMode,
+    ExactRepository,
+    GuardianConfig,
+    GuardianLimits,
+    GuardianMode,
+    GuardianRuntime,
+    PreventionPolicy,
+    RepositoryPolicy,
+    TrustedActor,
+)
+from localize.guardian.state import GuardianState
+from localize.guardian.workspace import ExactRevision
+from localize.guardian import runtime
+
+
+UTC = timezone.utc
+NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _stub_runtime_authority_for_assembly_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime,
+        "_validate_runtime_authority",
+        lambda _config, *, scheduled: None,
+    )
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+
+
+def _policy() -> RepositoryPolicy:
+    return RepositoryPolicy(
+        base_repo="acme/widgets",
+        base_repo_id=101,
+        base_branch="main",
+        allowed_pr_authors=(TrustedActor("translation-bot", 102, "Bot"),),
+        allowed_head_owners=(TrustedActor("contributor", 103, "User"),),
+        allowed_head_repositories=(
+            AllowedHeadRepository("contributor/widgets", 104),
+        ),
+        allowed_branch_globs=("localization/**",),
+        allowed_path_globs=("l10n/**",),
+        pipeline_config_path=".localize/config.yaml",
+        source_locale="en",
+        trusted_reviewers={"ru": (TrustedActor("reviewer", 105, "User"),)},
+        trusted_bots={},
+    )
+
+
+def _prevention_policy() -> PreventionPolicy:
+    return PreventionPolicy(
+        target_repository=ExactRepository("guardian/pipeline", 201),
+        target_base_branch="main",
+        push_repository=ExactRepository("guardian/pipeline", 201),
+        push_branch_prefix="guardian/prevention-",
+        allowed_code_path_globs=("localize/*.py",),
+        allowed_test_path_globs=("tests/**/*.py",),
+        focused_test_argv=(("venv/bin/pytest", "tests/unit/test_rule.py", "-q"),),
+        sandbox_argv_prefix=("/usr/bin/sandbox-exec", "-f", "/safe.sb"),
+        max_changed_files=4,
+        max_changed_bytes=16_384,
+    )
+
+
+def _config(mode: GuardianMode = GuardianMode.OBSERVE) -> GuardianConfig:
+    policy = _policy()
+    if mode is GuardianMode.PROPOSE_PREVENTION:
+        policy = replace(policy, prevention=_prevention_policy())
+    return GuardianConfig(
+        repositories=(policy,),
+        mode=mode,
+        limits=GuardianLimits(
+            run_timeout_seconds=240,
+            max_attempts=2,
+            daily_cost_limit_usd=5,
+            model_call_reservation_usd=5,
+        ),
+        runtime=GuardianRuntime(
+            codex_model="gpt-test",
+            codex_reasoning_effort="high",
+            codex_auth_mode=CodexAuthMode.API_KEY,
+            codex_executable="/opt/bin/codex",
+            git_executable="/opt/bin/git",
+            signing_program="/opt/bin/gpg",
+            github_token_command=("/opt/bin/github-token", "read"),
+            codex_api_key_command=("/opt/bin/model-token", "read"),
+            signing_key="A" * 40,
+        ),
+    )
+
+
+def _write_minimal_config(path: Path) -> None:
+    path.write_text(
+        """mode: observe
+repositories:
+  - base_repo: acme/widgets
+    base_repo_id: 101
+    base_branch: main
+    allowed_pr_authors:
+      - {login: translation-bot, id: 102, type: Bot}
+    allowed_head_owners:
+      - {login: contributor, id: 103, type: User}
+    allowed_head_repositories:
+      - {full_name: contributor/widgets, id: 104}
+    allowed_branch_globs: [localization/**]
+    allowed_path_globs: [l10n/**]
+    pipeline_config_path: .localize/config.yaml
+    source_locale: en
+    trusted_reviewers:
+      ru:
+        - {login: reviewer, id: 105, type: User}
+    trusted_bots: {}
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+def test_subscription_codex_home_must_be_private_file_backed_and_non_symlinked(
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    auth_file = codex_home / "auth.json"
+    auth_file.write_text('{"tokens":"redacted-test-value"}', encoding="utf-8")
+    auth_file.chmod(0o600)
+    config = replace(
+        _config(),
+        runtime=replace(
+            _config().runtime,
+            codex_auth_mode=CodexAuthMode.CHATGPT,
+            codex_home=str(codex_home),
+            codex_api_key_command=(),
+        ),
+    )
+
+    assert runtime._validate_subscription_codex_home(config) == codex_home
+
+    auth_file.chmod(0o644)
+    with pytest.raises(runtime.GuardianRuntimeError, match="authentication"):
+        runtime._validate_subscription_codex_home(config)
+
+    auth_file.chmod(0o600)
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(codex_home, target_is_directory=True)
+    linked_config = replace(
+        config,
+        runtime=replace(config.runtime, codex_home=str(linked_home)),
+    )
+    with pytest.raises(runtime.GuardianRuntimeError, match="authentication"):
+        runtime._validate_subscription_codex_home(linked_config)
+
+
+def test_scheduled_executable_authority_is_rechecked_at_runtime(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(mode=0o700)
+    commands: list[str] = []
+    for name in ("codex", "git", "gpg", "github-token", "model-token"):
+        executable = bin_dir / name
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+        commands.append(str(executable))
+    config = replace(
+        _config(),
+        runtime=replace(
+            _config().runtime,
+            codex_executable=commands[0],
+            git_executable=commands[1],
+            signing_program=commands[2],
+            github_token_command=(commands[3],),
+            codex_api_key_command=(commands[4],),
+        ),
+    )
+
+    runtime._validate_scheduled_executables(config)
+
+    Path(commands[0]).chmod(0o722)
+    with pytest.raises(runtime.GuardianRuntimeError, match="executable authority"):
+        runtime._validate_scheduled_executables(config)
+
+
+def test_scheduled_signing_program_is_required_only_for_write_modes(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(mode=0o700)
+    commands: dict[str, str] = {}
+    for name in ("codex", "git", "github-token", "model-token"):
+        executable = bin_dir / name
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+        commands[name] = str(executable)
+    config = replace(
+        _config(),
+        runtime=replace(
+            _config().runtime,
+            codex_executable=commands["codex"],
+            git_executable=commands["git"],
+            signing_program="gpg",
+            github_token_command=(commands["github-token"],),
+            codex_api_key_command=(commands["model-token"],),
+        ),
+    )
+
+    runtime._validate_scheduled_executables(config)
+
+    write_config = replace(config, mode=GuardianMode.APPLY_OWNED_TRANSLATIONS)
+    with pytest.raises(runtime.GuardianRuntimeError, match="executable authority"):
+        runtime._validate_scheduled_executables(write_config)
+
+
+class _Credential:
+    def __init__(self, secret: str) -> None:
+        self.secret = secret
+        self.calls = 0
+
+    def read(self) -> str:
+        self.calls += 1
+        return self.secret
+
+
+def test_authenticated_snapshot_provider_uses_reader_and_passes_all_previous_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = _Credential("github-secret")
+    previous = (
+        SimpleNamespace(source_id="11"),
+        SimpleNamespace(source_id="12"),
+    )
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+
+    class FakeReader:
+        def __init__(self, client: httpx.Client, policy: object) -> None:
+            observed["policy"] = policy
+            observed["response"] = client.get("/probe").json()
+
+        def collect_open_pull_requests(self, *, previous_feedback: object) -> tuple[str]:
+            observed["previous"] = previous_feedback
+            return ("snapshot",)
+
+    monkeypatch.setattr(runtime, "GitHubReader", FakeReader)
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=credential,  # type: ignore[arg-type]
+        transport=transport,
+    )
+
+    result = provider(_policy(), previous)  # type: ignore[arg-type]
+
+    assert result == ("snapshot",)
+    assert credential.calls == 1
+    assert observed["authorization"] == "Bearer github-secret"
+    assert observed["previous"] is previous
+    assert observed["response"] == {"ok": True}
+    assert observed["policy"].repository == "acme/widgets"  # type: ignore[union-attr]
+
+
+def test_authenticated_snapshot_provider_classifies_credential_failure() -> None:
+    class FailingCredential:
+        def read(self) -> str:
+            raise CredentialError("secret-bearing helper diagnostic")
+
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=FailingCredential(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(GitHubAuthenticationError) as raised:
+        provider(_policy(), ())
+
+    assert "secret-bearing" not in str(raised.value)
+
+
+def test_build_controller_wires_exact_runtime_policy_and_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config()
+    captured: dict[str, object] = {}
+
+    def git_environment() -> dict[str, str]:
+        return {"GIT_ASKPASS": "/private/helper"}
+
+    github_credential = SimpleNamespace(argv=config.runtime.github_token_command)
+    model_credential = SimpleNamespace(argv=config.runtime.codex_api_key_command)
+
+    class FakeCodexDriver:
+        def __init__(self, **kwargs: object) -> None:
+            captured["codex"] = kwargs
+            self.model = str(kwargs["model"])
+
+    class FakeController:
+        def __init__(self, **kwargs: object) -> None:
+            captured["controller"] = kwargs
+
+    monkeypatch.setattr(runtime, "CodexDriver", FakeCodexDriver)
+    monkeypatch.setattr(runtime, "GuardianController", FakeController)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **kwargs: captured.setdefault("snapshot", kwargs) or object(),
+    )
+    def resolve_model_key(helper: object) -> str:
+        captured["model_helper"] = helper
+        return "model-secret"
+
+    monkeypatch.setattr(runtime, "resolve_model_api_key", resolve_model_key)
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=github_credential,  # type: ignore[arg-type]
+        model_credential=model_credential,  # type: ignore[arg-type]
+        git_environment=git_environment,
+    )
+
+    assert isinstance(controller, FakeController)
+    assert captured["codex"] == {
+        "model": "gpt-test",
+        "reasoning_effort": "high",
+        "auth_mode": CodexAuthMode.API_KEY,
+        "codex_home": "~/.local/share/localize-guardian/codex",
+        "executable": "/opt/bin/codex",
+        "timeout_seconds": 120.0,
+        "max_attempts": 2,
+    }
+    controller_kwargs = captured["controller"]
+    assert controller_kwargs["snapshot_provider"] is captured["snapshot"]
+    assert controller_kwargs["write_broker_factory"] is None
+    assert controller_kwargs["prevention_runner"] is None
+    assert controller_kwargs["publish_credential_environment"] is git_environment
+    assert controller_kwargs["evidence_root"] == tmp_path / "evidence"
+    assert controller_kwargs["github_host"] == "github.com"
+    assert controller_kwargs["signing_key"] == "A" * 40
+
+    assert controller_kwargs["model_credential_provider"]() == "model-secret"
+    assert captured["model_helper"] is model_credential
+
+    revision = ExactRevision(
+        host="github.com",
+        owner="acme",
+        repository="widgets",
+        ref="refs/heads/main",
+        sha="a" * 40,
+    )
+    sentinel = object()
+    materialize = pytest.MonkeyPatch()
+    try:
+        materialize.setattr(
+            runtime,
+            "materialize_exact_checkout",
+            lambda incoming, **kwargs: (
+                captured.update(checkout_revision=incoming, checkout_kwargs=kwargs)
+                or sentinel
+            ),
+        )
+        assert controller_kwargs["checkout_factory"](revision) is sentinel
+    finally:
+        materialize.undo()
+    assert captured["checkout_revision"] == revision
+    assert captured["checkout_kwargs"] == {
+        "credential_environment": git_environment,
+        "git_binary": "/opt/bin/git",
+        "signing_program": "/opt/bin/gpg",
+        "timeout_seconds": 120.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "mode,write_enabled",
+    [
+        (GuardianMode.OBSERVE, False),
+        (GuardianMode.PREPARE, False),
+        (GuardianMode.APPLY_OWNED_TRANSLATIONS, True),
+        (GuardianMode.PROPOSE_PREVENTION, True),
+    ],
+)
+def test_write_broker_exists_only_for_write_modes(
+    mode: GuardianMode,
+    write_enabled: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x"))
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "GitHubWriteBroker",
+        lambda **kwargs: captured.setdefault("broker", kwargs) or object(),
+    )
+    config = _config(mode)
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+    )
+
+    factory = controller["write_broker_factory"]
+    assert (factory is not None) is write_enabled
+    if factory is not None:
+        broker = factory(_policy())
+        assert broker is captured["broker"]
+        assert captured["broker"]["base_url"] == "https://api.github.com"
+        assert captured["broker"]["token_command"] == (
+            "/opt/bin/github-token",
+            "read",
+        )
+
+
+def test_propose_mode_wires_credential_separated_prevention_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    config = _config(GuardianMode.PROPOSE_PREVENTION)
+    state = SimpleNamespace()
+
+    def git_environment() -> dict[str, str]:
+        return {"GIT_ASKPASS": "/private/helper"}
+
+    monkeypatch.setattr(
+        runtime,
+        "CodexDriver",
+        lambda **_kwargs: SimpleNamespace(model="assessment-model"),
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "PreventionCodexAuthor",
+        lambda **kwargs: captured.setdefault("author", kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "SandboxedTestRunner",
+        lambda **kwargs: captured.setdefault("test_runner", kwargs) or object(),
+    )
+    coordinator = object()
+
+    def fake_coordinator(**kwargs: object) -> object:
+        captured["coordinator"] = kwargs
+        return coordinator
+
+    monkeypatch.setattr(runtime, "PreventionCoordinator", fake_coordinator)
+    monkeypatch.setattr(
+        runtime,
+        "PreventionGitHubBroker",
+        lambda **kwargs: captured.setdefault("prevention_broker", kwargs) or object(),
+    )
+
+    controller = runtime._build_controller(
+        config=config,
+        state=state,  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(
+            argv=config.runtime.github_token_command
+        ),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=git_environment,
+    )
+
+    assert controller["prevention_runner"] is coordinator
+    assert captured["author"] == {
+        "model": "gpt-test",
+        "reasoning_effort": "high",
+        "auth_mode": CodexAuthMode.API_KEY,
+        "codex_home": "~/.local/share/localize-guardian/codex",
+        "executable": "/opt/bin/codex",
+        "timeout_seconds": 120.0,
+        "max_attempts": 2,
+    }
+    assert captured["test_runner"] == {"timeout_seconds": 120.0}
+    coordinator_kwargs = captured["coordinator"]
+    assert coordinator_kwargs["state"] is state
+    assert coordinator_kwargs["publish_credential_environment"] is git_environment
+    assert coordinator_kwargs["signing_key"] == "A" * 40
+    assert coordinator_kwargs["max_drafts"] == 1
+    assert coordinator_kwargs["max_model_calls_per_day"] == 2
+    assert coordinator_kwargs["api_billed"] is True
+    assert coordinator_kwargs["temporary_root"] == tmp_path
+
+    prevention = config.repositories[0].prevention
+    assert prevention is not None
+    broker = coordinator_kwargs["broker_factory"](prevention)
+    assert broker is captured["prevention_broker"]
+    assert captured["prevention_broker"] == {
+        "policy": prevention,
+        "token_command": ("/opt/bin/github-token", "read"),
+        "github_host": "github.com",
+        "base_url": "https://api.github.com",
+        "timeout_seconds": 30.0,
+        "token_command_timeout": 30.0,
+    }
+
+
+def test_run_once_creates_private_state_and_uses_bounded_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    captured: dict[str, object] = {}
+
+    @contextmanager
+    def fake_git_environment(command: object, *, temporary_root: Path) -> Iterator[object]:
+        captured["github_command"] = command
+        captured["temporary_root"] = temporary_root
+        yield lambda: {"GIT_ASKPASS": "/private/helper"}
+
+    class FakeController:
+        def poll_once(self) -> PollOutcome:
+            captured["polled"] = True
+            return PollOutcome(lease_acquired=True, repositories_polled=1)
+
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_git_environment)
+    monkeypatch.setattr(
+        runtime,
+        "_build_controller",
+        lambda **kwargs: captured.setdefault("controller_kwargs", kwargs)
+        and FakeController(),
+    )
+
+    result = runtime.run_once(config_path=config_path)
+
+    state_directory = tmp_path / ".guardian"
+    state_path = state_directory / "state.sqlite3"
+    assert result == 0
+    assert captured["polled"] is True
+    assert captured["temporary_root"] == state_directory
+    assert captured["github_command"].argv == ("gh", "auth", "token")
+    assert _mode(state_directory) == 0o700
+    assert _mode(state_path) == 0o600
+
+
+def test_scheduled_run_skips_after_failed_attempt_on_same_day_but_manual_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    state_path = state_directory / "state.sqlite3"
+    with GuardianState(state_path) as state:
+        state.record_health(
+            component="guardian-poll-attempt",
+            status="attempted",
+            message="attempt",
+            checked_at=NOW - timedelta(hours=1),
+        )
+
+    calls = 0
+
+    class FakeController:
+        def poll_once(self) -> PollOutcome:
+            nonlocal calls
+            calls += 1
+            return PollOutcome(lease_acquired=True)
+
+    @contextmanager
+    def fake_credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    assert calls == 0
+    assert runtime.run_once(config_path=config_path, scheduled=False) == 0
+    assert calls == 1
+
+
+def test_scheduled_run_catches_up_when_last_attempt_was_previous_local_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    with GuardianState(state_directory / "state.sqlite3") as state:
+        state.record_health(
+            component="guardian-poll-attempt",
+            status="attempted",
+            message="attempt",
+            checked_at=NOW - timedelta(days=1),
+        )
+
+    calls = 0
+
+    class FakeController:
+        def poll_once(self) -> PollOutcome:
+            nonlocal calls
+            calls += 1
+            return PollOutcome(lease_acquired=True)
+
+    @contextmanager
+    def fake_credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    assert calls == 1
+
+
+def test_failed_scheduled_poll_is_not_retried_until_manual_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    calls = 0
+
+    class FailingController:
+        def poll_once(self) -> PollOutcome:
+            nonlocal calls
+            calls += 1
+            return PollOutcome(
+                lease_acquired=True,
+                runs_failed=1,
+                failures=("safe-failure-type",),
+            )
+
+    @contextmanager
+    def fake_credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FailingController())
+
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 1
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    assert calls == 1
+    assert runtime.run_once(config_path=config_path, scheduled=False) == 1
+    assert calls == 2
+
+    with GuardianState(tmp_path / ".guardian/state.sqlite3") as state:
+        attempt = state.latest_health("guardian-poll-attempt")
+    assert attempt is not None
+    assert attempt.status == "attempted"
+    assert attempt.details == {"scheduled": False}
+
+
+def test_model_capacity_circuit_is_a_failed_runtime_outcome() -> None:
+    assert runtime._exit_code(
+        PollOutcome(lease_acquired=True, model_circuit_open=True)
+    ) == 1
+
+
+def test_scheduled_due_uses_local_day_instead_of_utc_day() -> None:
+    local_zone = timezone(timedelta(hours=14))
+    now = datetime(2026, 8, 30, 1, 0, tzinfo=local_zone)
+    # The UTC date is still August 29, but this success occurred at 00:30 on
+    # August 30 in the scheduler's local time zone.
+    attempt = datetime(2026, 8, 29, 10, 30, tzinfo=UTC)
+    state = SimpleNamespace(
+        latest_health=lambda _component: SimpleNamespace(
+            status="attempted",
+            checked_at=attempt,
+        )
+    )
+
+    assert runtime._scheduled_poll_is_due(state, now=now) is False
+
+
+def test_run_once_redacts_setup_and_poll_exception_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    secret = "never-print-this-token"
+
+    @contextmanager
+    def fake_credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    class FailingController:
+        def poll_once(self) -> PollOutcome:
+            raise RuntimeError(secret)
+
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FailingController())
+
+    with pytest.raises(runtime.GuardianRuntimeError) as error:
+        runtime.run_once(config_path=config_path)
+
+    assert secret not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+def test_run_once_rejects_invalid_config_without_echoing_untrusted_values(
+    tmp_path: Path,
+) -> None:
+    secret = "never-print-this-config-value"
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(
+        f"repositories: []\nunknown_secret: {secret}\n",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    with pytest.raises(runtime.GuardianRuntimeError) as error:
+        runtime.run_once(config_path=config_path)
+
+    assert secret not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+@pytest.mark.parametrize("unsafe_kind", ["group-writable", "symlink"])
+def test_runtime_rejects_untrusted_config_ancestor_paths(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir(mode=0o700)
+    if unsafe_kind == "symlink":
+        config_directory = tmp_path / "operator"
+        config_directory.symlink_to(trusted, target_is_directory=True)
+    else:
+        config_directory = trusted
+        config_directory.chmod(0o770)
+    config_path = config_directory / "guardian.yaml"
+    _write_minimal_config(config_path)
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="unsafe"):
+        runtime.run_once(config_path=config_path)
+
+    assert not (trusted / ".guardian").exists()
+
+
+def test_run_once_requires_explicit_signing_key_before_write_mode_setup(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "mode: observe",
+            "mode: apply-owned-translations",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="signing key"):
+        runtime.run_once(config_path=config_path)
+
+    assert not (tmp_path / ".guardian").exists()
+
+
+def test_run_once_rejects_symlinked_or_non_private_state_paths(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (tmp_path / ".guardian").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="private"):
+        runtime.run_once(config_path=config_path)
+
+    (tmp_path / ".guardian").unlink()
+    (tmp_path / ".guardian").mkdir(mode=0o755)
+    os.chmod(tmp_path / ".guardian", 0o755)
+    with pytest.raises(runtime.GuardianRuntimeError, match="private"):
+        runtime.run_once(config_path=config_path)

@@ -7,6 +7,24 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.17] - 2026-08-31
+
+### Added
+
+- Add Localize Guardian, an optional self-hosted review loop for operator-owned
+  localization pull requests with exact repository, actor, branch, path,
+  locale, and reviewer allowlists.
+- Add report-only, translation-application, and prevention-proposal modes with
+  bounded Codex execution, durable audit state, signed commits, and a local
+  launchd scheduler.
+
+### Changed
+
+- Use a dedicated ChatGPT-plan Codex login by default for Guardian assessments;
+  API-key billing is explicit opt-in and guarded by daily call and cost limits.
+- The default Guardian model is `gpt-5.6-terra` with `high` reasoning effort.
+- The default bootstrap action ref is now `v0.1.17`.
+
 ## [0.1.16] - 2026-08-30
 
 ### Fixed

@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:localize:guardian:result-schema:1",
+  "title": "Localize Guardian Codex result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "summary",
+    "feedback",
+    "recurrence_candidates"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "feedback": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/feedback_decision"
+      }
+    },
+    "recurrence_candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/recurrence_candidate"
+      }
+    }
+  },
+  "$defs": {
+    "replacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "key",
+        "expected_value",
+        "proposed_value"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "expected_value": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "proposed_value": {
+          "type": "string",
+          "maxLength": 100000
+        }
+      }
+    },
+    "feedback_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "apply"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "replacements": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "replacements": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ],
+      "required": [
+        "feedback_id",
+        "verdict",
+        "confidence",
+        "rationale",
+        "replacements"
+      ],
+      "properties": {
+        "feedback_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "verdict": {
+          "enum": [
+            "apply",
+            "reject",
+            "needs_human"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        },
+        "replacements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/replacement"
+          }
+        }
+      }
+    },
+    "recurrence_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "summary",
+        "evidence_feedback_ids"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "project_config",
+            "pipeline_code",
+            "documentation"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        },
+        "evidence_feedback_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      }
+    }
+  }
+}

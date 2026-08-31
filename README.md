@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.16
+      - uses: bisq-network/localize-pipeline@v0.1.17
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -230,11 +230,11 @@ localize validate --config config.yaml
 localize run --dry-run --config config.yaml
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.16
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.17
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
-Custom adapter modules can be loaded before any command:
+Custom adapter modules can be loaded before translation commands:
 
 ```bash
 localize --plugin my_project.localize_adapter formats
@@ -245,12 +245,46 @@ group, or users can set `LOCALIZE_PLUGIN_MODULES=module_a,module_b`.
 
 Full guide: [docs/localization-cli.md](docs/localization-cli.md).
 
+## Optional Self-Hosted PR Guardian
+
+[Localize Guardian](docs/guardian.md) is an optional post-PR review loop for
+operator-owned translation pull requests. It is self-hosted, not a service run
+by the Localize Pipeline maintainers: each operator supplies the machine,
+credentials, and reviewer/bot allowlists. By default it uses that operator's
+Codex access and ChatGPT plan allowance; metered API billing is opt-in.
+
+Start in report-only mode with the generic
+[Guardian policy example](examples/guardian.config.yaml):
+
+```bash
+localize guardian init --config "$HOME/.config/localize/guardian.yaml"
+localize guardian login --config "$HOME/.config/localize/guardian.yaml"
+localize guardian doctor --config "$HOME/.config/localize/guardian.yaml"
+localize guardian run --config "$HOME/.config/localize/guardian.yaml"
+localize guardian status --config "$HOME/.config/localize/guardian.yaml"
+```
+
+Authority is local and explicit, including immutable numeric repository and
+actor IDs, the exact target `base_branch`, owned head repositories/branches,
+paths, locales, and trusted reviewers or bots. The shipped Codex assessment
+default is `gpt-5.6-terra` with reasoning effort `high`. The dedicated Guardian
+login is kept outside monitored repositories; inherited API keys are not used
+in the default subscription mode.
+
+Guardian intentionally rejects `--plugin` and ignores
+`LOCALIZE_PLUGIN_MODULES` and adapter entry points, so project plugin code never
+runs inside its credential-bearing process. Keep its config and generated
+launchd files outside monitored repositories. The launchd wrapper starts at most
+one scheduled poll per local calendar day, whether it succeeds or fails;
+diagnose a failed scheduled attempt and retry it with an explicit manual
+`guardian run`.
+
 ## Bootstrap A Project PR
 
 To onboard another repository without hand-copying files, run:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.16
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.17
 ```
 
 The command refuses dirty worktrees, creates a `localize/onboarding` branch, and
@@ -332,7 +366,7 @@ matches only.
 Pin a tagged release for production workflows once tags are available:
 
 ```yaml
-- uses: bisq-network/localize-pipeline@v0.1.16
+- uses: bisq-network/localize-pipeline@v0.1.17
 ```
 
 Use `@main` only when you intentionally want the latest unreleased changes.

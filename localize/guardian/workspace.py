@@ -1,0 +1,1158 @@
+"""Ephemeral, exact-revision Git workspaces for Localize Guardian.
+
+It materializes an identity-bound remote ref, verifies the exact intake SHA,
+creates one narrowly scoped local commit, and can publish that exact descendant
+without overwriting an existing remote ref under a separately supplied credential.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import subprocess
+import tempfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
+
+from localize.guardian.signing import canonical_signing_key, signature_matches
+from localize.guardian.process import ProcessLimits, run_bounded_process
+
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$")
+_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_ENVIRONMENT_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FEEDBACK_FRAGMENT_RE = re.compile(
+    r"^(?:discussion_r|issuecomment-|pullrequestreview-)\d+$"
+)
+_FORBIDDEN_REF_CHARACTERS = frozenset(" ~^:?*[\\")
+_PROTECTED_ENVIRONMENT_KEYS = frozenset(
+    {
+        "GIT_ALLOW_PROTOCOL",
+        "GIT_ASKPASS_REQUIRE",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_PROTOCOL_FROM_USER",
+        "GIT_TERMINAL_PROMPT",
+        "HOME",
+        "PATH",
+    }
+)
+_SIGNING_ENVIRONMENT_KEYS = frozenset({"GNUPGHOME"})
+_DEFAULT_AUTHOR_NAME = "Localize Guardian"
+_DEFAULT_AUTHOR_EMAIL = "localize-guardian@users.noreply.github.com"
+_COMMIT_SUBJECT = "[localize-guardian] Apply review feedback"
+_PREVENTION_COMMIT_SUBJECT = "[localize-guardian] Prevent review recurrence"
+
+
+ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
+CredentialEnvironment = Callable[[], Mapping[str, str]]
+
+
+class WorkspaceError(RuntimeError):
+    """A checkout or commit failed a Guardian workspace invariant."""
+
+
+def _bounded_git_process(
+    argv: Sequence[str],
+    **kwargs: object,
+) -> subprocess.CompletedProcess[str]:
+    timeout = kwargs.get("timeout")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("bounded Git invocation requires a numeric timeout")
+    return run_bounded_process(
+        argv,
+        **kwargs,  # type: ignore[arg-type]
+        start_new_session=True,
+        limits=ProcessLimits.for_timeout(
+            timeout,
+            max_file_size_bytes=512 * 1024 * 1024,
+        ),
+    )
+
+
+def _validate_host(host: str) -> None:
+    if not isinstance(host, str) or len(host) > 253 or not host:
+        raise ValueError("host must be a valid DNS hostname")
+    labels = host.split(".")
+    if any(not _HOST_LABEL_RE.fullmatch(label) for label in labels):
+        raise ValueError("host must be a valid DNS hostname")
+
+
+def _validate_ref(ref: str) -> None:
+    prefix = "refs/heads/"
+    if not isinstance(ref, str) or not ref.startswith(prefix):
+        raise ValueError("ref must be a full refs/heads/... reference")
+    branch = ref[len(prefix) :]
+    if (
+        not branch
+        or branch == "@"
+        or branch.startswith("/")
+        or branch.endswith(("/", "."))
+        or "//" in branch
+        or ".." in branch
+        or "@{" in branch
+        or any(character in _FORBIDDEN_REF_CHARACTERS for character in branch)
+        or any(ord(character) < 32 or ord(character) == 127 for character in branch)
+    ):
+        raise ValueError("ref is not a canonical branch reference")
+    components = branch.split("/")
+    if any(component.startswith(".") or component.endswith(".lock") for component in components):
+        raise ValueError("ref is not a canonical branch reference")
+
+
+@dataclass(frozen=True, slots=True)
+class ExactRevision:
+    """An exact repository branch revision captured from trusted GitHub metadata."""
+
+    host: str
+    owner: str
+    repository: str
+    ref: str
+    sha: str
+
+    def __post_init__(self) -> None:
+        _validate_host(self.host)
+        if not isinstance(self.owner, str) or not _OWNER_RE.fullmatch(self.owner):
+            raise ValueError("owner must be a canonical GitHub owner")
+        if (
+            not isinstance(self.repository, str)
+            or not _IDENTIFIER_RE.fullmatch(self.repository)
+            or self.repository in {".", ".."}
+        ):
+            raise ValueError("repository must be a canonical GitHub repository name")
+        _validate_ref(self.ref)
+        if not isinstance(self.sha, str) or not _SHA_RE.fullmatch(self.sha):
+            raise ValueError("sha must be a full lowercase Git object ID")
+
+    @property
+    def remote_url(self) -> str:
+        return f"https://{self.host}/{self.owner}/{self.repository}.git"
+
+
+@dataclass(frozen=True, slots=True)
+class CommitResult:
+    """Verified output of a single Guardian translation commit."""
+
+    commit_sha: str
+    parent_sha: str
+    changed_paths: tuple[str, ...]
+    signature_verified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationResult:
+    """A remote branch update confirmed after a normal fast-forward push."""
+
+    ref: str
+    previous_sha: str
+    commit_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreventionPublicationResult:
+    """An exact signed candidate present on one new prevention branch."""
+
+    repository: str
+    ref: str
+    commit_sha: str
+    created: bool
+
+
+def _validated_remote_url(
+    revision: ExactRevision,
+    remote_url: str | None,
+    *,
+    allow_file_remote: bool,
+) -> str:
+    candidate = revision.remote_url if remote_url is None else remote_url
+    if not isinstance(candidate, str) or any(character in candidate for character in "\r\n\x00"):
+        raise ValueError("remote URL must be a single, non-empty URL")
+    parsed = urlsplit(candidate)
+    if parsed.query or parsed.fragment or parsed.username is not None or parsed.password is not None:
+        raise ValueError("remote URL must not contain credentials, query data, or fragments")
+    expected_path = f"/{revision.owner}/{revision.repository}.git"
+
+    if parsed.scheme == "https":
+        if parsed.hostname is None or parsed.hostname.lower() != revision.host.lower():
+            raise ValueError("remote URL host does not match repository identity")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("remote URL contains an invalid port") from exc
+        if port is not None or parsed.path != expected_path or parsed.netloc.lower() != revision.host.lower():
+            raise ValueError("remote URL does not match repository identity")
+        return candidate
+
+    if parsed.scheme == "file" and allow_file_remote:
+        if parsed.netloc not in {"", "localhost"} or "%" in parsed.path:
+            raise ValueError("local remote URL must be an unencoded absolute file URL")
+        local_path = Path(parsed.path)
+        if (
+            not local_path.is_absolute()
+            or local_path.name != f"{revision.repository}.git"
+            or local_path.parent.name != revision.owner
+        ):
+            raise ValueError("local remote URL does not match repository identity")
+        return candidate
+
+    raise ValueError("remote URL must use identity-bound HTTPS")
+
+
+def _base_environment(home: Path, *, allow_file_remote: bool) -> dict[str, str]:
+    environment = {
+        "GIT_ALLOW_PROTOCOL": "https:file" if allow_file_remote else "https",
+        "GIT_ASKPASS_REQUIRE": "force",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_PROTOCOL_FROM_USER": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": str(home),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": os.defpath,
+    }
+    temporary_directory = os.environ.get("TMPDIR")
+    if temporary_directory:
+        environment["TMPDIR"] = temporary_directory
+    return environment
+
+
+def _validated_environment(
+    values: Mapping[str, str],
+    *,
+    label: str,
+) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        raise WorkspaceError(f"{label} must return an environment mapping")
+    normalized: dict[str, str] = {}
+    for key, value in values.items():
+        if (
+            not isinstance(key, str)
+            or not _ENVIRONMENT_KEY_RE.fullmatch(key)
+            or key in _PROTECTED_ENVIRONMENT_KEYS
+            or (key != "GIT_ASKPASS" and not key.startswith("LOCALIZE_GUARDIAN_"))
+            or not isinstance(value, str)
+            or "\x00" in value
+        ):
+            raise WorkspaceError(f"{label} contains an unsafe entry")
+        normalized[key] = value
+    askpass = normalized.get("GIT_ASKPASS")
+    if askpass is not None:
+        askpass_path = Path(askpass)
+        try:
+            metadata = askpass_path.lstat()
+        except OSError as exc:
+            raise WorkspaceError(f"{label} contains an unusable askpass helper") from exc
+        if (
+            not askpass_path.is_absolute()
+            or stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or not os.access(askpass_path, os.X_OK)
+        ):
+            raise WorkspaceError(f"{label} contains an unusable askpass helper")
+    return normalized
+
+
+@dataclass(slots=True)
+class _GitRunner:
+    path: Path
+    environment: Mapping[str, str]
+    process_runner: ProcessRunner = field(repr=False)
+    git_binary: str = "git"
+    signing_program: str | None = None
+    timeout_seconds: float = 120.0
+
+    def run(
+        self,
+        arguments: Sequence[str],
+        *,
+        check: bool = True,
+        extra_environment: Mapping[str, str] | None = None,
+        input_text: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = dict(self.environment)
+        if extra_environment:
+            overlap = _PROTECTED_ENVIRONMENT_KEYS.intersection(extra_environment)
+            if overlap:
+                raise WorkspaceError("command environment cannot override Git security controls")
+            environment.update(extra_environment)
+        command = [
+            self.git_binary,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "credential.helper=",
+        ]
+        if self.signing_program is not None:
+            command.extend(("-c", f"gpg.program={self.signing_program}"))
+        command.extend(("-C", str(self.path), *arguments))
+        try:
+            completed = self.process_runner(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="surrogateescape",
+                env=environment,
+                input=input_text,
+                shell=False,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            operation = arguments[0] if arguments else "command"
+            raise WorkspaceError(f"git {operation} timed out") from exc
+        except OSError as exc:
+            operation = arguments[0] if arguments else "command"
+            raise WorkspaceError(f"git {operation} could not start") from exc
+        if check and completed.returncode != 0:
+            operation = arguments[0] if arguments else "command"
+            raise WorkspaceError(f"git {operation} failed with exit code {completed.returncode}")
+        return completed
+
+    def revision(self, expression: str) -> str:
+        value = self.run(("rev-parse", "--verify", expression)).stdout.strip()
+        if not _SHA_RE.fullmatch(value):
+            raise WorkspaceError("git returned a non-canonical object ID")
+        return value
+
+
+def _normalize_relative_path(raw_path: str) -> str:
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or "\\" in raw_path
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw_path)
+        or any(0xD800 <= ord(character) <= 0xDFFF for character in raw_path)
+    ):
+        raise ValueError("expected path must be a canonical repository-relative POSIX path")
+    path = PurePosixPath(raw_path)
+    if (
+        path.is_absolute()
+        or path.as_posix() != raw_path
+        or any(component in {"", ".", ".."} for component in path.parts)
+        or any(component.casefold() == ".git" for component in path.parts)
+    ):
+        raise ValueError("expected path must be a canonical repository-relative POSIX path")
+    return raw_path
+
+
+def _split_nul_paths(output: str) -> tuple[str, ...]:
+    if not output:
+        return ()
+    if not output.endswith("\x00"):
+        raise WorkspaceError("git returned malformed path data")
+    paths = output[:-1].split("\x00")
+    if any(not path for path in paths):
+        raise WorkspaceError("git returned malformed path data")
+    return tuple(paths)
+
+
+def _porcelain_status(runner: _GitRunner) -> tuple[tuple[str, str], ...]:
+    output = runner.run(
+        ("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+    ).stdout
+    if not output:
+        return ()
+    if not output.endswith("\x00"):
+        raise WorkspaceError("git returned malformed working-tree status")
+    records = output[:-1].split("\x00")
+    entries: list[tuple[str, str]] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        if len(record) < 4 or record[2] != " ":
+            raise WorkspaceError("git returned malformed working-tree status")
+        status_code = record[:2]
+        path = record[3:]
+        if "R" in status_code or "C" in status_code:
+            raise WorkspaceError("renamed or copied files are not valid Guardian edits")
+        entries.append((status_code, path))
+        index += 1
+    return tuple(entries)
+
+
+def _validate_regular_tracked_file(root: Path, runner: _GitRunner, relative_path: str) -> None:
+    current = root
+    for index, component in enumerate(PurePosixPath(relative_path).parts):
+        current = current / component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError as exc:
+            raise WorkspaceError(f"expected path is missing: {relative_path}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise WorkspaceError(f"expected path must not be a symbolic link: {relative_path}")
+        if index < len(PurePosixPath(relative_path).parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise WorkspaceError(f"expected path has a non-directory parent: {relative_path}")
+    if not stat.S_ISREG(current.lstat().st_mode):
+        raise WorkspaceError(f"expected path must be a regular file: {relative_path}")
+
+    root_resolved = root.resolve(strict=True)
+    try:
+        current.resolve(strict=True).relative_to(root_resolved)
+    except ValueError as exc:
+        raise WorkspaceError(f"expected path escapes the checkout: {relative_path}") from exc
+
+    index_entry = runner.run(("ls-files", "--stage", "-z", "--", relative_path)).stdout
+    records = _split_nul_paths(index_entry)
+    if len(records) != 1 or "\t" not in records[0]:
+        raise WorkspaceError(f"expected path is not one tracked file: {relative_path}")
+    metadata, indexed_path = records[0].split("\t", 1)
+    mode = metadata.split(" ", 1)[0]
+    if indexed_path != relative_path or mode not in {"100644", "100755"}:
+        raise WorkspaceError(f"expected path is not a tracked regular file: {relative_path}")
+
+
+def _validate_regular_candidate_file(
+    root: Path,
+    runner: _GitRunner,
+    relative_path: str,
+) -> bool:
+    """Validate a regular tracked or new file and return whether it is tracked."""
+
+    current = root
+    components = PurePosixPath(relative_path).parts
+    for index, component in enumerate(components):
+        current = current / component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError as exc:
+            raise WorkspaceError(f"expected path is missing: {relative_path}") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise WorkspaceError(
+                f"expected path must not be a symbolic link: {relative_path}"
+            )
+        if index < len(components) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise WorkspaceError(
+                f"expected path has a non-directory parent: {relative_path}"
+            )
+    metadata = current.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise WorkspaceError(
+            f"expected path must be one regular non-hard-linked file: {relative_path}"
+        )
+    try:
+        current.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except ValueError as exc:
+        raise WorkspaceError(f"expected path escapes the checkout: {relative_path}") from exc
+
+    indexed = runner.run(("ls-files", "--stage", "-z", "--", relative_path)).stdout
+    records = _split_nul_paths(indexed)
+    if not records:
+        return False
+    if len(records) != 1 or "\t" not in records[0]:
+        raise WorkspaceError(f"expected path has ambiguous index state: {relative_path}")
+    index_metadata, indexed_path = records[0].split("\t", 1)
+    mode = index_metadata.split(" ", 1)[0]
+    if indexed_path != relative_path or mode not in {"100644", "100755"}:
+        raise WorkspaceError(
+            f"expected path is not a tracked regular file: {relative_path}"
+        )
+    return True
+
+
+def _validate_feedback_urls(
+    revision: ExactRevision,
+    pull_number: int,
+    feedback_urls: Sequence[str],
+    *,
+    feedback_repository: str | None = None,
+) -> tuple[str, ...]:
+    if isinstance(pull_number, bool) or not isinstance(pull_number, int) or pull_number <= 0:
+        raise ValueError("pull_number must be a positive integer")
+    if not feedback_urls:
+        raise ValueError("at least one feedback URL is required")
+    if feedback_repository is None:
+        feedback_owner = revision.owner
+        feedback_name = revision.repository
+    else:
+        if not isinstance(feedback_repository, str) or feedback_repository.count("/") != 1:
+            raise ValueError("feedback_repository must use owner/name form")
+        feedback_owner, feedback_name = feedback_repository.split("/", 1)
+        if not _OWNER_RE.fullmatch(feedback_owner) or not _IDENTIFIER_RE.fullmatch(
+            feedback_name
+        ):
+            raise ValueError("feedback_repository must use owner/name form")
+    expected_paths = {
+        f"/{feedback_owner}/{feedback_name}/pull/{pull_number}",
+        f"/{feedback_owner}/{feedback_name}/issues/{pull_number}",
+    }
+    normalized: list[str] = []
+    for feedback_url in feedback_urls:
+        if not isinstance(feedback_url, str) or any(
+            character in feedback_url for character in "\r\n\x00"
+        ):
+            raise ValueError("feedback URLs must be canonical GitHub links")
+        parsed = urlsplit(feedback_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.hostname.lower() != revision.host.lower()
+            or parsed.netloc.lower() != revision.host.lower()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.path not in expected_paths
+            or not _FEEDBACK_FRAGMENT_RE.fullmatch(parsed.fragment)
+        ):
+            raise ValueError("feedback URL does not match the exact pull request")
+        normalized.append(feedback_url)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("feedback URLs must be unique")
+    return tuple(sorted(normalized))
+
+
+def _validate_identity_value(value: str, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip() or any(
+        character in value for character in "\r\n\x00"
+    ):
+        raise ValueError(f"{label} must be a non-empty single-line value")
+    return value
+
+
+def _signing_environment(values: Mapping[str, str] | None) -> dict[str, str]:
+    if values is None:
+        configured_home = os.environ.get("GNUPGHOME")
+        candidate = Path(configured_home) if configured_home else Path.home() / ".gnupg"
+        if not candidate.is_dir() or candidate.is_symlink():
+            return {}
+        return {"GNUPGHOME": str(candidate.resolve(strict=True))}
+    if not isinstance(values, Mapping) or any(
+        key not in _SIGNING_ENVIRONMENT_KEYS or not isinstance(value, str)
+        for key, value in values.items()
+    ):
+        raise ValueError("signing_environment may only set GNUPGHOME")
+    normalized = dict(values)
+    if "GNUPGHOME" in normalized:
+        home = Path(normalized["GNUPGHOME"])
+        if not home.is_absolute() or not home.is_dir() or home.is_symlink():
+            raise ValueError("GNUPGHOME must be an absolute, non-symlinked directory")
+        normalized["GNUPGHOME"] = str(home.resolve(strict=True))
+    return normalized
+
+
+def _verify_commit_signature(
+    runner: _GitRunner,
+    commit_sha: str,
+    *,
+    signing_key: str | None,
+    signing_environment: Mapping[str, str],
+) -> None:
+    completed = runner.run(
+        ("verify-commit", "--raw", commit_sha),
+        extra_environment=signing_environment,
+    )
+    if signing_key is not None and not signature_matches(
+        "\n".join((completed.stdout or "", completed.stderr or "")),
+        signing_key,
+    ):
+        raise WorkspaceError(
+            "verified commit signer does not match the configured fingerprint"
+        )
+
+
+@dataclass(slots=True)
+class GuardianWorkspace:
+    """One detached exact-SHA checkout owned by a temporary-directory context."""
+
+    path: Path
+    revision: ExactRevision
+    _runner: _GitRunner = field(repr=False)
+
+    @property
+    def original_sha(self) -> str:
+        return self.revision.sha
+
+    def commit_validated_changes(
+        self,
+        *,
+        expected_paths: Sequence[str],
+        pull_number: int,
+        feedback_urls: Sequence[str],
+        feedback_repository: str | None = None,
+        sign: bool = True,
+        signing_key: str | None = None,
+        signing_environment: Mapping[str, str] | None = None,
+        author_name: str = _DEFAULT_AUTHOR_NAME,
+        author_email: str = _DEFAULT_AUTHOR_EMAIL,
+    ) -> CommitResult:
+        """Commit exactly the already-validated files, then re-verify the commit."""
+        if not isinstance(sign, bool):
+            raise ValueError("sign must be a boolean")
+        if signing_key is not None:
+            signing_key = canonical_signing_key(signing_key)
+        if not sign and signing_environment is not None:
+            raise ValueError("signing_environment requires signed commits")
+        verified_signing_environment = _signing_environment(signing_environment) if sign else {}
+        author_name = _validate_identity_value(author_name, label="author_name")
+        author_email = _validate_identity_value(author_email, label="author_email")
+        normalized_paths = tuple(sorted(_normalize_relative_path(path) for path in expected_paths))
+        if not normalized_paths or len(set(normalized_paths)) != len(normalized_paths):
+            raise ValueError("expected_paths must contain unique changed files")
+        normalized_feedback = _validate_feedback_urls(
+            self.revision,
+            pull_number,
+            feedback_urls,
+            feedback_repository=feedback_repository,
+        )
+
+        if self._runner.revision("HEAD^{commit}") != self.original_sha:
+            raise WorkspaceError("checkout HEAD no longer matches the original exact SHA")
+        for relative_path in normalized_paths:
+            _validate_regular_tracked_file(self.path, self._runner, relative_path)
+
+        status_entries = _porcelain_status(self._runner)
+        if any(code[0] not in {" ", "?", "!"} for code, _path in status_entries):
+            raise WorkspaceError("pre-staged changes are not accepted by Guardian")
+        if (
+            any(code != " M" for code, _path in status_entries)
+            or tuple(sorted(path for _code, path in status_entries)) != normalized_paths
+        ):
+            raise WorkspaceError("unexpected working-tree changes are present")
+
+        self._runner.run(("add", "--", *normalized_paths))
+        staged_status = _porcelain_status(self._runner)
+        if (
+            any(code != "M " for code, _path in staged_status)
+            or tuple(sorted(path for _code, path in staged_status)) != normalized_paths
+        ):
+            raise WorkspaceError("working tree changed while Guardian staged its edit")
+        staged_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff",
+                            "--cached",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "HEAD",
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if staged_paths != normalized_paths:
+            raise WorkspaceError("staged paths do not match the exact Guardian allowlist")
+
+        message_lines = [
+            _COMMIT_SUBJECT,
+            "",
+            "Created by the Localize Guardian bot.",
+            "",
+            "Validated feedback:",
+            *(f"- {url}" for url in normalized_feedback),
+            "",
+        ]
+        command = ["commit", "--cleanup=verbatim", "--file=-"]
+        if sign:
+            command.append("-S" if signing_key is None else f"-S{signing_key}")
+        else:
+            command.append("--no-gpg-sign")
+        identity_environment = {
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_AUTHOR_NAME": author_name,
+            "GIT_COMMITTER_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": author_name,
+            **verified_signing_environment,
+        }
+        self._runner.run(
+            tuple(command),
+            extra_environment=identity_environment,
+            input_text="\n".join(message_lines),
+        )
+
+        commit_sha = self._runner.revision("HEAD^{commit}")
+        parent_sha = self._runner.revision("HEAD^1^{commit}")
+        if parent_sha != self.original_sha:
+            raise WorkspaceError("Guardian commit parent does not match the exact intake SHA")
+        changed_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff-tree",
+                            "--no-commit-id",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "-r",
+                            parent_sha,
+                            commit_sha,
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if changed_paths != normalized_paths:
+            raise WorkspaceError("Guardian commit changed paths outside the exact allowlist")
+        if sign:
+            _verify_commit_signature(
+                self._runner,
+                commit_sha,
+                signing_key=signing_key,
+                signing_environment=verified_signing_environment,
+            )
+        if _porcelain_status(self._runner):
+            raise WorkspaceError("working tree is not clean after the Guardian commit")
+        return CommitResult(
+            commit_sha=commit_sha,
+            parent_sha=parent_sha,
+            changed_paths=changed_paths,
+            signature_verified=sign,
+        )
+
+    def commit_prevention_changes(
+        self,
+        *,
+        expected_paths: Sequence[str],
+        evidence_hash: str,
+        signing_key: str | None = None,
+        signing_environment: Mapping[str, str] | None = None,
+        author_name: str = _DEFAULT_AUTHOR_NAME,
+        author_email: str = _DEFAULT_AUTHOR_EMAIL,
+    ) -> CommitResult:
+        """Sign one validated code-and-test candidate, including bounded new files."""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
+            raise ValueError("evidence_hash must be a lowercase SHA-256 digest")
+        if signing_key is not None:
+            signing_key = canonical_signing_key(signing_key)
+        verified_signing_environment = _signing_environment(signing_environment)
+        author_name = _validate_identity_value(author_name, label="author_name")
+        author_email = _validate_identity_value(author_email, label="author_email")
+        normalized_paths = tuple(
+            sorted(_normalize_relative_path(path) for path in expected_paths)
+        )
+        if not normalized_paths or len(set(normalized_paths)) != len(normalized_paths):
+            raise ValueError("expected_paths must contain unique changed files")
+        if self._runner.revision("HEAD^{commit}") != self.original_sha:
+            raise WorkspaceError("checkout HEAD no longer matches the original exact SHA")
+
+        tracked = {
+            path: _validate_regular_candidate_file(self.path, self._runner, path)
+            for path in normalized_paths
+        }
+        status_entries = _porcelain_status(self._runner)
+        if tuple(sorted(path for _code, path in status_entries)) != normalized_paths:
+            raise WorkspaceError("unexpected prevention working-tree changes are present")
+        for code, path in status_entries:
+            expected_code = " M" if tracked[path] else "??"
+            if code != expected_code:
+                raise WorkspaceError("prevention candidate has an unsupported file operation")
+
+        self._runner.run(("add", "--", *normalized_paths))
+        staged_status = _porcelain_status(self._runner)
+        if tuple(sorted(path for _code, path in staged_status)) != normalized_paths or any(
+            code not in {"M ", "A "} for code, _path in staged_status
+        ):
+            raise WorkspaceError("prevention candidate changed while it was staged")
+        staged_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff",
+                            "--cached",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "HEAD",
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if staged_paths != normalized_paths:
+            raise WorkspaceError("staged prevention paths do not match the allowlist")
+
+        command = ["commit", "--cleanup=verbatim", "--file=-"]
+        command.append("-S" if signing_key is None else f"-S{signing_key}")
+        identity_environment = {
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_AUTHOR_NAME": author_name,
+            "GIT_COMMITTER_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": author_name,
+            **verified_signing_environment,
+        }
+        self._runner.run(
+            tuple(command),
+            extra_environment=identity_environment,
+            input_text=(
+                f"{_PREVENTION_COMMIT_SUBJECT}\n\n"
+                "Created by the Localize Guardian bot for human review.\n\n"
+                f"Prevention evidence: {evidence_hash}\n"
+            ),
+        )
+        commit_sha = self._runner.revision("HEAD^{commit}")
+        parent_sha = self._runner.revision("HEAD^1^{commit}")
+        if parent_sha != self.original_sha:
+            raise WorkspaceError("prevention commit is not a direct child of exact base")
+        changed_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff-tree",
+                            "--no-commit-id",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "-r",
+                            parent_sha,
+                            commit_sha,
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if changed_paths != normalized_paths:
+            raise WorkspaceError("signed prevention commit changed unexpected paths")
+        _verify_commit_signature(
+            self._runner,
+            commit_sha,
+            signing_key=signing_key,
+            signing_environment=verified_signing_environment,
+        )
+        if _porcelain_status(self._runner):
+            raise WorkspaceError("working tree is not clean after prevention commit")
+        return CommitResult(
+            commit_sha=commit_sha,
+            parent_sha=parent_sha,
+            changed_paths=changed_paths,
+            signature_verified=True,
+        )
+
+    def publish_prevention_branch(
+        self,
+        commit: CommitResult,
+        *,
+        push_repository: str,
+        branch: str,
+        branch_prefix: str,
+        credential_environment: CredentialEnvironment,
+        before_push: Callable[[], None],
+        signing_key: str | None = None,
+        signing_environment: Mapping[str, str] | None = None,
+        remote_url: str | None = None,
+        allow_file_remote: bool = False,
+    ) -> PreventionPublicationResult:
+        """Create exactly one new allowlisted branch with an absence lease."""
+
+        if push_repository.count("/") != 1:
+            raise ValueError("push_repository must use owner/name form")
+        owner, repository = push_repository.split("/", 1)
+        ref = f"refs/heads/{branch}"
+        _validate_ref(ref)
+        if not branch.startswith(branch_prefix) or branch == branch_prefix:
+            raise ValueError("prevention branch is outside the configured prefix")
+        push_revision = ExactRevision(
+            host=self.revision.host,
+            owner=owner,
+            repository=repository,
+            ref=ref,
+            sha=self.original_sha,
+        )
+        remote = _validated_remote_url(
+            push_revision,
+            remote_url,
+            allow_file_remote=allow_file_remote,
+        )
+        if not commit.signature_verified:
+            raise WorkspaceError("Guardian refuses to publish an unsigned prevention commit")
+        if self._runner.revision("HEAD^{commit}") != commit.commit_sha:
+            raise WorkspaceError("checkout HEAD no longer matches prevention commit")
+        if (
+            commit.parent_sha != self.original_sha
+            or self._runner.revision("HEAD^1^{commit}") != self.original_sha
+        ):
+            raise WorkspaceError("prevention commit is not a direct child of exact base")
+        if _porcelain_status(self._runner):
+            raise WorkspaceError("working tree is not clean before prevention publication")
+        _verify_commit_signature(
+            self._runner,
+            commit.commit_sha,
+            signing_key=(
+                canonical_signing_key(signing_key)
+                if signing_key is not None
+                else None
+            ),
+            signing_environment=_signing_environment(signing_environment),
+        )
+
+        try:
+            credentials = _validated_environment(
+                credential_environment(),
+                label="credential environment",
+            )
+        except WorkspaceError:
+            raise
+        except Exception:
+            raise WorkspaceError("credential environment provider failed") from None
+        before = self._runner.run(
+            ("ls-remote", "--refs", remote, ref),
+            extra_environment=credentials,
+        ).stdout
+        records = [line.split("\t", 1) for line in before.splitlines() if line]
+        if records == [[commit.commit_sha, ref]]:
+            return PreventionPublicationResult(
+                repository=push_repository,
+                ref=ref,
+                commit_sha=commit.commit_sha,
+                created=False,
+            )
+        if records:
+            raise WorkspaceError("prevention branch already exists at another commit")
+
+        before_push()
+        self._runner.run(
+            (
+                "push",
+                "--porcelain",
+                "--no-verify",
+                "--atomic",
+                f"--force-with-lease={ref}:",
+                remote,
+                f"{commit.commit_sha}:{ref}",
+            ),
+            extra_environment=credentials,
+        )
+        after = self._runner.run(
+            ("ls-remote", "--refs", remote, ref),
+            extra_environment=credentials,
+        ).stdout
+        confirmed = [line.split("\t", 1) for line in after.splitlines() if line]
+        if confirmed != [[commit.commit_sha, ref]]:
+            raise WorkspaceError("remote did not confirm the prevention commit")
+        return PreventionPublicationResult(
+            repository=push_repository,
+            ref=ref,
+            commit_sha=commit.commit_sha,
+            created=True,
+        )
+
+    def publish_commit(
+        self,
+        commit: CommitResult,
+        *,
+        credential_environment: CredentialEnvironment | None = None,
+        require_signature: bool = True,
+        signing_key: str | None = None,
+        signing_environment: Mapping[str, str] | None = None,
+        before_push: Callable[[], None] | None = None,
+    ) -> PublicationResult:
+        """Publish one verified direct descendant with an ordinary atomic ref check."""
+
+        if not isinstance(commit, CommitResult):
+            raise TypeError("commit must be a CommitResult")
+        if not isinstance(require_signature, bool):
+            raise ValueError("require_signature must be a boolean")
+        if require_signature and not commit.signature_verified:
+            raise WorkspaceError("Guardian refuses to publish an unsigned commit")
+        if self._runner.revision("HEAD^{commit}") != commit.commit_sha:
+            raise WorkspaceError("checkout HEAD no longer matches the Guardian commit")
+        if self._runner.revision("HEAD^1^{commit}") != self.original_sha:
+            raise WorkspaceError("Guardian commit is not a direct descendant of intake")
+        if commit.parent_sha != self.original_sha:
+            raise WorkspaceError("commit result parent does not match intake")
+        actual_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff-tree",
+                            "--no-commit-id",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "-r",
+                            self.original_sha,
+                            commit.commit_sha,
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if not actual_paths or actual_paths != commit.changed_paths:
+            raise WorkspaceError("commit result paths do not match the exact local commit")
+        if _porcelain_status(self._runner):
+            raise WorkspaceError("working tree is not clean before publication")
+        if require_signature:
+            verified_signing_environment = _signing_environment(signing_environment)
+            _verify_commit_signature(
+                self._runner,
+                commit.commit_sha,
+                signing_key=(
+                    canonical_signing_key(signing_key)
+                    if signing_key is not None
+                    else None
+                ),
+                signing_environment=verified_signing_environment,
+            )
+
+        def credentials() -> dict[str, str]:
+            if credential_environment is None:
+                return {}
+            try:
+                values = credential_environment()
+            except Exception:
+                raise WorkspaceError("credential environment provider failed") from None
+            return _validated_environment(values, label="credential environment")
+
+        self._runner.run(
+            (
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--depth=1",
+                "origin",
+                self.revision.ref,
+            ),
+            extra_environment=credentials(),
+        )
+        if self._runner.revision("FETCH_HEAD^{commit}") != self.original_sha:
+            raise WorkspaceError("remote branch changed since intake")
+
+        if before_push is not None:
+            before_push()
+        self._runner.run(
+            (
+                "push",
+                "--porcelain",
+                "--no-verify",
+                "origin",
+                f"{commit.commit_sha}:{self.revision.ref}",
+            ),
+            extra_environment=credentials(),
+        )
+        remote_output = self._runner.run(
+            ("ls-remote", "--refs", "origin", self.revision.ref),
+            extra_environment=credentials(),
+        ).stdout
+        records = [line.split("\t", 1) for line in remote_output.splitlines() if line]
+        if records != [[commit.commit_sha, self.revision.ref]]:
+            raise WorkspaceError("remote did not confirm the exact Guardian commit")
+        return PublicationResult(
+            ref=self.revision.ref,
+            previous_sha=self.original_sha,
+            commit_sha=commit.commit_sha,
+        )
+
+
+@contextmanager
+def materialize_exact_checkout(
+    revision: ExactRevision,
+    *,
+    remote_url: str | None = None,
+    allow_file_remote: bool = False,
+    temporary_root: Path | str | None = None,
+    credential_environment: CredentialEnvironment | None = None,
+    git_binary: str = "git",
+    signing_program: str | None = None,
+    timeout_seconds: float = 120.0,
+    _process_runner: ProcessRunner = _bounded_git_process,
+) -> Iterator[GuardianWorkspace]:
+    """Yield an ephemeral detached checkout iff ``ref`` resolves to ``sha`` exactly."""
+    if not isinstance(revision, ExactRevision):
+        raise TypeError("revision must be an ExactRevision")
+    if not isinstance(allow_file_remote, bool):
+        raise ValueError("allow_file_remote must be a boolean")
+    if (
+        not isinstance(git_binary, str)
+        or not git_binary
+        or any(character in git_binary for character in "\r\n\x00")
+    ):
+        raise ValueError("git_binary must be a safe executable name or path")
+    if signing_program is not None and (
+        not isinstance(signing_program, str)
+        or not signing_program
+        or any(character in signing_program for character in "\r\n\x00")
+    ):
+        raise ValueError("signing_program must be a safe executable name or path")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds must be positive")
+    validated_remote = _validated_remote_url(
+        revision,
+        remote_url,
+        allow_file_remote=allow_file_remote,
+    )
+
+    root = None if temporary_root is None else str(Path(temporary_root))
+    with tempfile.TemporaryDirectory(prefix="localize-guardian-git-", dir=root) as temp_dir:
+        temporary_directory = Path(temp_dir)
+        home = temporary_directory / "home"
+        checkout = temporary_directory / "checkout"
+        home.mkdir(mode=0o700)
+        checkout.mkdir(mode=0o700)
+        runner = _GitRunner(
+            path=checkout,
+            environment=_base_environment(home, allow_file_remote=allow_file_remote),
+            process_runner=_process_runner,
+            git_binary=git_binary,
+            signing_program=signing_program,
+            timeout_seconds=float(timeout_seconds),
+        )
+        runner.run(("init", "--quiet"))
+        runner.run(("remote", "add", "origin", validated_remote))
+
+        fetch_environment: dict[str, str] = {}
+        if credential_environment is not None:
+            try:
+                provided_environment = credential_environment()
+            except Exception:
+                raise WorkspaceError("credential environment provider failed") from None
+            fetch_environment = _validated_environment(
+                provided_environment,
+                label="credential environment",
+            )
+        runner.run(
+            (
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--depth=1",
+                "origin",
+                revision.ref,
+            ),
+            extra_environment=fetch_environment,
+        )
+        if runner.revision("FETCH_HEAD^{commit}") != revision.sha:
+            raise WorkspaceError("remote ref did not resolve to the exact expected SHA")
+        runner.run(("checkout", "--quiet", "--detach", "--force", revision.sha, "--"))
+        if runner.revision("HEAD^{commit}") != revision.sha:
+            raise WorkspaceError("checkout did not materialize the exact expected SHA")
+        symbolic_head = runner.run(("symbolic-ref", "--quiet", "HEAD"), check=False)
+        if symbolic_head.returncode == 0:
+            raise WorkspaceError("exact checkout unexpectedly has an attached branch")
+        if _porcelain_status(runner):
+            raise WorkspaceError("exact checkout is not clean")
+        yield GuardianWorkspace(path=checkout, revision=revision, _runner=runner)
+
+
+__all__ = [
+    "CommitResult",
+    "ExactRevision",
+    "GuardianWorkspace",
+    "PreventionPublicationResult",
+    "PublicationResult",
+    "WorkspaceError",
+    "materialize_exact_checkout",
+]
