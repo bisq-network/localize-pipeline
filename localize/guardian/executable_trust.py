@@ -14,6 +14,13 @@ class ExecutableTrustError(ValueError):
     """A configured executable or interpreter chain is mutable or ambiguous."""
 
 
+def _trusted_owners() -> frozenset[int]:
+    owners = {0}
+    if hasattr(os, "getuid"):
+        owners.add(os.getuid())
+    return frozenset(owners)
+
+
 def require_absolute_trusted_executable(
     command: Sequence[str],
     *,
@@ -45,9 +52,7 @@ def _require_trusted_executable(
         raise ExecutableTrustError(
             f"{field} executable was not found or is not executable."
         ) from None
-    trusted_owners = {0}
-    if hasattr(os, "getuid"):
-        trusted_owners.add(os.getuid())
+    trusted_owners = _trusted_owners()
     if (
         executable.is_symlink()
         or not stat.S_ISREG(metadata.st_mode)
@@ -108,11 +113,46 @@ def _require_trusted_executable(
         raise ExecutableTrustError(
             f"{field} executable must use an absolute shebang interpreter."
         )
+    interpreter = _resolve_trusted_interpreter(interpreter, field=field)
     _require_trusted_executable(
         interpreter,
         field=field,
         seen=seen | {executable},
     )
+
+
+def _resolve_trusted_interpreter(interpreter: Path, *, field: str) -> Path:
+    """Resolve only operator- or root-owned symlinks in an interpreter path."""
+
+    trusted_owners = _trusted_owners()
+    current = Path(interpreter.anchor)
+    for part in interpreter.parts[1:]:
+        current /= part
+        try:
+            metadata = current.stat(follow_symlinks=False)
+        except OSError:
+            raise ExecutableTrustError(
+                f"{field} interpreter path is unavailable or unsafe."
+            ) from None
+        if stat.S_ISLNK(metadata.st_mode):
+            if metadata.st_uid not in trusted_owners:
+                raise ExecutableTrustError(
+                    f"{field} interpreter path is unavailable or unsafe."
+                )
+            continue
+        if current != interpreter and not is_trusted_directory(
+            metadata,
+            trusted_owners=trusted_owners,
+        ):
+            raise ExecutableTrustError(
+                f"{field} interpreter path is unavailable or unsafe."
+            )
+    try:
+        return interpreter.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ExecutableTrustError(
+            f"{field} interpreter path is unavailable or unsafe."
+        ) from None
 
 
 __all__ = ["ExecutableTrustError", "require_absolute_trusted_executable"]
