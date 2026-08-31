@@ -151,6 +151,28 @@ def test_bounded_process_round_trips_text_stdin() -> None:
     assert completed.stdout == "GUARDIAN INPUT\n"
 
 
+def test_workspace_quota_walk_is_decoupled_from_short_exit_poll() -> None:
+    class CountingQuota:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def exceeded(self) -> bool:
+            self.calls += 1
+            return False
+
+    quota = CountingQuota()
+
+    completed = run_bounded_process(
+        (sys.executable, "-c", "import time; time.sleep(0.3)"),
+        timeout=2,
+        limits=ProcessLimits.for_timeout(2, max_file_size_bytes=1024 * 1024),
+        workspace_quota=quota,  # type: ignore[arg-type]
+    )
+
+    assert completed.returncode == 0
+    assert quota.calls <= 2
+
+
 def test_file_size_limit_bounds_one_child_output_file(tmp_path: Path) -> None:
     output = tmp_path / "large"
     completed = run_bounded_process(

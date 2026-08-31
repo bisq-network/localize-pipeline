@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 from localize.guardian import FeedbackEvent, GuardianMode
+from localize.guardian import state as guardian_state
 from localize.guardian.state import GuardianState
 
 
@@ -83,6 +84,36 @@ def test_exact_duplicate_is_not_pending_but_edits_and_sha_changes_are(
             moved_head.revision_id,
             moved_base.revision_id,
         ]
+
+
+def test_pending_query_derives_terminal_status_bindings_from_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        revision = state.record_feedback_event(_event())
+        run_id = state.start_run(
+            repository="acme/widgets",
+            locale="ru",
+            mode=GuardianMode.OBSERVE,
+        )
+        state.record_action(
+            run_id=run_id,
+            event_revision_id=revision.revision_id,
+            action="observe",
+            status="failed",
+        )
+        assert tuple(
+            item.revision_id for item in state.pending_event_revisions()
+        ) == (revision.revision_id,)
+
+        monkeypatch.setattr(
+            guardian_state,
+            "_TERMINAL_ACTION_STATUSES",
+            frozenset({"completed", "failed", "skipped"}),
+        )
+
+        assert state.pending_event_revisions() == ()
 
 
 def test_state_database_is_private_even_when_created_under_a_permissive_umask(

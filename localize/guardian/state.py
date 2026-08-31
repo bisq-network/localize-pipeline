@@ -23,6 +23,17 @@ _SCHEMA_VERSION = 1
 _TERMINAL_ACTION_STATUSES = frozenset({"completed", "skipped"})
 _ACTION_STATUSES = _TERMINAL_ACTION_STATUSES | {"failed", "pending"}
 _RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_MAX_ASSESSMENT_RESULT_BYTES = 2 * 1024 * 1024
+_COMMITTED_BUDGET_SQL = """
+    SELECT
+        (SELECT COALESCE(SUM(amount_microusd), 0) FROM costs
+         WHERE incurred_at >= ? AND incurred_at < ?)
+        +
+        (SELECT COALESCE(SUM(amount_microusd), 0)
+         FROM budget_reservations
+         WHERE reserved_at >= ? AND reserved_at < ?
+           AND status IN ('reserved', 'unknown')) AS committed
+"""
 _MODE_RESOLUTION_AUTHORITY: Mapping[GuardianMode, tuple[GuardianMode, ...]] = {
     GuardianMode.OBSERVE: tuple(GuardianMode),
     GuardianMode.PREPARE: (
@@ -176,6 +187,99 @@ def _revision_hash(event: FeedbackEvent) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_assessment_metadata(
+    *,
+    cache_key: str,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    base_sha: str,
+    model: str,
+    reasoning_effort: str,
+    result_json: str,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> None:
+    """Validate the immutable assessment identity and serialized result."""
+
+    if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
+        raise ValueError("assessment cache key must be a SHA-256 digest")
+    token_counts_invalid = any(
+        value is not None and value < 0
+        for value in (input_tokens, output_tokens)
+    )
+    if (
+        not repository
+        or pr_number <= 0
+        or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head_sha)
+        or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base_sha)
+        or not model
+        or not reasoning_effort
+        or token_counts_invalid
+        or len(result_json.encode("utf-8")) > _MAX_ASSESSMENT_RESULT_BYTES
+    ):
+        raise ValueError("assessment cache metadata is invalid")
+    try:
+        parsed_result = json.loads(result_json)
+    except (TypeError, json.JSONDecodeError):
+        raise ValueError("assessment cache result must be JSON") from None
+    if not isinstance(parsed_result, Mapping):
+        raise ValueError("assessment cache result must be a JSON object")
+
+
+def _store_and_verify_assessment(
+    connection: sqlite3.Connection,
+    *,
+    cache_key: str,
+    repository: str,
+    pr_number: int,
+    head_sha: str,
+    base_sha: str,
+    model: str,
+    reasoning_effort: str,
+    result_json: str,
+    timestamp: str,
+) -> None:
+    """Insert one idempotent assessment and reject cache-key collisions."""
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO assessment_results (
+            cache_key, repository, pr_number, head_sha, base_sha,
+            model, reasoning_effort, result_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            cache_key,
+            repository,
+            pr_number,
+            head_sha,
+            base_sha,
+            model,
+            reasoning_effort,
+            result_json,
+            timestamp,
+        ),
+    )
+    cached = connection.execute(
+        "SELECT * FROM assessment_results WHERE cache_key = ?",
+        (cache_key,),
+    ).fetchone()
+    if cached is None or any(
+        cached[field] != value
+        for field, value in (
+            ("repository", repository),
+            ("pr_number", pr_number),
+            ("head_sha", head_sha),
+            ("base_sha", base_sha),
+            ("model", model),
+            ("reasoning_effort", reasoning_effort),
+            ("result_json", result_json),
+        )
+    ):
+        raise RuntimeError("assessment cache identity collision")
 
 
 class GuardianState:
@@ -576,7 +680,9 @@ class GuardianState:
         all-terminal-actions view used by audit callers.
         """
 
-        parameters: list[Any] = []
+        terminal_statuses = tuple(sorted(_TERMINAL_ACTION_STATUSES))
+        terminal_placeholders = ", ".join("?" for _ in terminal_statuses)
+        parameters: list[Any] = list(terminal_statuses)
         if mode is None:
             mode_filter = ""
         else:
@@ -590,7 +696,7 @@ class GuardianState:
                 SELECT 1 FROM actions AS a
                 JOIN runs AS r ON r.run_id = a.run_id
                 WHERE a.event_revision_id = e.revision_id
-                  AND a.status IN ('completed', 'skipped')
+                  AND a.status IN ({terminal_placeholders})
                   {mode_filter}
             )"""
         ]
@@ -1049,16 +1155,7 @@ class GuardianState:
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             row = self._connection.execute(
-                """
-                SELECT
-                    (SELECT COALESCE(SUM(amount_microusd), 0) FROM costs
-                     WHERE incurred_at >= ? AND incurred_at < ?)
-                    +
-                    (SELECT COALESCE(SUM(amount_microusd), 0)
-                     FROM budget_reservations
-                     WHERE reserved_at >= ? AND reserved_at < ?
-                       AND status IN ('reserved', 'unknown')) AS committed
-                """,
+                _COMMITTED_BUDGET_SQL,
                 (
                     serialized_start,
                     serialized_end,
@@ -1219,26 +1316,18 @@ class GuardianState:
     ) -> None:
         """Atomically retain a validated result and finalize its reservation."""
 
-        if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
-            raise ValueError("assessment cache key must be a SHA-256 digest")
-        if (
-            not repository
-            or pr_number <= 0
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head_sha)
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base_sha)
-            or not model
-            or not reasoning_effort
-            or input_tokens < 0
-            or output_tokens < 0
-            or len(result_json.encode("utf-8")) > 2 * 1024 * 1024
-        ):
-            raise ValueError("assessment cache metadata is invalid")
-        try:
-            parsed_result = json.loads(result_json)
-        except (TypeError, json.JSONDecodeError):
-            raise ValueError("assessment cache result must be JSON") from None
-        if not isinstance(parsed_result, Mapping):
-            raise ValueError("assessment cache result must be a JSON object")
+        _validate_assessment_metadata(
+            cache_key=cache_key,
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            result_json=result_json,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
         actual_cost = (
             _amount_to_microusd(actual_cost_usd)
             if actual_cost_usd is not None
@@ -1258,42 +1347,18 @@ class GuardianState:
                 raise KeyError(
                     f"Unknown or finalized reservation {reservation_id}."
                 )
-            self._connection.execute(
-                """
-                INSERT OR IGNORE INTO assessment_results (
-                    cache_key, repository, pr_number, head_sha, base_sha,
-                    model, reasoning_effort, result_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cache_key,
-                    repository,
-                    pr_number,
-                    head_sha,
-                    base_sha,
-                    model,
-                    reasoning_effort,
-                    result_json,
-                    timestamp,
-                ),
+            _store_and_verify_assessment(
+                self._connection,
+                cache_key=cache_key,
+                repository=repository,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                result_json=result_json,
+                timestamp=timestamp,
             )
-            cached = self._connection.execute(
-                "SELECT * FROM assessment_results WHERE cache_key = ?",
-                (cache_key,),
-            ).fetchone()
-            if cached is None or any(
-                cached[field] != value
-                for field, value in (
-                    ("repository", repository),
-                    ("pr_number", pr_number),
-                    ("head_sha", head_sha),
-                    ("base_sha", base_sha),
-                    ("model", model),
-                    ("reasoning_effort", reasoning_effort),
-                    ("result_json", result_json),
-                )
-            ):
-                raise RuntimeError("assessment cache identity collision")
             if actual_cost is None:
                 self._connection.execute(
                     """
@@ -1348,63 +1413,31 @@ class GuardianState:
     ) -> None:
         """Durably cache a subscription-backed result without fake USD spend."""
 
-        if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
-            raise ValueError("assessment cache key must be a SHA-256 digest")
-        if (
-            not repository
-            or pr_number <= 0
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head_sha)
-            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base_sha)
-            or not model
-            or not reasoning_effort
-            or len(result_json.encode("utf-8")) > 2 * 1024 * 1024
-        ):
-            raise ValueError("assessment cache metadata is invalid")
-        try:
-            parsed_result = json.loads(result_json)
-        except (TypeError, json.JSONDecodeError):
-            raise ValueError("assessment cache result must be JSON") from None
-        if not isinstance(parsed_result, Mapping):
-            raise ValueError("assessment cache result must be a JSON object")
+        _validate_assessment_metadata(
+            cache_key=cache_key,
+            repository=repository,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            result_json=result_json,
+        )
         timestamp = _serialize_datetime(created_at or _now())
         try:
             self._connection.execute("BEGIN IMMEDIATE")
-            self._connection.execute(
-                """
-                INSERT OR IGNORE INTO assessment_results (
-                    cache_key, repository, pr_number, head_sha, base_sha,
-                    model, reasoning_effort, result_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cache_key,
-                    repository,
-                    pr_number,
-                    head_sha,
-                    base_sha,
-                    model,
-                    reasoning_effort,
-                    result_json,
-                    timestamp,
-                ),
+            _store_and_verify_assessment(
+                self._connection,
+                cache_key=cache_key,
+                repository=repository,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                result_json=result_json,
+                timestamp=timestamp,
             )
-            cached = self._connection.execute(
-                "SELECT * FROM assessment_results WHERE cache_key = ?",
-                (cache_key,),
-            ).fetchone()
-            if cached is None or any(
-                cached[field] != value
-                for field, value in (
-                    ("repository", repository),
-                    ("pr_number", pr_number),
-                    ("head_sha", head_sha),
-                    ("base_sha", base_sha),
-                    ("model", model),
-                    ("reasoning_effort", reasoning_effort),
-                    ("result_json", result_json),
-                )
-            ):
-                raise RuntimeError("assessment cache identity collision")
             self._connection.commit()
         except Exception:
             self._connection.rollback()
@@ -1433,16 +1466,7 @@ class GuardianState:
         serialized_start = _serialize_datetime(start)
         serialized_end = _serialize_datetime(end)
         row = self._connection.execute(
-            """
-            SELECT
-                (SELECT COALESCE(SUM(amount_microusd), 0) FROM costs
-                 WHERE incurred_at >= ? AND incurred_at < ?)
-                +
-                (SELECT COALESCE(SUM(amount_microusd), 0)
-                 FROM budget_reservations
-                 WHERE reserved_at >= ? AND reserved_at < ?
-                   AND status IN ('reserved', 'unknown')) AS committed
-            """,
+            _COMMITTED_BUDGET_SQL,
             (
                 serialized_start,
                 serialized_end,

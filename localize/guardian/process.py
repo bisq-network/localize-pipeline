@@ -22,6 +22,9 @@ class ProcessResourceError(RuntimeError):
     """A child exceeded a Guardian-owned resource boundary."""
 
 
+_WORKSPACE_QUOTA_INTERVAL_SECONDS = 1.0
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessLimits:
     """POSIX limits inherited by every descendant in the process group."""
@@ -303,7 +306,9 @@ def run_bounded_process(
         )
         exit_watcher: _UnreapedExitWatcher | None = None
         try:
-            deadline = time.monotonic() + timeout
+            started_at = time.monotonic()
+            deadline = started_at + timeout
+            next_quota_check = started_at
             captured_stdout = None
             captured_stderr = None
             if os.name == "posix":
@@ -327,12 +332,20 @@ def run_bounded_process(
                         break
                     except subprocess.TimeoutExpired:
                         pass
-                if workspace_quota is not None and workspace_quota.exceeded():
-                    _kill_process_group(process)
-                    process.communicate()
-                    raise ProcessResourceError(
-                        "Child process exceeded its workspace quota."
+                quota_check_at = time.monotonic()
+                if (
+                    workspace_quota is not None
+                    and quota_check_at >= next_quota_check
+                ):
+                    next_quota_check = (
+                        quota_check_at + _WORKSPACE_QUOTA_INTERVAL_SECONDS
                     )
+                    if workspace_quota.exceeded():
+                        _kill_process_group(process)
+                        process.communicate()
+                        raise ProcessResourceError(
+                            "Child process exceeded its workspace quota."
+                        )
             if workspace_quota is not None and workspace_quota.exceeded():
                 raise ProcessResourceError(
                     "Child process exceeded its workspace quota."
