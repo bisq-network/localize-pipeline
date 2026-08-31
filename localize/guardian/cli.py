@@ -420,10 +420,8 @@ def _ensure_private_file(path: Path) -> tuple[int, int] | None:
 def _load_config_or_raise(config_path: Path) -> GuardianConfig:
     try:
         return load_trusted_guardian_config(config_path)
-    except GuardianRuntimeError:
-        raise GuardianCLIError(
-            "Guardian configuration is invalid; run init or fix the policy."
-        ) from None
+    except GuardianRuntimeError as exc:
+        raise GuardianCLIError(str(exc)) from None
 
 
 def _github_policy(config_policy: RepositoryPolicy) -> GitHubRepositoryPolicy:
@@ -812,6 +810,8 @@ def _codex_capability_probe(
             flag_probe = run_bounded_process(
                 [
                     executable,
+                    "--ask-for-approval",
+                    "never",
                     *config_arguments,
                     "exec",
                     "--ephemeral",

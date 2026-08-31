@@ -63,6 +63,17 @@ def _valid_repository_name(value: object) -> bool:
     )
 
 
+def _github_web_base_url(api_base_url: str) -> str:
+    parsed = urlsplit(api_base_url)
+    hostname = parsed.hostname or ""
+    if hostname.startswith("api."):
+        hostname = hostname[4:]
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return f"{parsed.scheme}://{hostname}{port}"
+
+
 def _validate_base_branch(branch: str) -> None:
     if (
         not isinstance(branch, str)
@@ -438,6 +449,16 @@ class _GitHubHTTP:
     def _raise_for_status(response: httpx.Response, *, method: str) -> None:
         if 200 <= response.status_code < 300:
             return
+        retry_after = response.headers.get("retry-after", "").strip()
+        rate_limit_remaining = response.headers.get(
+            "x-ratelimit-remaining", ""
+        ).strip()
+        rate_limit_reset = response.headers.get("x-ratelimit-reset", "").strip()
+        is_rate_limited = bool(retry_after) or (
+            rate_limit_remaining == "0" and bool(rate_limit_reset)
+        )
+        if response.status_code == 403 and is_rate_limited:
+            raise GitHubAPIError(f"GitHub API {method} request was rate limited")
         if response.status_code in {401, 403}:
             raise GitHubAuthenticationError(
                 f"GitHub API {method} authentication failed"
@@ -683,6 +704,7 @@ class GitHubWriteBroker:
         self.policy = policy
         self.token_command = tuple(token_command)
         self.base_url = base_url
+        self.web_base_url = _github_web_base_url(base_url)
         self.transport = transport
         self.timeout = timeout
         self._token_helper = SecretCommand(
@@ -845,7 +867,9 @@ class GitHubWriteBroker:
                 expected_base_sha=expected_base_sha,
             )
             short_sha = commit_sha[:12]
-            commit_url = f"https://github.com/{pull.head_repository}/commit/{commit_sha}"
+            commit_url = (
+                f"{self.web_base_url}/{pull.head_repository}/commit/{commit_sha}"
+            )
             body = (
                 f"{marker}\n"
                 "🤖 **Localize Guardian:** Applied a validated translation-only "

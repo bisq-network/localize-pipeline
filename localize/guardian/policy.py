@@ -158,7 +158,9 @@ def _load_glossary(
     config_path: Path,
     trusted_root: Path,
 ) -> dict[str, dict[str, str]]:
-    raw_path = config.get("glossary_file_path") or "glossary.json"
+    configured_path = config.get("glossary_file_path")
+    explicitly_configured = configured_path is not None
+    raw_path = configured_path if explicitly_configured else "glossary.json"
     raw_text = str(raw_path)
     pure = PurePosixPath(raw_text)
     if (
@@ -171,6 +173,10 @@ def _load_glossary(
         raise PatchPolicyError("Trusted glossary path must be a safe relative POSIX path.")
     path = config_path.parent.joinpath(*pure.parts)
     if not path.exists():
+        if explicitly_configured or path.is_symlink():
+            raise PatchPolicyError(
+                "Trusted glossary is not a regular file: configured path is missing."
+            )
         return {}
     path = _trusted_regular_file(path, root=trusted_root, label="glossary")
     try:
@@ -246,11 +252,14 @@ def apply_replacements(
     """
     root = repo_root.expanduser().resolve()
     raw_config_path = pipeline_config_path.expanduser()
-    trusted_root = (
-        trusted_config_root.expanduser().resolve()
-        if trusted_config_root is not None
-        else raw_config_path.parent.resolve()
-    )
+    if trusted_config_root is not None:
+        trusted_root = trusted_config_root.expanduser().resolve()
+        if not raw_config_path.is_absolute():
+            raw_config_path = trusted_root / raw_config_path
+    else:
+        if not raw_config_path.is_absolute():
+            raw_config_path = Path.cwd() / raw_config_path
+        trusted_root = raw_config_path.parent.resolve()
     source_root = (
         trusted_source_root.expanduser().resolve()
         if trusted_source_root is not None

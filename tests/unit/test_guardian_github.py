@@ -662,7 +662,7 @@ def test_writer_posts_one_concise_bot_labelled_commit_reply_without_resolving_th
     assert lease_checks == ["checked"]
     body = posted[0]
     assert "Localize Guardian" in body
-    assert f"translator-bot/app/commit/{NEW_SHA}" in body
+    assert f"https://github.test/translator-bot/app/commit/{NEW_SHA}" in body
     assert NEW_SHA[:12] in body
     assert "remains open for reviewer confirmation" in body
     assert "fixed everything" not in body.lower()
@@ -795,3 +795,47 @@ def test_github_authentication_statuses_open_the_typed_circuit(status: int) -> N
                 expected_head_sha=HEAD_SHA,
                 expected_base_sha=BASE_SHA,
             )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    (
+        {"Retry-After": "60"},
+        {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1788210000"},
+    ),
+)
+def test_github_rate_limit_403_is_not_an_authentication_failure(
+    headers: dict[str, str],
+) -> None:
+    broker = GitHubWriteBroker(
+        policy=_policy(),
+        token_command=("token-helper",),
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                403,
+                request=request,
+                headers=headers,
+                json={"message": "rate limited"},
+            )
+        ),
+    )
+    completed = subprocess.CompletedProcess(
+        ["token-helper"],
+        0,
+        stdout=TOKEN,
+        stderr="",
+    )
+
+    with patch(
+        "localize.guardian.credentials.run_bounded_process",
+        return_value=completed,
+    ):
+        with pytest.raises(GitHubAPIError) as raised:
+            broker.verify_pull(
+                pull_number=1,
+                expected_head_sha=HEAD_SHA,
+                expected_base_sha=BASE_SHA,
+            )
+
+    assert not isinstance(raised.value, GitHubAuthenticationError)

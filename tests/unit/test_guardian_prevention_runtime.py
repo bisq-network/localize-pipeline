@@ -215,6 +215,7 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     argv = observed["argv"]
     assert isinstance(argv, list)
     assert "--sandbox" not in argv
+    assert argv[1:3] == ["--ask-for-approval", "never"]
     assert 'default_permissions="guardian_prevention_author"' in argv
     assert (
         'permissions.guardian_prevention_author.filesystem={":minimal"="read",'

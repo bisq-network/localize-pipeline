@@ -52,6 +52,11 @@ def _mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def _replace_once(value: str, needle: str, replacement: str) -> str:
+    assert needle in value, f"template drift for {needle!r}"
+    return value.replace(needle, replacement, 1)
+
+
 def _configure_scheduled_runtime(
     config_path: Path,
     root: Path,
@@ -69,38 +74,43 @@ def _configure_scheduled_runtime(
         executable.write_text("#!/bin/sh\n", encoding="utf-8")
         executable.chmod(0o700)
     config = config_path.read_text(encoding="utf-8")
-    config = config.replace("  codex_executable: codex", f"  codex_executable: {codex}")
-    config = config.replace("  git_executable: git", f"  git_executable: {git}")
-    config = config.replace("  signing_program: gpg", f"  signing_program: {gpg}")
-    config = config.replace(
+    config = _replace_once(
+        config,
+        "  codex_executable: codex",
+        f"  codex_executable: {codex}",
+    )
+    config = _replace_once(config, "  git_executable: git", f"  git_executable: {git}")
+    config = _replace_once(config, "  signing_program: gpg", f"  signing_program: {gpg}")
+    config = _replace_once(
+        config,
         "  github_token_command: [gh, auth, token]",
         f"  github_token_command: [{github_helper}]",
     )
     if api_key:
-        config = config.replace(
+        config = _replace_once(
+            config,
             "  codex_auth_mode: chatgpt",
             "  codex_auth_mode: api-key",
-            1,
         )
-        config = config.replace(
+        config = _replace_once(
+            config,
             "  codex_home: ~/.local/share/localize-guardian/codex\n",
             "",
-            1,
         )
-        config = config.replace(
+        config = _replace_once(
+            config,
             "  # codex_api_key_command:",
             f"  codex_api_key_command: [{model_helper}]\n  # codex_api_key_command:",
-            1,
         )
-        config = config.replace(
+        config = _replace_once(
+            config,
             "  # daily_cost_limit_usd: 2.00",
             "  daily_cost_limit_usd: 2.00",
-            1,
         )
-        config = config.replace(
+        config = _replace_once(
+            config,
             "  # model_call_reservation_usd: 2.00",
             "  model_call_reservation_usd: 2.00",
-            1,
         )
     config_path.write_text(config, encoding="utf-8")
     return codex, github_helper, model_helper
@@ -140,6 +150,27 @@ def test_init_refuses_to_overwrite_existing_config(
     assert "already exists" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "Guardian configuration is unavailable or unsafe.",
+        "Guardian configuration is invalid.",
+    ),
+)
+def test_config_loader_preserves_redacted_failure_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    def fail(_path: Path):
+        raise cli.GuardianRuntimeError(message)
+
+    monkeypatch.setattr(cli, "load_trusted_guardian_config", fail)
+
+    with pytest.raises(cli.GuardianCLIError, match=message.replace(".", r"\.")):
+        cli._load_config_or_raise(tmp_path / "guardian.yaml")
+
+
 def test_login_uses_dedicated_chatgpt_home_and_never_inherits_api_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -149,10 +180,10 @@ def test_login_uses_dedicated_chatgpt_home_and_never_inherits_api_keys(
     capsys.readouterr()
     codex_home = tmp_path / "private-codex-home"
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        _replace_once(
+            config_path.read_text(encoding="utf-8"),
             "~/.local/share/localize-guardian/codex",
             str(codex_home),
-            1,
         ),
         encoding="utf-8",
     )
@@ -195,10 +226,10 @@ def test_chatgpt_login_status_is_checked_without_a_model_call(
     auth_file.write_text('{"auth":"test-only"}', encoding="utf-8")
     auth_file.chmod(0o600)
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        _replace_once(
+            config_path.read_text(encoding="utf-8"),
             "~/.local/share/localize-guardian/codex",
             str(codex_home),
-            1,
         ),
         encoding="utf-8",
     )
@@ -236,10 +267,10 @@ def test_login_rejects_writable_codex_home_ancestor_before_authentication(
     unsafe_parent.chmod(0o777)
     codex_home = unsafe_parent / "codex-home"
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        _replace_once(
+            config_path.read_text(encoding="utf-8"),
             "~/.local/share/localize-guardian/codex",
             str(codex_home),
-            1,
         ),
         encoding="utf-8",
     )
@@ -415,6 +446,7 @@ def test_codex_capability_probe_uses_exact_isolated_profile_and_flags(
     assert len(calls) == 2
     flag_argv, flag_kwargs = calls[0]
     sandbox_argv, sandbox_kwargs = calls[1]
+    assert flag_argv[1:3] == ["--ask-for-approval", "never"]
     assert flag_argv[-6:] == [
         "exec",
         "--ephemeral",
@@ -536,10 +568,10 @@ def test_doctor_requires_signing_only_for_write_modes(
     observe_exit = cli.main(["doctor", "--config", str(config_path)])
     observe_output = capsys.readouterr().out
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        _replace_once(
+            config_path.read_text(encoding="utf-8"),
             "mode: observe",
             "mode: apply-owned-translations",
-            1,
         ),
         encoding="utf-8",
     )
@@ -970,10 +1002,10 @@ def test_install_subscription_mode_requires_no_api_credential_helper(
     executable.chmod(0o700)
     _configure_scheduled_runtime(config_path, tmp_path, api_key=False)
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
+        _replace_once(
+            config_path.read_text(encoding="utf-8"),
             f"  signing_program: {tmp_path / 'bin' / 'gpg'}",
             "  signing_program: gpg",
-            1,
         ),
         encoding="utf-8",
     )
@@ -1005,12 +1037,18 @@ def test_install_write_mode_requires_absolute_signing_program(
     capsys.readouterr()
     _configure_scheduled_runtime(config_path, tmp_path, api_key=False)
     configured = config_path.read_text(encoding="utf-8")
+    configured = _replace_once(
+        configured,
+        "mode: observe",
+        "mode: apply-owned-translations",
+    )
+    configured = _replace_once(
+        configured,
+        f"  signing_program: {tmp_path / 'bin' / 'gpg'}",
+        "  signing_program: gpg",
+    )
     config_path.write_text(
-        configured.replace("mode: observe", "mode: apply-owned-translations", 1).replace(
-            f"  signing_program: {tmp_path / 'bin' / 'gpg'}",
-            "  signing_program: gpg",
-            1,
-        ),
+        configured,
         encoding="utf-8",
     )
     executable = tmp_path / "localize"
@@ -1064,7 +1102,7 @@ def test_install_requires_absolute_executables_for_unattended_runs(
         "model": str(model_helper),
     }[field]
     config_path.write_text(
-        configured.replace(absolute_value, replacement, 1),
+        _replace_once(configured, absolute_value, replacement),
         encoding="utf-8",
     )
     monkeypatch.setattr(

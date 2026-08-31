@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import platform
 import resource
+import select
 import signal
 import stat
 import subprocess
@@ -105,7 +106,10 @@ def _directory_usage(
                 if not (Path(current) / name).is_symlink()
             ]
             for name in (*directories, *filenames):
-                metadata = (Path(current) / name).lstat()
+                try:
+                    metadata = (Path(current) / name).lstat()
+                except FileNotFoundError:
+                    continue
                 entries += 1
                 if stat.S_ISREG(metadata.st_mode):
                     total += metadata.st_size
@@ -147,14 +151,85 @@ def _limit_child(limits: ProcessLimits) -> None:
         )
 
 
-def _kill_process_group(process: subprocess.Popen[object]) -> None:
+def _kill_process_group(
+    process: subprocess.Popen[object],
+    *,
+    tolerate_exited_leader: bool = False,
+) -> None:
     if os.name == "posix":
+        if process.returncode is not None:
+            return
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if not tolerate_exited_leader:
+                raise
     elif process.poll() is None:  # pragma: no cover - Windows is not a deploy target.
         process.kill()
+
+
+class _UnreapedExitWatcher:
+    """Observe POSIX child exit while retaining ownership of its process id."""
+
+    def __init__(self, pid: int) -> None:
+        self._pidfd: int | None = None
+        self._poller = None
+        self._kqueue = None
+        self._ready = False
+        try:
+            if hasattr(os, "pidfd_open"):
+                self._pidfd = os.pidfd_open(pid)  # type: ignore[attr-defined]
+                self._poller = select.poll()
+                self._poller.register(self._pidfd, select.POLLIN)
+            elif hasattr(select, "kqueue"):
+                self._kqueue = select.kqueue()
+                event = select.kevent(
+                    pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=(
+                        select.KQ_EV_ADD
+                        | select.KQ_EV_ENABLE
+                        | select.KQ_EV_ONESHOT
+                    ),
+                    fflags=select.KQ_NOTE_EXIT,
+                )
+                self._kqueue.control([event], 0, 0)
+            else:  # pragma: no cover - supported production targets have one.
+                raise ProcessResourceError(
+                    "Safe unreaped child monitoring is unavailable."
+                )
+        except ProcessLookupError:
+            self._ready = True
+        except OSError as exc:
+            self.close()
+            raise ProcessResourceError(
+                "Could not establish safe child-process monitoring."
+            ) from exc
+
+    def wait(self, timeout: float) -> bool:
+        """Return whether the child exited, without reaping its process id."""
+
+        if self._ready:
+            return True
+        if self._poller is not None:
+            events = self._poller.poll(max(1, math.ceil(timeout * 1000)))
+        else:
+            assert self._kqueue is not None
+            events = self._kqueue.control(None, 1, timeout)
+        self._ready = bool(events)
+        return self._ready
+
+    def close(self) -> None:
+        """Release platform watcher resources without touching the child."""
+
+        if self._kqueue is not None:
+            self._kqueue.close()
+            self._kqueue = None
+        if self._pidfd is not None:
+            os.close(self._pidfd)
+            self._pidfd = None
 
 
 def run_bounded_process(
@@ -197,7 +272,20 @@ def run_bounded_process(
             stdout = stdout_file
             stderr = stderr_file
         if input is not None:
-            stdin = subprocess.PIPE
+            if text:
+                input_file = resources.enter_context(
+                    tempfile.TemporaryFile(
+                        mode="w+t",
+                        encoding=encoding or "utf-8",
+                        errors=errors,
+                    )
+                )
+            else:
+                input_file = resources.enter_context(tempfile.TemporaryFile())
+            input_file.write(input)
+            input_file.flush()
+            input_file.seek(0)
+            stdin = input_file
 
         process = subprocess.Popen(
             list(argv),
@@ -213,37 +301,48 @@ def run_bounded_process(
             errors=errors,
             preexec_fn=(lambda: _limit_child(limits)) if os.name == "posix" else None,
         )
+        exit_watcher: _UnreapedExitWatcher | None = None
         try:
             deadline = time.monotonic() + timeout
-            pending_input = input
             captured_stdout = None
             captured_stderr = None
+            if os.name == "posix":
+                exit_watcher = _UnreapedExitWatcher(process.pid)
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     _kill_process_group(process)
                     process.communicate()
                     raise subprocess.TimeoutExpired(argv, timeout)
-                try:
-                    captured_stdout, captured_stderr = process.communicate(
-                        input=pending_input,
-                        timeout=min(0.05, remaining),
-                    )
-                    break
-                except subprocess.TimeoutExpired:
-                    pending_input = None
-                    if workspace_quota is not None and workspace_quota.exceeded():
-                        _kill_process_group(process)
-                        process.communicate()
-                        raise ProcessResourceError(
-                            "Child process exceeded its workspace quota."
+                if exit_watcher is not None:
+                    if exit_watcher.wait(min(0.05, remaining)):
+                        _kill_process_group(process, tolerate_exited_leader=True)
+                        captured_stdout, captured_stderr = process.communicate()
+                        break
+                else:  # pragma: no cover - Windows is not a deploy target.
+                    try:
+                        captured_stdout, captured_stderr = process.communicate(
+                            timeout=min(0.05, remaining),
                         )
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                if workspace_quota is not None and workspace_quota.exceeded():
+                    _kill_process_group(process)
+                    process.communicate()
+                    raise ProcessResourceError(
+                        "Child process exceeded its workspace quota."
+                    )
             if workspace_quota is not None and workspace_quota.exceeded():
                 raise ProcessResourceError(
                     "Child process exceeded its workspace quota."
                 )
         finally:
-            _kill_process_group(process)
+            if exit_watcher is not None:
+                exit_watcher.close()
+            if process.returncode is None:
+                _kill_process_group(process)
+                process.communicate()
 
         if capture_output:
             assert stdout_file is not None and stderr_file is not None

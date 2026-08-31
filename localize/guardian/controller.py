@@ -1606,6 +1606,9 @@ class GuardianController:
                     patch_result=patch_result,
                     assessments=assessments,
                     actionable=actionable,
+                    translation_suppressed_feedback_ids=(
+                        translation_suppressed_feedback_ids
+                    ),
                     run_id=run_id,
                     lease_owner=lease_owner,
                 )
@@ -1695,6 +1698,7 @@ class GuardianController:
         patch_result: PatchResult,
         assessments: Sequence[GuardianAssessment],
         actionable: Sequence[tuple[FeedbackEvent, EventRevision]],
+        translation_suppressed_feedback_ids: frozenset[str],
         run_id: str,
         lease_owner: str,
     ) -> str:
@@ -1706,6 +1710,8 @@ class GuardianController:
             assessment.feedback_id
             for assessment in assessments
             if assessment.verdict == "apply"
+            and assessment.feedback_id
+            not in translation_suppressed_feedback_ids
             and assessment.confidence >= self.config.limits.min_apply_confidence
             and assessment.replacements
         }

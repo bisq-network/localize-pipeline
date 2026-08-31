@@ -40,14 +40,17 @@ from localize.guardian.models import (
     CodexAuthMode,
     ExactRepository,
     FeedbackEvent,
+    GuardianAssessment,
     GuardianConfig,
     GuardianLimits,
     GuardianMode,
     GuardianRuntime,
     PreventionPolicy,
+    ProposedReplacement,
     RepositoryPolicy,
     TrustedActor,
 )
+from localize.guardian.policy import PatchResult
 from localize.guardian.state import GuardianState
 from localize.guardian.prevention_runtime import (
     PreventionBatchOutcome,
@@ -627,6 +630,114 @@ def test_propose_prevention_runs_before_translation_publish_and_records_draft(
             "publish",
             "reply",
         ]
+
+
+def test_translation_publication_excludes_prevention_suppressed_revisions(
+    tmp_path: Path,
+) -> None:
+    sequence: list[str] = []
+    broker = FakeBroker(sequence)
+    workspace = FakeWorkspace(tmp_path, HEAD_SHA, sequence)
+    suppressed = FeedbackEvent(
+        repository="acme/widgets",
+        pr_number=12,
+        kind="review_comment",
+        event_id="44",
+        author="native-reviewer",
+        author_id=101,
+        author_type="User",
+        body="Previously applied translation advice.",
+        head_sha=HEAD_SHA,
+        base_sha=BASE_SHA,
+        locale="ru",
+        path=TARGET_PATH,
+        html_url="https://github.com/acme/widgets/pull/12#discussion_r44",
+    )
+    included = replace(
+        suppressed,
+        event_id="45",
+        body="New translation advice.",
+        html_url="https://github.com/acme/widgets/pull/12#discussion_r45",
+    )
+
+    def assessment(event: FeedbackEvent) -> GuardianAssessment:
+        return GuardianAssessment(
+            feedback_id=event.feedback_id,
+            verdict="apply",
+            confidence=0.99,
+            rationale="Validated translation correction.",
+            replacements=(
+                ProposedReplacement(
+                    feedback_id=event.feedback_id,
+                    path=TARGET_PATH,
+                    key="greeting",
+                    locale="ru",
+                    expected_value="old",
+                    proposed_value="new",
+                    confidence=0.99,
+                    evidence=(event.feedback_id,),
+                ),
+            ),
+        )
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        suppressed_revision = state.record_feedback_event(suppressed, observed_at=NOW)
+        included_revision = state.record_feedback_event(included, observed_at=NOW)
+        run_id = state.start_run(
+            repository="acme/widgets",
+            locale="ru",
+            mode=GuardianMode.PROPOSE_PREVENTION,
+            started_at=NOW,
+        )
+        assert state.acquire_lease(
+            name="guardian:poll",
+            owner="test-owner",
+            ttl_seconds=60,
+            now=NOW,
+        )
+        controller = GuardianController(
+            config=_config(GuardianMode.PROPOSE_PREVENTION),
+            state=state,
+            snapshot_provider=FakeSnapshotProvider(()),
+            checkout_factory=None,  # type: ignore[arg-type]
+            codex_driver=FakeCodexDriver(),
+            model_credential_provider=lambda: "scoped-model-key",
+            write_broker_factory=lambda _policy: broker,
+            prevention_runner=FakePreventionRunner(),
+            publish_credential_environment=lambda: {},
+            now=lambda: NOW,
+        )
+
+        controller._publish_translation_commit(
+            policy=_policy(),
+            snapshot=_snapshot(),
+            workspace=workspace,  # type: ignore[arg-type]
+            patch_result=PatchResult(
+                changed_files=(TARGET_PATH,),
+                changed_keys=((TARGET_PATH, "greeting"),),
+            ),
+            assessments=(assessment(suppressed), assessment(included)),
+            actionable=(
+                (suppressed, suppressed_revision),
+                (included, included_revision),
+            ),
+            translation_suppressed_feedback_ids=frozenset(
+                {suppressed.feedback_id}
+            ),
+            run_id=run_id,
+            lease_owner="test-owner",
+        )
+
+        publication = state.replied_publication_for_head(
+            repository="acme/widgets",
+            pr_number=12,
+            head_sha=COMMIT_SHA,
+        )
+        assert publication is not None
+        assert publication.event_revision_ids == (included_revision.revision_id,)
+        assert broker.reply_calls[0]["event_revision_id"] == str(
+            included_revision.revision_id
+        )
 
 
 def test_propose_prevention_authentication_failure_opens_poll_circuit(

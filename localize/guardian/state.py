@@ -1098,7 +1098,8 @@ class GuardianState:
         if input_tokens < 0 or output_tokens < 0:
             raise ValueError("Token counts must be non-negative.")
         settled = _serialize_datetime(settled_at or _now())
-        with self._connection:
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
             row = self._connection.execute(
                 """
                 SELECT run_id, model FROM budget_reservations
@@ -1132,6 +1133,10 @@ class GuardianState:
                 """,
                 (settled, reservation_id),
             )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
 
     def mark_budget_reservation_unknown(
         self,

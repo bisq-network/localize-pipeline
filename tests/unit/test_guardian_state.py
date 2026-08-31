@@ -475,6 +475,8 @@ def test_budget_reservation_is_atomic_and_settles_to_actual_cost(tmp_path: Path)
         ) is None
         assert first.budget_committed_for_day(now.date()) == Decimal("4")
 
+        statements: list[str] = []
+        first._connection.set_trace_callback(statements.append)
         first.settle_budget_reservation(
             reservation,
             actual_cost_usd="0.75",
@@ -482,7 +484,9 @@ def test_budget_reservation_is_atomic_and_settles_to_actual_cost(tmp_path: Path)
             output_tokens=20,
             settled_at=now,
         )
+        first._connection.set_trace_callback(None)
 
+        assert "BEGIN IMMEDIATE" in statements
         assert first.cost_for_day(now.date()) == Decimal("0.75")
         assert first.budget_committed_for_day(now.date()) == Decimal("0.75")
         assert second.try_reserve_budget(

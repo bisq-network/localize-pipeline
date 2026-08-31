@@ -83,6 +83,74 @@ def test_applies_exact_properties_value_and_preserves_all_other_bytes(tmp_path):
     ) == after
 
 
+def test_explicit_glossary_path_must_exist(tmp_path: Path) -> None:
+    config = _write_properties_project(tmp_path)
+    raw = yaml.safe_load(config.read_text(encoding="utf-8"))
+    raw["glossary_file_path"] = "required-glossary.json"
+    config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(PatchPolicyError, match="glossary.*regular file"):
+        apply_replacements(
+            repo_root=tmp_path,
+            pipeline_config_path=config,
+            allowed_paths=("l10n/*.properties",),
+            replacements=(_replacement(),),
+            max_changes=20,
+        )
+
+
+def test_implicit_default_glossary_may_be_absent(tmp_path: Path) -> None:
+    config = _write_properties_project(tmp_path)
+    (tmp_path / "glossary.json").unlink()
+
+    result = apply_replacements(
+        repo_root=tmp_path,
+        pipeline_config_path=config,
+        allowed_paths=("l10n/*.properties",),
+        replacements=(_replacement(),),
+        max_changes=20,
+    )
+
+    assert result.changed_keys == (("l10n/Messages_ru.properties", "push"),)
+
+
+def test_relative_pipeline_config_is_anchored_to_trusted_root(
+    tmp_path: Path,
+) -> None:
+    _write_properties_project(tmp_path)
+
+    result = apply_replacements(
+        repo_root=tmp_path,
+        pipeline_config_path=Path("config.yaml"),
+        trusted_config_root=tmp_path,
+        allowed_paths=("l10n/*.properties",),
+        replacements=(_replacement(),),
+        max_changes=20,
+    )
+
+    assert result.changed_keys == (("l10n/Messages_ru.properties", "push"),)
+
+
+def test_relative_pipeline_config_keeps_symlink_components_for_validation(
+    tmp_path: Path,
+) -> None:
+    _write_properties_project(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (outside / "nested").mkdir()
+    (tmp_path / "linked").symlink_to(outside / "nested", target_is_directory=True)
+
+    with pytest.raises(PatchPolicyError, match="symbolic link"):
+        apply_replacements(
+            repo_root=tmp_path,
+            pipeline_config_path=Path("linked/../config.yaml"),
+            trusted_config_root=tmp_path,
+            allowed_paths=("l10n/*.properties",),
+            replacements=(_replacement(),),
+            max_changes=20,
+        )
+
+
 def test_rejects_java_indexed_placeholder_loss_without_writing(tmp_path):
     config = _write_properties_project(tmp_path)
     target = tmp_path / "l10n/Messages_ru.properties"

@@ -4,9 +4,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from localize.guardian import process as guardian_process
 from localize.guardian.process import (
     ProcessLimits,
     ProcessResourceError,
@@ -66,17 +68,28 @@ def test_timeout_kills_the_entire_process_group(tmp_path: Path) -> None:
         "p=pathlib.Path(sys.argv[1]); "
         "[(p.open('a').write('x'), time.sleep(.02)) for _ in iter(int, 1)]"
     )
-    parent = (
-        "import subprocess,sys,time; "
-        "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]],"
-        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-        "time.sleep(30)"
-    )
+    parent = """
+import pathlib
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[2], sys.argv[1]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+deadline = time.monotonic() + 5
+while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+time.sleep(30)
+"""
 
     with pytest.raises(subprocess.TimeoutExpired):
         run_bounded_process(
             (sys.executable, "-c", parent, str(marker), child),
-            timeout=0.4,
+            timeout=2,
             limits=ProcessLimits.for_timeout(
                 1,
                 max_file_size_bytes=1024 * 1024,
@@ -85,6 +98,57 @@ def test_timeout_kills_the_entire_process_group(tmp_path: Path) -> None:
 
     assert marker.exists()
     _assert_file_stops_changing(marker)
+
+
+def test_workspace_usage_ignores_entries_removed_during_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transient = tmp_path / "transient"
+    transient.write_text("short-lived", encoding="utf-8")
+    original_lstat = Path.lstat
+
+    def racing_lstat(path: Path):
+        if path == transient:
+            raise FileNotFoundError(path)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", racing_lstat)
+
+    assert guardian_process._directory_usage(tmp_path) == (0, 0)
+
+
+@pytest.mark.skipif(guardian_process.os.name != "posix", reason="POSIX process groups")
+def test_reaped_child_process_group_is_never_signalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        guardian_process.os,
+        "killpg",
+        lambda process_group, signal_number: calls.append(
+            (process_group, signal_number)
+        ),
+    )
+    reaped = SimpleNamespace(pid=12345, returncode=0)
+
+    guardian_process._kill_process_group(reaped)  # type: ignore[arg-type]
+
+    assert calls == []
+
+
+def test_bounded_process_round_trips_text_stdin() -> None:
+    completed = run_bounded_process(
+        (sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"),
+        input="guardian input",
+        text=True,
+        capture_output=True,
+        timeout=5,
+        limits=ProcessLimits.for_timeout(5, max_file_size_bytes=1024 * 1024),
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "GUARDIAN INPUT\n"
 
 
 def test_file_size_limit_bounds_one_child_output_file(tmp_path: Path) -> None:
