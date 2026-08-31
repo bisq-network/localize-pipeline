@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import stat
 
+from localize.guardian.filesystem_trust import is_trusted_directory
+
 
 class ExecutableTrustError(ValueError):
     """A configured executable or interpreter chain is mutable or ambiguous."""
@@ -66,11 +68,9 @@ def _require_trusted_executable(
             raise ExecutableTrustError(
                 f"{field} executable has an unsafe ancestor path."
             ) from None
-        if (
-            ancestor.is_symlink()
-            or not stat.S_ISDIR(ancestor_metadata.st_mode)
-            or ancestor_metadata.st_uid not in trusted_owners
-            or stat.S_IMODE(ancestor_metadata.st_mode) & 0o022
+        if ancestor.is_symlink() or not is_trusted_directory(
+            ancestor_metadata,
+            trusted_owners=trusted_owners,
         ):
             raise ExecutableTrustError(
                 f"{field} executable has an unsafe ancestor path."

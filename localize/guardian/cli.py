@@ -35,6 +35,7 @@ from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
 )
+from localize.guardian.filesystem_trust import is_trusted_directory
 from localize.guardian.github import (
     GitHubReader,
     GitHubRepositoryIdentity,
@@ -332,10 +333,9 @@ def _ensure_operator_directory(path: Path, *, purpose: str = "Scheduling") -> No
         trusted_owners = {0}
         if hasattr(os, "getuid"):
             trusted_owners.add(os.getuid())
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid not in trusted_owners
-            or stat.S_IMODE(metadata.st_mode) & 0o022
+        if not is_trusted_directory(
+            metadata,
+            trusted_owners=trusted_owners,
         ):
             location = "directory" if is_leaf else "ancestor"
             raise GuardianCLIError(f"{purpose} {location} is unsafe: {component}")

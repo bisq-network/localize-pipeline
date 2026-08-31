@@ -30,6 +30,7 @@ from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
 )
+from localize.guardian.filesystem_trust import is_trusted_directory
 from localize.guardian.github import (
     FeedbackRevision,
     GitHubAuthenticationError,
@@ -100,11 +101,9 @@ def _validate_trusted_ancestors(path: Path) -> None:
             raise GuardianRuntimeError(
                 "Guardian configuration is unavailable or unsafe."
             ) from None
-        if (
-            ancestor.is_symlink()
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid not in owners
-            or stat.S_IMODE(metadata.st_mode) & 0o022
+        if ancestor.is_symlink() or not is_trusted_directory(
+            metadata,
+            trusted_owners=owners,
         ):
             raise GuardianRuntimeError(
                 "Guardian configuration is unavailable or unsafe."
