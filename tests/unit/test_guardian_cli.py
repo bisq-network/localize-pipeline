@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -803,6 +805,7 @@ def test_doctor_does_not_create_a_missing_state_directory(
 
     assert exit_code == 0
     assert not state_dir.exists()
+    assert list(config_path.parent.glob(".guardian-poll-lock-doctor-*")) == []
     assert "created on first run or install" in capsys.readouterr().out
 
 
@@ -943,6 +946,7 @@ def test_first_scheduled_cli_runs_share_one_lock_from_clean_state(
     config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
     config_path.chmod(0o600)
     gate = tmp_path / "start"
+    ready_paths = tuple(tmp_path / f"ready-{index}" for index in range(2))
     project_root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
     existing_pythonpath = environment.get("PYTHONPATH")
@@ -959,6 +963,9 @@ from localize.guardian import cli, runtime
 
 config_path = Path(sys.argv[1])
 gate = Path(sys.argv[2])
+ready = Path(sys.argv[3])
+contended = Path(sys.argv[4])
+ready.touch()
 deadline = time.monotonic() + 5
 while not gate.exists():
     if time.monotonic() >= deadline:
@@ -967,27 +974,49 @@ while not gate.exists():
 
 def locked_poll(**_kwargs):
     print("owner", flush=True)
-    time.sleep(1)
+    deadline = time.monotonic() + 5
+    while not contended.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("contender did not finish")
+        time.sleep(0.005)
     return 7
 
 runtime._poll_with_locked_state = locked_poll
 result = cli.main(["run", "--config", str(config_path), "--scheduled"])
+if result == 0:
+    contended.touch()
 print(f"result={result}", flush=True)
 """
+    contended = tmp_path / "contended"
     processes = tuple(
         subprocess.Popen(
-            (sys.executable, "-c", script, str(config_path), str(gate)),
+            (
+                sys.executable,
+                "-c",
+                script,
+                str(config_path),
+                str(gate),
+                str(ready_paths[index]),
+                str(contended),
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=environment,
         )
-        for _index in range(2)
+        for index in range(2)
     )
 
+    ready_deadline = time.monotonic() + 10
+    while not all(path.exists() for path in ready_paths):
+        if time.monotonic() >= ready_deadline:
+            break
+        time.sleep(0.005)
+    all_ready = all(path.exists() for path in ready_paths)
     gate.touch()
     results = tuple(process.communicate(timeout=10) for process in processes)
 
+    assert all_ready, results
     assert [process.returncode for process in processes] == [0, 0], results
     assert sorted(stdout.strip() for stdout, _stderr in results) == [
         "owner\nresult=7",
@@ -1064,6 +1093,68 @@ def test_doctor_rejects_an_unsafe_existing_poll_lock(
 
     assert healthy is False
     assert status == "error (paths must be regular and private)"
+    assert list(
+        cli.guardian_state_dir(config_path).glob(".guardian-poll-lock-doctor-*")
+    ) == []
+
+
+def test_doctor_rejects_a_hardlinked_state_database(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    state_path = cli.guardian_state_path(config_path)
+    state_path.write_text("", encoding="utf-8")
+    state_path.chmod(0o600)
+    (tmp_path / "state-alias").hardlink_to(state_path)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+
+
+def test_doctor_rejects_a_hardlinked_sqlite_sidecar_without_mutating_it(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_path = cli.guardian_state_path(config_path)
+    with GuardianState(state_path):
+        pass
+    wal_path = Path(f"{state_path}-wal")
+    if wal_path.exists():
+        wal_path.unlink()
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"do not mutate")
+    sentinel.chmod(0o600)
+    wal_path.hardlink_to(sentinel)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+    assert sentinel.read_bytes() == b"do not mutate"
+
+
+@pytest.mark.parametrize("flock_behavior", ["unsupported", "ineffective"])
+def test_doctor_exercises_real_flock_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flock_behavior: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+
+    def fake_flock(_descriptor: int, _operation: int) -> None:
+        if flock_behavior == "unsupported":
+            raise OSError(errno.ENOTSUP, "unsupported")
+
+    assert guardian_runtime.fcntl is not None
+    monkeypatch.setattr(guardian_runtime.fcntl, "flock", fake_flock)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+    assert list(
+        cli.guardian_state_dir(config_path).glob(".guardian-poll-lock-doctor-*")
+    ) == []
 
 
 def test_doctor_rejects_platforms_without_process_locking(

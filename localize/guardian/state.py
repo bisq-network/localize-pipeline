@@ -24,6 +24,7 @@ _TERMINAL_ACTION_STATUSES = frozenset({"completed", "skipped"})
 _ACTION_STATUSES = _TERMINAL_ACTION_STATUSES | {"failed", "pending"}
 _RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _MAX_ASSESSMENT_RESULT_BYTES = 2 * 1024 * 1024
+_SQLITE_STATE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _COMMITTED_BUDGET_SQL = """
     SELECT
         (SELECT COALESCE(SUM(amount_microusd), 0) FROM costs
@@ -282,6 +283,48 @@ def _store_and_verify_assessment(
         raise RuntimeError("assessment cache identity collision")
 
 
+def _validate_sqlite_state_artifact(
+    path: Path,
+    *,
+    description: str,
+    required: bool,
+) -> os.stat_result | None:
+    """Validate one SQLite inode before the library may open or mutate it."""
+
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        if not required:
+            return None
+        raise ValueError(f"Guardian {description} is unavailable.") from None
+    except OSError:
+        raise ValueError(f"Guardian {description} is unavailable or unsafe.") from None
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"Guardian {description} must not be a symlink.")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"Guardian {description} must be a regular file.")
+    if metadata.st_nlink != 1:
+        raise ValueError(f"Guardian {description} must not be hard-linked.")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise ValueError(
+            f"Guardian {description} must be owned by the current user."
+        )
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise ValueError(f"Guardian {description} must have mode 0600.")
+    return metadata
+
+
+def _validate_sqlite_state_artifacts(database_path: Path) -> None:
+    """Reject unsafe main, WAL, shared-memory, or rollback-journal aliases."""
+
+    for suffix in _SQLITE_STATE_SUFFIXES:
+        _validate_sqlite_state_artifact(
+            Path(f"{database_path}{suffix}"),
+            description="state database" if not suffix else "state artifact",
+            required=False,
+        )
+
+
 class GuardianState:
     """Own a SQLite connection and the guardian's durable audit state."""
 
@@ -301,29 +344,54 @@ class GuardianState:
         if stat.S_IMODE(parent_metadata.st_mode) != 0o700:
             raise ValueError("Guardian state directory must have mode 0700.")
 
-        if self.database_path.is_symlink():
-            raise ValueError("Guardian state database must not be a symlink.")
-        if not self.database_path.exists():
+        _validate_sqlite_state_artifacts(self.database_path)
+        if _validate_sqlite_state_artifact(
+            self.database_path,
+            description="state database",
+            required=False,
+        ) is None:
             flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
-            descriptor = os.open(self.database_path, flags, 0o600)
             try:
-                os.fchmod(descriptor, 0o600)
+                descriptor = os.open(self.database_path, flags, 0o600)
+            except FileExistsError:
+                # A direct concurrent caller may have completed the same
+                # exclusive creation. Production callers are process-locked.
+                descriptor = -1
+            except OSError:
+                raise ValueError(
+                    "Guardian state database is unavailable or unsafe."
+                ) from None
+            try:
+                if descriptor >= 0:
+                    os.fchmod(descriptor, 0o600)
+            except OSError:
+                raise ValueError(
+                    "Guardian state database is unavailable or unsafe."
+                ) from None
             finally:
-                os.close(descriptor)
-        database_metadata = self.database_path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(database_metadata.st_mode):
-            raise ValueError("Guardian state database must be a regular file.")
-        if hasattr(os, "getuid") and database_metadata.st_uid != os.getuid():
-            raise ValueError("Guardian state database must be owned by the current user.")
-        if stat.S_IMODE(database_metadata.st_mode) != 0o600:
-            raise ValueError("Guardian state database must have mode 0600.")
-        self._connection = sqlite3.connect(self.database_path, timeout=30.0)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.execute("PRAGMA journal_mode = WAL")
-        self._initialize_schema()
+                if descriptor >= 0:
+                    os.close(descriptor)
+        _validate_sqlite_state_artifact(
+            self.database_path,
+            description="state database",
+            required=True,
+        )
+        _validate_sqlite_state_artifacts(self.database_path)
+        try:
+            self._connection = sqlite3.connect(self.database_path, timeout=30.0)
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA journal_mode = WAL")
+            _validate_sqlite_state_artifacts(self.database_path)
+            self._initialize_schema()
+            _validate_sqlite_state_artifacts(self.database_path)
+        except BaseException:
+            connection = getattr(self, "_connection", None)
+            if connection is not None:
+                connection.close()
+            raise
 
     def __enter__(self) -> GuardianState:
         return self

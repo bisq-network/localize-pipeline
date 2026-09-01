@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from typing import Iterator
 
@@ -567,7 +568,11 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
         and FakeController(),
     )
 
-    result = runtime.run_once(config_path=config_path)
+    previous_umask = os.umask(0o777)
+    try:
+        result = runtime.run_once(config_path=config_path)
+    finally:
+        os.umask(previous_umask)
 
     state_directory = tmp_path / ".guardian"
     state_path = state_directory / "state.sqlite3"
@@ -577,6 +582,11 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
     assert captured["github_command"].argv == ("gh", "auth", "token")
     assert _mode(state_directory) == 0o700
     assert _mode(state_path) == 0o600
+    assert _mode(state_directory / "poll.lock") == 0o600
+    assert all(
+        _mode(artifact) == 0o600 and artifact.stat().st_nlink == 1
+        for artifact in state_directory.glob("state.sqlite3*")
+    )
 
 
 def test_run_once_never_overlaps_a_poll_for_the_same_config(
@@ -657,8 +667,12 @@ def test_prepare_private_state_rejects_a_hardlinked_database(
     database.chmod(0o600)
     (tmp_path / "state-alias").hardlink_to(database)
 
-    with pytest.raises(runtime.GuardianRuntimeError, match="private"):
-        runtime._prepare_private_state(config_path)
+    directory, returned_database = runtime._prepare_private_state(config_path)
+
+    assert returned_database == database
+    with runtime._exclusive_poll_lock(directory):
+        with pytest.raises(runtime.GuardianRuntimeError, match="private"):
+            runtime._validate_private_state_artifacts(database)
 
 
 @pytest.mark.skipif(
@@ -671,6 +685,7 @@ def test_first_poll_lock_creation_is_race_safe_across_processes(
     config_path = tmp_path / "guardian.yaml"
     _write_minimal_config(config_path)
     gate = tmp_path / "start"
+    ready_paths = tuple(tmp_path / f"ready-{index}" for index in range(2))
     project_root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
     existing_pythonpath = environment.get("PYTHONPATH")
@@ -687,6 +702,9 @@ from localize.guardian import runtime
 
 config_path = Path(sys.argv[1])
 gate = Path(sys.argv[2])
+ready = Path(sys.argv[3])
+contended = Path(sys.argv[4])
+ready.touch()
 deadline = time.monotonic() + 5
 while not gate.exists():
     if time.monotonic() >= deadline:
@@ -696,29 +714,51 @@ state_directory, _state_path = runtime._prepare_private_state(config_path)
 try:
     with runtime._exclusive_poll_lock(state_directory):
         print("locked", flush=True)
-        time.sleep(0.5)
+        deadline = time.monotonic() + 5
+        while not contended.exists():
+            if time.monotonic() >= deadline:
+                raise SystemExit(3)
+            time.sleep(0.005)
 except runtime._GuardianPollAlreadyRunning:
+    contended.touch()
     print("contended", flush=True)
 """
+    contended = tmp_path / "contended"
     processes = tuple(
         subprocess.Popen(
-            (sys.executable, "-c", script, str(config_path), str(gate)),
+            (
+                sys.executable,
+                "-c",
+                script,
+                str(config_path),
+                str(gate),
+                str(ready_paths[index]),
+                str(contended),
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             env=environment,
         )
-        for _index in range(2)
+        for index in range(2)
     )
 
+    ready_deadline = time.monotonic() + 10
+    while not all(path.exists() for path in ready_paths):
+        if time.monotonic() >= ready_deadline:
+            break
+        time.sleep(0.005)
+    all_ready = all(path.exists() for path in ready_paths)
     gate.touch()
     results = tuple(process.communicate(timeout=10) for process in processes)
 
+    assert all_ready, results
     assert [process.returncode for process in processes] == [0, 0], results
     assert sorted(stdout.strip() for stdout, _stderr in results) == [
         "contended",
         "locked",
     ]
+    assert all(stderr == "" for _stdout, stderr in results)
 
 
 def test_poll_lock_is_released_when_the_poll_raises(tmp_path: Path) -> None:
@@ -731,6 +771,65 @@ def test_poll_lock_is_released_when_the_poll_raises(tmp_path: Path) -> None:
 
     with runtime._exclusive_poll_lock(state_directory):
         pass
+
+
+def test_poll_lock_creation_secures_mode_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    previous_umask = os.umask(0o777)
+    try:
+        with runtime._exclusive_poll_lock(state_directory):
+            pass
+    finally:
+        os.umask(previous_umask)
+
+    assert _mode(state_directory / "poll.lock") == 0o600
+
+
+def test_poll_lock_waits_for_an_exclusive_creator_to_finish_initializing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o000)
+    waits = 0
+
+    def finish_creator(_seconds: float) -> None:
+        nonlocal waits
+        waits += 1
+        lock_path.chmod(0o600)
+
+    monkeypatch.setattr(runtime.time, "sleep", finish_creator)
+
+    with runtime._exclusive_poll_lock(state_directory):
+        pass
+
+    assert waits == 1
+    assert _mode(lock_path) == 0o600
+
+
+def test_poll_lock_never_repairs_a_preexisting_unsafe_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o000)
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="lock"):
+        with runtime._exclusive_poll_lock(state_directory):
+            pass
+
+    assert _mode(lock_path) == 0o000
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "hardlink"])

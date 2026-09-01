@@ -64,7 +64,9 @@ from localize.guardian.runtime import (
     GuardianRuntimeError,
     _poll_locking_is_available,
     _preflight_poll_lock,
+    _probe_poll_lock_semantics,
     _snapshot_operator_pipeline_configs,
+    _validate_private_state_artifacts,
     _validate_subscription_codex_home,
     load_trusted_guardian_config,
 )
@@ -381,6 +383,8 @@ def _validate_private_regular_file(path: Path, *, mode: int) -> None:
         raise GuardianCLIError(f"Could not inspect Guardian file: {path}") from exc
     if not stat.S_ISREG(metadata.st_mode):
         raise GuardianCLIError(f"Guardian path is not a regular file: {path}")
+    if metadata.st_nlink != 1:
+        raise GuardianCLIError(f"Guardian file must not be hard-linked: {path}")
     if not _owned_by_current_user(metadata):
         raise GuardianCLIError(
             f"Guardian file must be owned by the current user: {path}"
@@ -972,14 +976,18 @@ def _state_directory_doctor(config_path: Path) -> tuple[str, bool]:
         return "error (process locking is unavailable)", False
     if not runtime_dir.exists() and not runtime_dir.is_symlink():
         if os.access(runtime_dir.parent, os.W_OK):
+            try:
+                _probe_poll_lock_semantics(runtime_dir.parent)
+            except GuardianRuntimeError:
+                return "error (paths must be regular and private)", False
             return "ready (created on first run or install)", True
         return "error (parent directory is not writable)", False
     try:
         _ensure_private_directory(runtime_dir)
         state_path = guardian_state_path(config_path)
-        if state_path.exists() or state_path.is_symlink():
-            _validate_private_regular_file(state_path, mode=0o600)
+        _validate_private_state_artifacts(state_path)
         _preflight_poll_lock(runtime_dir)
+        _probe_poll_lock_semantics(runtime_dir)
     except (GuardianCLIError, GuardianRuntimeError):
         return "error (paths must be regular and private)", False
     return "ok", True

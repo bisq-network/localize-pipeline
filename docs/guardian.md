@@ -209,7 +209,7 @@ Create an operator-owned config from the report-only example:
 
 ```bash
 GUARDIAN_CONFIG="$HOME/.config/localize/guardian.yaml"
-mkdir -p "$HOME/.config/localize"
+install -d -m 700 "$HOME/.config/localize"
 localize guardian init --config "$GUARDIAN_CONFIG"
 ```
 

@@ -18,6 +18,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import tempfile
+import time
 from typing import Any
 
 import httpx
@@ -68,7 +69,7 @@ from localize.guardian.prevention_runtime import (
 )
 from localize.guardian.scheduler import is_run_due
 from localize.guardian.signing import canonical_signing_key
-from localize.guardian.state import GuardianState
+from localize.guardian.state import GuardianState, _validate_sqlite_state_artifacts
 from localize.guardian.workspace import ExactRevision, materialize_exact_checkout
 
 
@@ -78,6 +79,8 @@ _POLL_ATTEMPT_COMPONENT = "guardian-poll-attempt"
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_CODEX_AUTH_BYTES = 1_048_576
 _MAX_OPERATOR_PIPELINE_FILE_BYTES = 1_048_576
+_POLL_LOCK_INITIALIZATION_TIMEOUT_SECONDS = 1.0
+_POLL_LOCK_RETRY_SECONDS = 0.002
 _WRITE_MODES = frozenset(
     {
         GuardianMode.APPLY_OWNED_TRANSLATIONS,
@@ -197,18 +200,6 @@ def _prepare_private_state(config_path: Path) -> tuple[Path, Path]:
         ):
             raise GuardianRuntimeError("Guardian state path must remain private.")
 
-        try:
-            metadata = database.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_nlink != 1
-                or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-            ):
-                raise GuardianRuntimeError("Guardian state path must remain private.")
     except GuardianRuntimeError:
         raise
     except OSError:
@@ -222,10 +213,19 @@ def _poll_locking_is_available() -> bool:
     return fcntl is not None and callable(getattr(fcntl, "flock", None))
 
 
-def _validate_poll_lock_descriptor(descriptor: int) -> None:
+def _poll_lock_descriptor_metadata(descriptor: int) -> os.stat_result:
+    try:
+        return os.fstat(descriptor)
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian poll lock is unavailable or unsafe."
+        ) from None
+
+
+def _validate_poll_lock_descriptor(descriptor: int) -> os.stat_result:
     """Require the exact private regular inode used for process locking."""
 
-    metadata = os.fstat(descriptor)
+    metadata = _poll_lock_descriptor_metadata(descriptor)
     if (
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_nlink != 1
@@ -233,6 +233,99 @@ def _validate_poll_lock_descriptor(descriptor: int) -> None:
         or stat.S_IMODE(metadata.st_mode) != 0o600
     ):
         raise GuardianRuntimeError("Guardian poll lock is unavailable or unsafe.")
+    return metadata
+
+
+def _poll_lock_inode_may_be_initializing(metadata: os.stat_result) -> bool:
+    """Recognize only the restrictive-umask window of our exclusive creator."""
+
+    mode = stat.S_IMODE(metadata.st_mode)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and (not hasattr(os, "getuid") or metadata.st_uid == os.getuid())
+        and metadata.st_size == 0
+        and mode != 0o600
+        and mode & ~0o600 == 0
+    )
+
+
+def _poll_lock_path_may_be_initializing(lock_path: Path) -> bool:
+    try:
+        metadata = lock_path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return _poll_lock_inode_may_be_initializing(metadata)
+
+
+def _open_private_poll_lock(lock_path: Path) -> int:
+    """Create an exact 0600 lock or open a previously validated lock inode."""
+
+    flags = os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    deadline = time.monotonic() + _POLL_LOCK_INITIALIZATION_TIMEOUT_SECONDS
+    while True:
+        created = False
+        try:
+            try:
+                descriptor = os.open(
+                    lock_path,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                created = True
+            except FileExistsError:
+                descriptor = os.open(lock_path, flags)
+        except FileNotFoundError:
+            if time.monotonic() < deadline:
+                time.sleep(_POLL_LOCK_RETRY_SECONDS)
+                continue
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+        except PermissionError:
+            if (
+                time.monotonic() < deadline
+                and _poll_lock_path_may_be_initializing(lock_path)
+            ):
+                time.sleep(_POLL_LOCK_RETRY_SECONDS)
+                continue
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+        except OSError:
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+            _validate_poll_lock_descriptor(descriptor)
+            return descriptor
+        except GuardianRuntimeError:
+            try:
+                metadata = _poll_lock_descriptor_metadata(descriptor)
+            except GuardianRuntimeError:
+                os.close(descriptor)
+                raise
+            os.close(descriptor)
+            if (
+                not created
+                and time.monotonic() < deadline
+                and _poll_lock_inode_may_be_initializing(metadata)
+            ):
+                time.sleep(_POLL_LOCK_RETRY_SECONDS)
+                continue
+            raise
+        except OSError:
+            os.close(descriptor)
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
 
 
 def _preflight_poll_lock(state_directory: Path) -> None:
@@ -264,27 +357,49 @@ def _preflight_poll_lock(state_directory: Path) -> None:
         os.close(descriptor)
 
 
+def _probe_poll_lock_semantics(parent_directory: Path) -> None:
+    """Prove exclusive contention and release on a disposable private inode."""
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".guardian-poll-lock-doctor-",
+            dir=parent_directory,
+        ) as raw_directory:
+            probe_directory = Path(raw_directory)
+            probe_directory.chmod(0o700)
+            with _exclusive_poll_lock(probe_directory):
+                try:
+                    with _exclusive_poll_lock(probe_directory):
+                        pass
+                except _GuardianPollAlreadyRunning:
+                    pass
+                else:
+                    raise GuardianRuntimeError(
+                        "Guardian process locking is unavailable on this platform."
+                    )
+            with _exclusive_poll_lock(probe_directory):
+                pass
+    except GuardianRuntimeError:
+        raise
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian process locking is unavailable on this platform."
+        ) from None
+
+
 @contextmanager
 def _exclusive_poll_lock(state_directory: Path) -> Iterator[None]:
     """Hold one private, non-blocking process lock for the complete poll."""
 
-    if fcntl is None:
+    if not _poll_locking_is_available():
         raise GuardianRuntimeError(
             "Guardian process locking is unavailable on this platform."
         )
+    assert fcntl is not None
     lock_path = state_directory / "poll.lock"
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(lock_path, flags, 0o600)
-    except OSError:
-        raise GuardianRuntimeError("Guardian poll lock is unavailable or unsafe.") from None
+    descriptor = _open_private_poll_lock(lock_path)
     locked = False
     try:
-        _validate_poll_lock_descriptor(descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
@@ -302,6 +417,15 @@ def _exclusive_poll_lock(state_directory: Path) -> Iterator[None]:
             except OSError:
                 pass
         os.close(descriptor)
+
+
+def _validate_private_state_artifacts(database: Path) -> None:
+    """Apply one redacted runtime boundary to all SQLite state artifacts."""
+
+    try:
+        _validate_sqlite_state_artifacts(database)
+    except (OSError, ValueError):
+        raise GuardianRuntimeError("Guardian state path must remain private.") from None
 
 
 def _require_private_operator_directory(path: Path) -> Path:
@@ -1055,6 +1179,7 @@ def run_once(config_path: Path, scheduled: bool = False) -> int:
     state_directory, state_path = _prepare_private_state(resolved_config)
     try:
         with _exclusive_poll_lock(state_directory):
+            _validate_private_state_artifacts(state_path)
             return _poll_with_locked_state(
                 config=config,
                 resolved_config=resolved_config,
