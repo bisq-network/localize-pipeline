@@ -549,8 +549,9 @@ exec(compile(command[3], "<guardian-probe>", "exec"), {"__name__": "__main__"})
         )
 
 
-def test_sandbox_probe_accepts_sandbox_that_denies_socket_creation(
+def test_sandbox_probe_accepts_denied_socket_and_cgroup_access(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     stub_network_canaries: None,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -560,6 +561,7 @@ def test_sandbox_probe_accepts_sandbox_that_denies_socket_creation(
     wrapper = tmp_path / "deny-all-sockets.py"
     wrapper.write_text(
         """
+import os
 import pathlib
 import socket
 import sys
@@ -576,11 +578,19 @@ def deny_socket(*_args, **_kwargs):
 
 pathlib.Path.read_bytes = deny_bytes
 pathlib.Path.write_bytes = deny_bytes
+os.open = deny_bytes
 socket.socket = deny_socket
 sys.argv = ["-c", *command[4:]]
 exec(compile(command[3], "<guardian-probe>", "exec"), {"__name__": "__main__"})
 """.lstrip(),
         encoding="utf-8",
+    )
+    cgroup_parent_procs = tmp_path / "cgroup.procs"
+    cgroup_parent_procs.touch()
+    monkeypatch.setattr(
+        prevention_runtime,
+        "linux_cgroup_parent_procs",
+        lambda: cgroup_parent_procs,
     )
     runner = SandboxedTestRunner(timeout_seconds=10)
 
