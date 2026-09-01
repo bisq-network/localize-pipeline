@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -246,10 +247,13 @@ def test_scheduled_signing_program_is_required_only_for_write_modes(
 def test_manual_ssh_write_requires_a_trusted_absolute_signing_program(
     tmp_path: Path,
 ) -> None:
+    signing_program = shutil.which("ssh-keygen")
+    if signing_program is None:
+        pytest.skip("OpenSSH ssh-keygen is unavailable")
     ssh_runtime = replace(
         _config().runtime,
         signing_format=SigningFormat.SSH,
-        signing_program="/usr/bin/ssh-keygen",
+        signing_program=str(Path(signing_program).resolve()),
         signing_key="SHA256:" + "A" * 43,
         signing_public_key="/keys/guardian.pub",
     )
