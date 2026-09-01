@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 import subprocess
 import sys
 import time
@@ -96,6 +98,130 @@ time.sleep(30)
             ),
         )
 
+    assert marker.exists()
+    _assert_file_stops_changing(marker)
+
+
+def test_process_limits_can_require_linux_cgroup_containment() -> None:
+    limits = ProcessLimits.for_timeout(
+        5,
+        max_file_size_bytes=1024 * 1024,
+        require_linux_cgroup=True,
+    )
+
+    assert limits.require_linux_cgroup is True
+
+
+def test_cgroup_escape_target_is_linux_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(guardian_process.platform, "system", lambda: "Darwin")
+
+    assert guardian_process.linux_cgroup_parent_procs() is None
+
+
+def test_cgroup_escape_target_is_the_current_parent_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "guardian"
+    parent.mkdir()
+    control = parent / "cgroup.procs"
+    control.touch()
+    monkeypatch.setattr(guardian_process.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        guardian_process,
+        "_current_linux_cgroup_parent",
+        lambda: parent,
+    )
+
+    assert guardian_process.linux_cgroup_parent_procs() == control
+
+
+def test_required_linux_cgroup_failure_prevents_target_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "must-not-exist"
+
+    def fail_create(_cls: type[object]) -> None:
+        raise ProcessResourceError("cgroup unavailable")
+
+    monkeypatch.setattr(guardian_process.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        guardian_process._LinuxCgroupV2Scope,
+        "create",
+        classmethod(fail_create),
+    )
+
+    with pytest.raises(ProcessResourceError, match="cgroup unavailable"):
+        run_bounded_process(
+            (
+                sys.executable,
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()",
+                str(marker),
+            ),
+            timeout=5,
+            limits=ProcessLimits.for_timeout(
+                5,
+                max_file_size_bytes=1024 * 1024,
+                require_linux_cgroup=True,
+            ),
+        )
+
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="Linux cgroup v2")
+def test_linux_cgroup_kills_a_setsid_descendant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_delegated_parent = os.environ.get("LOCALIZE_GUARDIAN_TEST_CGROUP")
+    if raw_delegated_parent is None:
+        pytest.skip("no delegated cgroup v2 parent available")
+    delegated_parent = Path(raw_delegated_parent).resolve(strict=True)
+    marker = tmp_path / "escaped-heartbeat"
+    child = (
+        "import os,pathlib,sys,time; os.setsid(); "
+        "p=pathlib.Path(sys.argv[1]); "
+        "[(p.open('a').write('x'), time.sleep(.02)) for _ in iter(int, 1)]"
+    )
+    parent = """
+import pathlib
+import subprocess
+import sys
+import time
+
+p = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[2], sys.argv[1]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+deadline = time.monotonic() + 2
+while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+print(p.pid, flush=True)
+"""
+    monkeypatch.setattr(
+        guardian_process,
+        "_current_linux_cgroup_parent",
+        lambda: delegated_parent,
+    )
+
+    completed = run_bounded_process(
+        (sys.executable, "-c", parent, str(marker), child),
+        capture_output=True,
+        text=True,
+        timeout=5,
+        limits=ProcessLimits.for_timeout(
+            5,
+            max_file_size_bytes=1024 * 1024,
+            require_linux_cgroup=True,
+        ),
+    )
+
+    assert completed.stdout.strip().isdigit()
     assert marker.exists()
     _assert_file_stops_changing(marker)
 

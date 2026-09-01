@@ -158,6 +158,7 @@ def test_codex_driver_uses_read_only_contract_and_scrubbed_environment(
     assert kwargs["check"] is False
     assert kwargs["timeout"] == 37
     assert kwargs["start_new_session"] is True
+    assert kwargs["limits"].require_linux_cgroup is True
 
     child_env = kwargs["env"]
     assert "OPENAI_API_KEY" not in child_env

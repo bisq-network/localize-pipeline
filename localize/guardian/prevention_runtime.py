@@ -56,6 +56,7 @@ from localize.guardian.process import (
     ProcessLimits,
     ProcessResourceError,
     WorkspaceQuota,
+    linux_cgroup_parent_procs,
     run_bounded_process,
 )
 from localize.guardian.state import GuardianState, PreventionDraftRecord
@@ -89,6 +90,7 @@ tools. The controller will independently reject extra paths and prove the regres
 UNTRUSTED_REQUEST_JSON
 """
 _SANDBOX_PROBE = r"""
+import os
 import pathlib
 import socket
 import sys
@@ -102,6 +104,7 @@ import sys
     tcp_port,
     unix_socket_path,
     nonce,
+    cgroup_parent_procs,
 ) = sys.argv[1:]
 unsafe = False
 try:
@@ -160,6 +163,20 @@ if unix_socket_path and hasattr(socket, "AF_UNIX"):
     finally:
         if probe is not None:
             probe.close()
+if cgroup_parent_procs:
+    descriptor = None
+    try:
+        descriptor = os.open(
+            cgroup_parent_procs,
+            os.O_WRONLY | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError:
+        pass
+    else:
+        unsafe = True
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 raise SystemExit(1 if unsafe else 0)
 """
 
@@ -864,6 +881,7 @@ class PreventionCodexAuthor:
             process_limits = ProcessLimits.for_timeout(
                 self.timeout_seconds,
                 max_file_size_bytes=file_limit,
+                require_linux_cgroup=True,
             )
             workspace_quota = WorkspaceQuota.capture(
                 workspace,
@@ -956,6 +974,7 @@ class SandboxedTestRunner:
         process_limits = ProcessLimits.for_timeout(
             self.timeout_seconds,
             max_file_size_bytes=1024 * 1024,
+            require_linux_cgroup=True,
         )
         workspace_quota = WorkspaceQuota.capture(
             workspace,
@@ -963,6 +982,7 @@ class SandboxedTestRunner:
             max_added_entries=64,
         )
         try:
+            cgroup_escape_target = linux_cgroup_parent_procs()
             with _network_canaries() as (tcp_host, tcp_port, unix_socket_path):
                 completed = run_bounded_process(
                     [
@@ -979,6 +999,11 @@ class SandboxedTestRunner:
                         str(tcp_port),
                         unix_socket_path,
                         nonce,
+                        (
+                            str(cgroup_escape_target)
+                            if cgroup_escape_target is not None
+                            else ""
+                        ),
                     ],
                     cwd=workspace,
                     shell=False,
@@ -1026,6 +1051,7 @@ class SandboxedTestRunner:
             process_limits = ProcessLimits.for_timeout(
                 self.timeout_seconds,
                 max_file_size_bytes=16 * 1024 * 1024,
+                require_linux_cgroup=True,
             )
             workspace_quota = WorkspaceQuota.capture(
                 workspace,

@@ -56,6 +56,7 @@ from localize.guardian.process import (
     ProcessLimits,
     ProcessResourceError,
     WorkspaceQuota,
+    linux_cgroup_parent_procs,
     run_bounded_process,
 )
 from localize.guardian.runtime import (
@@ -157,6 +158,7 @@ nonce=$5
 tcp_port=$6
 unix_socket_path=$7
 workspace_write=$8
+cgroup_parent_procs=$9
 unsafe=0
 
 if ! value=$(/bin/cat "$inside_read" 2>/dev/null) || [ "$value" != "$nonce" ]; then
@@ -180,6 +182,10 @@ if /usr/bin/nc -n -z -w 1 127.0.0.1 "$tcp_port" >/dev/null 2>&1; then
 fi
 if [ -n "$unix_socket_path" ] && \
     /usr/bin/nc -U -z -w 1 "$unix_socket_path" >/dev/null 2>&1; then
+    unsafe=1
+fi
+if [ -n "$cgroup_parent_procs" ] && \
+    (: > "$cgroup_parent_procs") 2>/dev/null; then
     unsafe=1
 fi
 
@@ -801,7 +807,9 @@ def _codex_capability_probe(
             process_limits = ProcessLimits.for_timeout(
                 15,
                 max_file_size_bytes=4 * 1024 * 1024,
+                require_linux_cgroup=True,
             )
+            cgroup_escape_target = linux_cgroup_parent_procs()
             workspace_quota = WorkspaceQuota.capture(
                 root,
                 max_growth_bytes=16 * 1024 * 1024,
@@ -856,6 +864,11 @@ def _codex_capability_probe(
                         str(tcp_port),
                         unix_socket_path,
                         "1" if authoring else "0",
+                        (
+                            str(cgroup_escape_target)
+                            if cgroup_escape_target is not None
+                            else ""
+                        ),
                     ],
                     shell=False,
                     capture_output=True,

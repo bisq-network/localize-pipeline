@@ -438,6 +438,12 @@ def test_codex_capability_probe_uses_exact_isolated_profile_and_flags(
 
     monkeypatch.setattr(cli, "_doctor_network_canaries", fake_canaries)
     monkeypatch.setattr(cli, "run_bounded_process", fake_run)
+    cgroup_parent_procs = Path("/sys/fs/cgroup/guardian/cgroup.procs")
+    monkeypatch.setattr(
+        cli,
+        "linux_cgroup_parent_procs",
+        lambda: cgroup_parent_procs,
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-cross")
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-cross")
 
@@ -458,10 +464,11 @@ def test_codex_capability_probe_uses_exact_isolated_profile_and_flags(
     assert filesystem_setting in flag_argv
     assert sandbox_argv[sandbox_argv.index("--permission-profile") + 1] == profile
     assert filesystem_setting in sandbox_argv
-    assert sandbox_argv[-1] == write_flag
+    assert sandbox_argv[-2:] == [write_flag, str(cgroup_parent_procs)]
     assert sandbox_argv[sandbox_argv.index("--") + 1 :][:2] == ["/bin/sh", "-c"]
     for kwargs in (flag_kwargs, sandbox_kwargs):
         assert kwargs["shell"] is False
+        assert kwargs["limits"].require_linux_cgroup is True
         environment = kwargs["env"]
         assert "OPENAI_API_KEY" not in environment
         assert "GITHUB_TOKEN" not in environment

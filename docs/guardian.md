@@ -126,6 +126,31 @@ output. It then reconstructs locale, feedback identity, and source values from
 trusted controller data and independently applies every policy check. Structured
 output constrains parsing; it does not make model output trusted.
 
+### Process containment
+
+Every Codex invocation and focused prevention test runs in a new process
+session with inherited CPU, file-size, descriptor, and supported process-count
+limits. On Linux, the Guardian additionally requires a fresh cgroup-v2 leaf for
+each bounded invocation. It joins the direct child before `exec`, activates the
+kernel's recursive `cgroup.kill` control on every completion path, waits for
+`populated 0`, and only then removes the leaf. This includes a descendant that
+calls `setsid()` or `setpgid()` and escapes the original process group.
+
+The current Linux service or container cgroup must be delegated to the Guardian
+operator so it can create those transient leaves. `guardian doctor` performs a
+real create/join/kill/remove canary and fails closed when cgroup v2, delegation,
+or `cgroup.kill` is unavailable. The cgroup is a lifecycle boundary, not a
+filesystem sandbox: the Codex and prevention-test sandbox canaries also require
+that an untrusted tool cannot open the parent `cgroup.procs` for writing. That
+denial prevents a same-user descendant from migrating out of the leaf.
+
+macOS has no cgroup-v2 equivalent. There the resource limits, process-group
+cleanup, Codex permission profile, and operator-supplied prevention sandbox
+remain in force, but process-group cleanup alone is not a hard boundary against
+a deliberately detached descendant. Operators who require kernel-enforced
+descendant teardown should run the Guardian in a Linux container or VM whose
+outer runtime also tears down the complete container on exit.
+
 The shipped Guardian default is `gpt-5.6-terra` with reasoning effort `high`.
 Terra is OpenAI's balanced intelligence/cost model and currently uses about
 half Sol's Codex token-credit rate; `high` retains deliberate reasoning for
@@ -325,9 +350,12 @@ write generated paths inside the test workspace
 while reads and writes of generated paths outside it are denied. It also
 requires denial of an AF_INET loopback bind and a connection to a live parent
 loopback canary, plus denial of a filesystem AF_UNIX canary connection when the
-platform supports it. A failed probe rejects the prevention candidate. This
-focused probe does not prove the policy's behavior for every host path or
-network route; the operator still owns and maintains the OS sandbox policy.
+platform supports it. On Linux it also requires denial of a write-open on the
+parent cgroup's `cgroup.procs`, which would otherwise let a same-user test
+process leave its recursive kill scope. A failed probe rejects the prevention
+candidate. This focused probe does not prove the policy's behavior for every
+host path or network route; the operator still owns and maintains the OS sandbox
+policy.
 The parent Guardian process must be allowed to create those local canaries; a
 host policy that blocks their creation also fails prevention closed.
 
@@ -492,6 +520,8 @@ policy changes. If the ChatGPT session expires or is revoked, run
   writes; `prepare` was not mistaken for a retained diff preview.
 - The operator-supplied prevention sandbox prefix and policy were tested outside
   the Guardian, and the Guardian's focused runtime confinement probe passes.
+- Linux deployments provide a delegated cgroup-v2 parent, and `doctor` proves
+  that detached descendants are included in its cleanup scope.
 - Every prevention test command uses an absolute operator-controlled executable
   outside the exact checkout.
 - Every private source repository and private prevention target has its own

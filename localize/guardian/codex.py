@@ -822,6 +822,7 @@ class CodexDriver:
             process_limits = ProcessLimits.for_timeout(
                 self.timeout_seconds,
                 max_file_size_bytes=16 * 1024 * 1024,
+                require_linux_cgroup=True,
             )
             workspace_quota = WorkspaceQuota.capture(
                 temp_root,

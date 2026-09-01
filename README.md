@@ -279,6 +279,12 @@ one scheduled poll per local calendar day, whether it succeeds or fails;
 diagnose a failed scheduled attempt and retry it with an explicit manual
 `guardian run`.
 
+On Linux, bounded Codex and prevention-test processes require a delegated
+cgroup-v2 parent and are recursively terminated through `cgroup.kill`, including
+descendants that create another process group or session. `guardian doctor`
+checks that boundary and the sandbox's denial of parent-cgroup migration. See
+the full guide for the macOS containment tradeoff.
+
 ## Bootstrap A Project PR
 
 To onboard another repository without hand-copying files, run:

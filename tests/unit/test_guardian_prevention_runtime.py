@@ -230,6 +230,7 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     assert "Preserve indexed placeholders" in kwargs["input"]
     assert "Preserve indexed placeholders" not in argv
     assert kwargs["timeout"] == 17
+    assert kwargs["limits"].require_linux_cgroup is True
     assert kwargs["env"]["CODEX_API_KEY"] == "explicit-model-key"
     assert "OPENAI_API_KEY" not in kwargs["env"]
     for forbidden in ("GITHUB_TOKEN", "GH_TOKEN", "GIT_ASKPASS", "GNUPGHOME"):
@@ -323,6 +324,12 @@ def test_sandboxed_runner_uses_identical_configured_argv_and_minimal_environment
         return subprocess.CompletedProcess(argv, next(returncodes))
 
     monkeypatch.setattr(prevention_runtime, "run_bounded_process", fake_run)
+    cgroup_parent_procs = Path("/sys/fs/cgroup/guardian/cgroup.procs")
+    monkeypatch.setattr(
+        prevention_runtime,
+        "linux_cgroup_parent_procs",
+        lambda: cgroup_parent_procs,
+    )
     monkeypatch.setenv("GITHUB_TOKEN", "forbidden")
     monkeypatch.setenv("OPENAI_API_KEY", "forbidden")
     results = SandboxedTestRunner(timeout_seconds=23).run_pair(
@@ -347,6 +354,8 @@ def test_sandboxed_runner_uses_identical_configured_argv_and_minimal_environment
     assert [calls[1][0], calls[3][0]] == [expected, expected]
     assert calls[0][0][:prefix_length] == sandbox_prefix
     assert calls[2][0][:prefix_length] == sandbox_prefix
+    assert calls[0][0][-1] == str(cgroup_parent_procs)
+    assert calls[2][0][-1] == str(cgroup_parent_procs)
     assert "-I" in calls[0][0]
     assert "-c" in calls[0][0]
     assert [calls[1][1]["cwd"], calls[3][1]["cwd"]] == [base, candidate]
@@ -356,6 +365,7 @@ def test_sandboxed_runner_uses_identical_configured_argv_and_minimal_environment
         assert kwargs["stdout"] is subprocess.DEVNULL
         assert kwargs["stderr"] is subprocess.DEVNULL
         assert kwargs["timeout"] == 23
+        assert kwargs["limits"].require_linux_cgroup is True
         assert "GITHUB_TOKEN" not in kwargs["env"]
         assert "OPENAI_API_KEY" not in kwargs["env"]
     assert [result.outcome for result in results] == [

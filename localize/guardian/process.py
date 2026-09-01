@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from dataclasses import dataclass
+import errno
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import resource
 import select
@@ -27,12 +28,13 @@ _WORKSPACE_QUOTA_INTERVAL_SECONDS = 1.0
 
 @dataclass(frozen=True, slots=True)
 class ProcessLimits:
-    """POSIX limits inherited by every descendant in the process group."""
+    """POSIX limits and optional Linux process-tree containment."""
 
     cpu_seconds: int
     max_file_size_bytes: int
     max_open_files: int = 256
     max_processes: int | None = None
+    require_linux_cgroup: bool = False
 
     @classmethod
     def for_timeout(
@@ -40,6 +42,7 @@ class ProcessLimits:
         timeout_seconds: float,
         *,
         max_file_size_bytes: int,
+        require_linux_cgroup: bool = False,
     ) -> "ProcessLimits":
         if timeout_seconds <= 0 or max_file_size_bytes <= 0:
             raise ValueError("Process resource limits must be positive.")
@@ -48,6 +51,7 @@ class ProcessLimits:
             cpu_seconds=max(1, math.ceil(timeout_seconds) + 5),
             max_file_size_bytes=max_file_size_bytes,
             max_processes=process_limit,
+            require_linux_cgroup=require_linux_cgroup,
         )
 
 
@@ -154,6 +158,191 @@ def _limit_child(limits: ProcessLimits) -> None:
         )
 
 
+_CGROUP_V2_ROOT = Path("/sys/fs/cgroup")
+_CGROUP_DRAIN_TIMEOUT_SECONDS = 2.0
+
+
+def _current_linux_cgroup_parent() -> Path:
+    """Return this process's cgroup-v2 directory without trusting the environment."""
+
+    try:
+        raw_membership = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProcessResourceError(
+            "Linux cgroup v2 membership could not be inspected."
+        ) from exc
+    if len(raw_membership) > 64 * 1024:
+        raise ProcessResourceError("Linux cgroup v2 membership is malformed.")
+
+    relative: PurePosixPath | None = None
+    for line in raw_membership.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) == 3 and fields[0] == "0" and fields[1] == "":
+            raw_path = fields[2]
+            components = [] if raw_path == "/" else raw_path.split("/")[1:]
+            if (
+                not raw_path.startswith("/")
+                or "\x00" in raw_path
+                or any(part in {"", ".", ".."} for part in components)
+            ):
+                raise ProcessResourceError(
+                    "Linux cgroup v2 membership is malformed."
+                )
+            relative = PurePosixPath(*components)
+            break
+    if relative is None:
+        raise ProcessResourceError("Linux cgroup v2 is unavailable.")
+
+    try:
+        root = _CGROUP_V2_ROOT.resolve(strict=True)
+        if _CGROUP_V2_ROOT.is_symlink() or not (root / "cgroup.controllers").is_file():
+            raise ProcessResourceError("Linux cgroup v2 is unavailable.")
+        parent = (root / Path(*relative.parts)).resolve(strict=True)
+        parent.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ProcessResourceError(
+            "Linux cgroup v2 membership could not be resolved safely."
+        ) from exc
+    if not parent.is_dir() or parent.is_symlink():
+        raise ProcessResourceError(
+            "Linux cgroup v2 membership could not be resolved safely."
+        )
+    return parent
+
+
+def linux_cgroup_parent_procs() -> Path | None:
+    """Return the Linux migration escape target that a sandbox must deny."""
+
+    if platform.system() != "Linux":
+        return None
+    parent = _current_linux_cgroup_parent()
+    control = parent / "cgroup.procs"
+    if not control.is_file() or control.is_symlink():
+        raise ProcessResourceError(
+            "Linux cgroup v2 migration controls could not be inspected safely."
+        )
+    return control
+
+
+def _open_cgroup_control(path: Path, flags: int) -> int:
+    safe_flags = flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, safe_flags)
+
+
+class _LinuxCgroupV2Scope:
+    """One cgroup-v2 leaf whose kernel kill switch includes escaped sessions."""
+
+    def __init__(self, path: Path, procs_fd: int) -> None:
+        self.path = path
+        self._procs_fd: int | None = procs_fd
+        self._closed = False
+        self._kill_requested = False
+
+    @classmethod
+    def create(cls) -> "_LinuxCgroupV2Scope":
+        parent = _current_linux_cgroup_parent()
+        try:
+            raw_path = tempfile.mkdtemp(prefix="localize-guardian-", dir=parent)
+            path = Path(raw_path)
+        except OSError as exc:
+            raise ProcessResourceError(
+                "Linux cgroup v2 is not delegated to the Guardian operator."
+            ) from exc
+        try:
+            path.resolve(strict=True).relative_to(parent)
+            for control_name in ("cgroup.kill", "cgroup.events", "cgroup.procs"):
+                if not (path / control_name).is_file():
+                    raise ProcessResourceError(
+                        "Linux cgroup v2 lacks the required process-tree controls."
+                    )
+            procs_fd = _open_cgroup_control(path / "cgroup.procs", os.O_WRONLY)
+        except Exception:
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
+            raise
+        return cls(path, procs_fd)
+
+    @property
+    def procs_fd(self) -> int:
+        if self._procs_fd is None:
+            raise ProcessResourceError("Linux cgroup join handle is closed.")
+        return self._procs_fd
+
+    def close_join_handle(self) -> None:
+        if self._procs_fd is not None:
+            os.close(self._procs_fd)
+            self._procs_fd = None
+
+    def kill_all(self) -> None:
+        if self._kill_requested or self._closed:
+            return
+        try:
+            kill_fd = _open_cgroup_control(self.path / "cgroup.kill", os.O_WRONLY)
+            try:
+                written = os.write(kill_fd, b"1\n")
+            finally:
+                os.close(kill_fd)
+        except OSError as exc:
+            raise ProcessResourceError(
+                "Linux cgroup v2 could not terminate the bounded process tree."
+            ) from exc
+        if written != 2:
+            raise ProcessResourceError(
+                "Linux cgroup v2 did not accept its process-tree kill request."
+            )
+        self._kill_requested = True
+
+    def _is_empty(self) -> bool:
+        try:
+            events = (self.path / "cgroup.events").read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ProcessResourceError(
+                "Linux cgroup v2 completion could not be inspected."
+            ) from exc
+        values = {
+            key: value
+            for line in events.splitlines()
+            if len(fields := line.split()) == 2
+            for key, value in (fields,)
+        }
+        return values.get("populated") == "0"
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.close_join_handle()
+        self.kill_all()
+        deadline = time.monotonic() + _CGROUP_DRAIN_TIMEOUT_SECONDS
+        while not self._is_empty():
+            if time.monotonic() >= deadline:
+                raise ProcessResourceError(
+                    "Linux cgroup v2 process tree did not terminate."
+                )
+            time.sleep(0.01)
+        try:
+            os.rmdir(self.path)
+        except OSError as exc:
+            raise ProcessResourceError(
+                "Linux cgroup v2 scope could not be removed."
+            ) from exc
+        self._closed = True
+
+
+def _prepare_posix_child(
+    limits: ProcessLimits,
+    cgroup_procs_fd: int | None,
+) -> None:
+    if cgroup_procs_fd is not None:
+        try:
+            if os.write(cgroup_procs_fd, b"0\n") != 2:
+                raise OSError(errno.EIO, "short cgroup.procs write")
+        finally:
+            os.close(cgroup_procs_fd)
+    _limit_child(limits)
+
+
 def _kill_process_group(
     process: subprocess.Popen[object],
     *,
@@ -255,7 +444,7 @@ def run_bounded_process(
     limits: ProcessLimits,
     workspace_quota: WorkspaceQuota | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run an argv with hard descendant cleanup and bounded filesystem growth."""
+    """Run an argv with bounded resources and Linux cgroup tree cleanup."""
 
     if not argv or timeout <= 0 or shell or not start_new_session:
         raise ValueError("Bounded processes require argv, a timeout, and a new session.")
@@ -290,20 +479,40 @@ def run_bounded_process(
             input_file.seek(0)
             stdin = input_file
 
-        process = subprocess.Popen(
-            list(argv),
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            cwd=cwd,
-            env=None if env is None else dict(env),
-            shell=False,
-            start_new_session=True,
-            text=text,
-            encoding=encoding,
-            errors=errors,
-            preexec_fn=(lambda: _limit_child(limits)) if os.name == "posix" else None,
+        cgroup_scope: _LinuxCgroupV2Scope | None = None
+        if limits.require_linux_cgroup and platform.system() == "Linux":
+            cgroup_scope = _LinuxCgroupV2Scope.create()
+            resources.callback(cgroup_scope.close)
+        cgroup_procs_fd = (
+            cgroup_scope.procs_fd if cgroup_scope is not None else None
         )
+        try:
+            process = subprocess.Popen(
+                list(argv),
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                cwd=cwd,
+                env=None if env is None else dict(env),
+                shell=False,
+                start_new_session=True,
+                text=text,
+                encoding=encoding,
+                errors=errors,
+                pass_fds=(
+                    (cgroup_procs_fd,)
+                    if cgroup_procs_fd is not None and os.name == "posix"
+                    else ()
+                ),
+                preexec_fn=(
+                    lambda: _prepare_posix_child(limits, cgroup_procs_fd)
+                )
+                if os.name == "posix"
+                else None,
+            )
+        finally:
+            if cgroup_scope is not None:
+                cgroup_scope.close_join_handle()
         exit_watcher: _UnreapedExitWatcher | None = None
         try:
             started_at = time.monotonic()
@@ -316,11 +525,15 @@ def run_bounded_process(
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if cgroup_scope is not None:
+                        cgroup_scope.kill_all()
                     _kill_process_group(process)
                     process.communicate()
                     raise subprocess.TimeoutExpired(argv, timeout)
                 if exit_watcher is not None:
                     if exit_watcher.wait(min(0.05, remaining)):
+                        if cgroup_scope is not None:
+                            cgroup_scope.kill_all()
                         _kill_process_group(process, tolerate_exited_leader=True)
                         captured_stdout, captured_stderr = process.communicate()
                         break
@@ -341,6 +554,8 @@ def run_bounded_process(
                         quota_check_at + _WORKSPACE_QUOTA_INTERVAL_SECONDS
                     )
                     if workspace_quota.exceeded():
+                        if cgroup_scope is not None:
+                            cgroup_scope.kill_all()
                         _kill_process_group(process)
                         process.communicate()
                         raise ProcessResourceError(
@@ -354,6 +569,8 @@ def run_bounded_process(
             if exit_watcher is not None:
                 exit_watcher.close()
             if process.returncode is None:
+                if cgroup_scope is not None:
+                    cgroup_scope.kill_all()
                 _kill_process_group(process)
                 process.communicate()
 

@@ -50,6 +50,23 @@ jobs:
 
       - name: Run linters, scanners, and tests
         run: |
+          original_cgroup_path="/sys/fs/cgroup$(awk -F: '$1 == "0" && $2 == "" { print $3 }' /proc/self/cgroup)"
+          guardian_cgroup="/sys/fs/cgroup/localize-guardian-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir "$guardian_cgroup"
+          sudo chown "$(id -u):$(id -g)" \
+            "$guardian_cgroup" \
+            "$guardian_cgroup/cgroup.procs"
+          echo "$$" | sudo tee "$guardian_cgroup/cgroup.procs" >/dev/null
+          export LOCALIZE_GUARDIAN_TEST_CGROUP="$guardian_cgroup"
+
+          cleanup_guardian_cgroup() {
+            set +e
+            echo "$$" | sudo tee "$original_cgroup_path/cgroup.procs" >/dev/null
+            echo 1 | sudo tee "$guardian_cgroup/cgroup.kill" >/dev/null || true
+            sudo rmdir "$guardian_cgroup" || true
+          }
+          trap cleanup_guardian_cgroup EXIT
+
           pip-audit -r requirements.txt
           pip-audit -r requirements-dev.txt
           ruff check .
