@@ -160,6 +160,13 @@ def _limit_child(limits: ProcessLimits) -> None:
 
 _CGROUP_V2_ROOT = Path("/sys/fs/cgroup")
 _CGROUP_DRAIN_TIMEOUT_SECONDS = 2.0
+_CGROUP_LEAF_CONTROLS = (
+    "cgroup.events",
+    "cgroup.kill",
+    "cgroup.max.depth",
+    "cgroup.max.descendants",
+    "cgroup.procs",
+)
 
 
 def _current_linux_cgroup_parent() -> Path:
@@ -229,6 +236,19 @@ def _open_cgroup_control(path: Path, flags: int) -> int:
     return os.open(path, safe_flags)
 
 
+def _write_cgroup_control(path: Path, payload: bytes, *, failure: str) -> None:
+    try:
+        descriptor = _open_cgroup_control(path, os.O_WRONLY)
+        try:
+            written = os.write(descriptor, payload)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ProcessResourceError(failure) from exc
+    if written != len(payload):
+        raise ProcessResourceError(failure)
+
+
 class _LinuxCgroupV2Scope:
     """One cgroup-v2 leaf whose kernel kill switch includes escaped sessions."""
 
@@ -250,11 +270,17 @@ class _LinuxCgroupV2Scope:
             ) from exc
         try:
             path.resolve(strict=True).relative_to(parent)
-            for control_name in ("cgroup.kill", "cgroup.events", "cgroup.procs"):
+            for control_name in _CGROUP_LEAF_CONTROLS:
                 if not (path / control_name).is_file():
                     raise ProcessResourceError(
                         "Linux cgroup v2 lacks the required process-tree controls."
                     )
+            for control_name in ("cgroup.max.depth", "cgroup.max.descendants"):
+                _write_cgroup_control(
+                    path / control_name,
+                    b"0\n",
+                    failure="Linux cgroup v2 could not seal its containment leaf.",
+                )
             procs_fd = _open_cgroup_control(path / "cgroup.procs", os.O_WRONLY)
         except Exception:
             try:
@@ -278,20 +304,11 @@ class _LinuxCgroupV2Scope:
     def kill_all(self) -> None:
         if self._kill_requested or self._closed:
             return
-        try:
-            kill_fd = _open_cgroup_control(self.path / "cgroup.kill", os.O_WRONLY)
-            try:
-                written = os.write(kill_fd, b"1\n")
-            finally:
-                os.close(kill_fd)
-        except OSError as exc:
-            raise ProcessResourceError(
-                "Linux cgroup v2 could not terminate the bounded process tree."
-            ) from exc
-        if written != 2:
-            raise ProcessResourceError(
-                "Linux cgroup v2 did not accept its process-tree kill request."
-            )
+        _write_cgroup_control(
+            self.path / "cgroup.kill",
+            b"1\n",
+            failure="Linux cgroup v2 could not terminate the bounded process tree.",
+        )
         self._kill_requested = True
 
     def _is_empty(self) -> bool:
@@ -307,7 +324,12 @@ class _LinuxCgroupV2Scope:
             if len(fields := line.split()) == 2
             for key, value in (fields,)
         }
-        return values.get("populated") == "0"
+        populated = values.get("populated")
+        if populated not in {"0", "1"}:
+            raise ProcessResourceError(
+                "Linux cgroup v2 completion state is malformed."
+            )
+        return populated == "0"
 
     def close(self) -> None:
         if self._closed:

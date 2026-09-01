@@ -136,6 +136,18 @@ def test_cgroup_escape_target_is_the_current_parent_control(
     assert guardian_process.linux_cgroup_parent_procs() == control
 
 
+def test_cgroup_completion_rejects_a_missing_population_state(tmp_path: Path) -> None:
+    (tmp_path / "cgroup.events").write_text("frozen 0\n", encoding="ascii")
+    procs_fd = os.open(os.devnull, os.O_WRONLY)
+    scope = guardian_process._LinuxCgroupV2Scope(tmp_path, procs_fd)
+
+    try:
+        with pytest.raises(ProcessResourceError, match="state is malformed"):
+            scope._is_empty()
+    finally:
+        scope.close_join_handle()
+
+
 def test_required_linux_cgroup_failure_prevents_target_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -201,7 +213,18 @@ p = subprocess.Popen(
 deadline = time.monotonic() + 2
 while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
     time.sleep(0.01)
-print(p.pid, flush=True)
+membership = next(
+    line.split(":", 2)[2]
+    for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines()
+    if line.startswith("0::")
+)
+scope = pathlib.Path("/sys/fs/cgroup" + membership)
+print(
+    p.pid,
+    (scope / "cgroup.max.depth").read_text().strip(),
+    (scope / "cgroup.max.descendants").read_text().strip(),
+    flush=True,
+)
 """
     monkeypatch.setattr(
         guardian_process,
@@ -221,7 +244,9 @@ print(p.pid, flush=True)
         ),
     )
 
-    assert completed.stdout.strip().isdigit()
+    pid, max_depth, max_descendants = completed.stdout.split()
+    assert pid.isdigit()
+    assert (max_depth, max_descendants) == ("0", "0")
     assert marker.exists()
     _assert_file_stops_changing(marker)
 

@@ -133,8 +133,10 @@ session with inherited CPU, file-size, descriptor, and supported process-count
 limits. On Linux, the Guardian additionally requires a fresh cgroup-v2 leaf for
 each bounded invocation. It joins the direct child before `exec`, activates the
 kernel's recursive `cgroup.kill` control on every completion path, waits for
-`populated 0`, and only then removes the leaf. This includes a descendant that
-calls `setsid()` or `setpgid()` and escapes the original process group.
+`populated 0`, and only then removes the leaf. The leaf's maximum depth and
+descendant-cgroup count are both zero, so a child cannot leave empty nested
+cgroups behind. This includes a descendant that calls `setsid()` or `setpgid()`
+and escapes the original process group.
 
 The current Linux service or container cgroup must be delegated to the Guardian
 operator so it can create those transient leaves. `guardian doctor` performs a
