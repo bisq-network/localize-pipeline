@@ -62,6 +62,8 @@ from localize.guardian.process import (
 )
 from localize.guardian.runtime import (
     GuardianRuntimeError,
+    _poll_locking_is_available,
+    _preflight_poll_lock,
     _snapshot_operator_pipeline_configs,
     _validate_subscription_codex_home,
     load_trusted_guardian_config,
@@ -287,30 +289,39 @@ def _owned_by_current_user(metadata: os.stat_result) -> bool:
 def _ensure_private_directory(path: Path) -> None:
     if path.is_symlink():
         raise GuardianCLIError(f"Refusing symlinked Guardian directory: {path}")
-    if path.exists():
-        metadata = path.stat(follow_symlinks=False)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise GuardianCLIError(f"Guardian runtime path is not a directory: {path}")
-        if not _owned_by_current_user(metadata):
-            raise GuardianCLIError(
-                f"Guardian runtime directory must be owned by the current user: {path}"
-            )
-        if stat.S_IMODE(metadata.st_mode) != 0o700:
-            raise GuardianCLIError(
-                f"Guardian runtime directory must have mode 0700: {path}"
-            )
-        return
+    created = False
     try:
         path.mkdir(parents=True, mode=0o700)
-        path.chmod(0o700)
+        created = True
+    except FileExistsError:
+        # A concurrent first run may have created the same private boundary.
+        pass
     except OSError as exc:
         raise GuardianCLIError(
             f"Could not create private Guardian directory: {path}"
         ) from exc
-    metadata = path.stat(follow_symlinks=False)
+    if created:
+        try:
+            path.chmod(0o700)
+        except OSError as exc:
+            raise GuardianCLIError(
+                f"Could not secure private Guardian directory: {path}"
+            ) from exc
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise GuardianCLIError(
+            f"Could not inspect private Guardian directory: {path}"
+        ) from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise GuardianCLIError(f"Guardian runtime path is not a directory: {path}")
     if not _owned_by_current_user(metadata):
         raise GuardianCLIError(
             f"Guardian runtime directory must be owned by the current user: {path}"
+        )
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise GuardianCLIError(
+            f"Guardian runtime directory must have mode 0700: {path}"
         )
 
 
@@ -957,7 +968,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _state_directory_doctor(config_path: Path) -> tuple[str, bool]:
     runtime_dir = guardian_state_dir(config_path)
-    if not runtime_dir.exists():
+    if not _poll_locking_is_available():
+        return "error (process locking is unavailable)", False
+    if not runtime_dir.exists() and not runtime_dir.is_symlink():
         if os.access(runtime_dir.parent, os.W_OK):
             return "ready (created on first run or install)", True
         return "error (parent directory is not writable)", False
@@ -966,7 +979,8 @@ def _state_directory_doctor(config_path: Path) -> tuple[str, bool]:
         state_path = guardian_state_path(config_path)
         if state_path.exists() or state_path.is_symlink():
             _validate_private_regular_file(state_path, mode=0o600)
-    except GuardianCLIError:
+        _preflight_poll_lock(runtime_dir)
+    except (GuardianCLIError, GuardianRuntimeError):
         return "error (paths must be regular and private)", False
     return "ok", True
 
@@ -1182,15 +1196,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
     try:
         _load_config_or_raise(config_path)
         _ensure_private_directory(guardian_state_dir(config_path))
-        _ensure_private_file(guardian_state_path(config_path))
         controller = importlib.import_module("localize.guardian.controller")
         run_once = getattr(controller, "run_once")
         result = run_once(config_path=config_path, scheduled=bool(args.scheduled))
         if result is None:
             return 0
         if isinstance(result, bool) or not isinstance(result, int):
-            raise TypeError("Guardian controller returned an unsupported result type.")
+            raise TypeError(
+                "Guardian controller returned an unsupported result type."
+            )
         return result
+    except GuardianRuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(
             f"error: Guardian run failed ({type(exc).__name__}); inspect the private audit log.",

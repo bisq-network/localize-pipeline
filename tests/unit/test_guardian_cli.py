@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -17,6 +18,7 @@ import yaml
 from localize import cli as root_cli
 from localize.guardian import FeedbackEvent, GuardianMode
 from localize.guardian import cli
+from localize.guardian import runtime as guardian_runtime
 from localize.guardian.config import load_guardian_config
 from localize.guardian.github import GitHubRepositoryIdentity
 from localize.guardian.state import GuardianState
@@ -870,23 +872,151 @@ def test_doctor_fails_before_external_probes_for_unsafe_operator_bundle(
     assert list(cli.guardian_state_dir(config_path).glob("operator-pipeline-config-*")) == []
 
 
-def test_run_creates_private_state_file_and_lazily_calls_controller(
+def test_run_leaves_private_state_creation_to_the_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = _init_config(tmp_path)
-    run_once = Mock(return_value=None)
+    state_path = cli.guardian_state_path(config_path)
+    captured: dict[str, object] = {}
+
+    def run_once(**kwargs: object) -> None:
+        assert not state_path.exists()
+        captured.update(kwargs)
+
     imported = Mock(return_value=SimpleNamespace(run_once=run_once))
     monkeypatch.setattr(cli.importlib, "import_module", imported)
 
     exit_code = cli.main(["run", "--config", str(config_path), "--scheduled"])
 
-    state_path = cli.guardian_state_path(config_path)
     assert exit_code == 0
-    assert state_path.is_file()
-    assert _mode(state_path) == 0o600
+    assert not state_path.exists()
     imported.assert_called_once_with("localize.guardian.controller")
-    run_once.assert_called_once_with(config_path=config_path.resolve(), scheduled=True)
+    assert captured == {
+        "config_path": config_path.resolve(),
+        "scheduled": True,
+    }
+
+
+def test_run_accepts_a_private_state_directory_created_by_a_racer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
+    config_path.chmod(0o600)
+    state_directory = cli.guardian_state_dir(config_path)
+
+    def racing_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        assert path == state_directory
+        assert parents is True
+        assert exist_ok is False
+        os.mkdir(path, mode)
+        raise FileExistsError
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+    run_once = Mock(return_value=0)
+    monkeypatch.setattr(
+        cli.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(run_once=run_once),
+    )
+
+    assert cli.main(["run", "--config", str(config_path)]) == 0
+    assert _mode(state_directory) == 0o700
+    run_once.assert_called_once()
+
+
+@pytest.mark.skipif(
+    not guardian_runtime._poll_locking_is_available(),
+    reason="POSIX flock is unavailable",
+)
+def test_first_scheduled_cli_runs_share_one_lock_from_clean_state(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
+    config_path.chmod(0o600)
+    gate = tmp_path / "start"
+    project_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(project_root), existing_pythonpath)
+        if value
+    )
+    script = """
+from pathlib import Path
+import sys
+import time
+from localize.guardian import cli, runtime
+
+config_path = Path(sys.argv[1])
+gate = Path(sys.argv[2])
+deadline = time.monotonic() + 5
+while not gate.exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.005)
+
+def locked_poll(**_kwargs):
+    print("owner", flush=True)
+    time.sleep(1)
+    return 7
+
+runtime._poll_with_locked_state = locked_poll
+result = cli.main(["run", "--config", str(config_path), "--scheduled"])
+print(f"result={result}", flush=True)
+"""
+    processes = tuple(
+        subprocess.Popen(
+            (sys.executable, "-c", script, str(config_path), str(gate)),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        for _index in range(2)
+    )
+
+    gate.touch()
+    results = tuple(process.communicate(timeout=10) for process in processes)
+
+    assert [process.returncode for process in processes] == [0, 0], results
+    assert sorted(stdout.strip() for stdout, _stderr in results) == [
+        "owner\nresult=7",
+        "result=0",
+    ]
+    assert all(stderr == "" for _stdout, stderr in results)
+
+
+def test_run_reports_the_safe_manual_overlap_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    runtime = SimpleNamespace(
+        run_once=Mock(
+            side_effect=cli.GuardianRuntimeError(
+                "Guardian poll is already running."
+            )
+        )
+    )
+    monkeypatch.setattr(cli.importlib, "import_module", lambda _name: runtime)
+
+    exit_code = cli.main(["run", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.err == "error: Guardian poll is already running.\n"
 
 
 def test_run_reports_controller_failure_without_echoing_exception_text(
@@ -907,6 +1037,59 @@ def test_run_reports_controller_failure_without_echoing_exception_text(
     assert secret not in captured.out
     assert secret not in captured.err
     assert "RuntimeError" in captured.err
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "hardlink"])
+def test_doctor_rejects_an_unsafe_existing_poll_lock(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_directory = cli.guardian_state_dir(config_path)
+    lock_path = state_directory / "poll.lock"
+    if unsafe_kind == "symlink":
+        target = tmp_path / "target.lock"
+        target.write_text("", encoding="utf-8")
+        target.chmod(0o600)
+        lock_path.symlink_to(target)
+    elif unsafe_kind == "hardlink":
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o600)
+        (tmp_path / "alias.lock").hardlink_to(lock_path)
+    else:
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o644)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+
+
+def test_doctor_rejects_platforms_without_process_locking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    monkeypatch.setattr(guardian_runtime, "fcntl", None)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (process locking is unavailable)"
+
+
+def test_doctor_validates_but_does_not_acquire_an_active_poll_lock(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_directory = cli.guardian_state_dir(config_path)
+
+    with guardian_runtime._exclusive_poll_lock(state_directory):
+        status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is True
+    assert status == "ok"
 
 
 def test_run_refuses_an_insecure_existing_state_directory(

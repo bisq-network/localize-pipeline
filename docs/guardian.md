@@ -316,7 +316,8 @@ localize guardian status --config "$GUARDIAN_CONFIG"
 ```
 
 `doctor` makes no monitored-repository or GitHub writes and redacts credential
-material. It checks the config, state directory, Codex executable and schema,
+material. It checks the config, state directory and process-lock safety without
+acquiring an active poll lock, the Codex executable and schema,
 the dedicated ChatGPT login or API-key helper, GitHub credential helper,
 GitHub identity, repository visibility, signing setup, and built-in adapters
 registered in the isolated Guardian process. Target-project adapter
@@ -517,8 +518,9 @@ credentials. `RunAtLoad` plus a conservative `StartInterval` wakes the wrapper
 periodically; persistent state records the start of each poll attempt and uses
 top-level `schedule.hour` (0-23) and `schedule.minute` (0-59) to decide whether
 the once-daily run is due in the machine's local wall-clock time. The default
-is `00:00`, preserving earlier behavior. A private per-config process lock
-prevents a manual run and scheduler wake from starting overlapping polls;
+is `00:00`, preserving earlier behavior. A private process lock in the
+config's state directory prevents a manual run and scheduler wake from starting
+overlapping polls;
 scheduled lock contention exits successfully while a manual caller receives a
 clear already-running error. This provides catch-up after sleep,
 logout, or a missed wall-clock time without running the full model workflow

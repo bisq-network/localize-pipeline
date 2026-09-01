@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Iterator
 
@@ -600,7 +602,138 @@ def test_run_once_never_overlaps_a_poll_for_the_same_config(
     assert _mode(lock_path) == 0o600
 
 
-@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode"])
+def test_prepare_private_state_accepts_a_directory_created_by_a_racer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+
+    def racing_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        assert path == state_directory
+        assert parents is False
+        assert exist_ok is False
+        os.mkdir(path, mode)
+        raise FileExistsError
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    directory, database = runtime._prepare_private_state(config_path)
+
+    assert directory == state_directory
+    assert database == state_directory / "state.sqlite3"
+    assert _mode(directory) == 0o700
+
+
+def test_prepare_private_state_secures_a_new_directory_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    previous_umask = os.umask(0o777)
+    try:
+        directory, _database = runtime._prepare_private_state(config_path)
+    finally:
+        os.umask(previous_umask)
+
+    assert _mode(directory) == 0o700
+
+
+def test_prepare_private_state_rejects_a_hardlinked_database(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    database = state_directory / "state.sqlite3"
+    database.write_text("", encoding="utf-8")
+    database.chmod(0o600)
+    (tmp_path / "state-alias").hardlink_to(database)
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="private"):
+        runtime._prepare_private_state(config_path)
+
+
+@pytest.mark.skipif(
+    not runtime._poll_locking_is_available(),
+    reason="POSIX flock is unavailable",
+)
+def test_first_poll_lock_creation_is_race_safe_across_processes(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    gate = tmp_path / "start"
+    project_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(project_root), existing_pythonpath)
+        if value
+    )
+    script = """
+from pathlib import Path
+import sys
+import time
+from localize.guardian import runtime
+
+config_path = Path(sys.argv[1])
+gate = Path(sys.argv[2])
+deadline = time.monotonic() + 5
+while not gate.exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.005)
+state_directory, _state_path = runtime._prepare_private_state(config_path)
+try:
+    with runtime._exclusive_poll_lock(state_directory):
+        print("locked", flush=True)
+        time.sleep(0.5)
+except runtime._GuardianPollAlreadyRunning:
+    print("contended", flush=True)
+"""
+    processes = tuple(
+        subprocess.Popen(
+            (sys.executable, "-c", script, str(config_path), str(gate)),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        for _index in range(2)
+    )
+
+    gate.touch()
+    results = tuple(process.communicate(timeout=10) for process in processes)
+
+    assert [process.returncode for process in processes] == [0, 0], results
+    assert sorted(stdout.strip() for stdout, _stderr in results) == [
+        "contended",
+        "locked",
+    ]
+
+
+def test_poll_lock_is_released_when_the_poll_raises(tmp_path: Path) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        with runtime._exclusive_poll_lock(state_directory):
+            raise RuntimeError("sentinel")
+
+    with runtime._exclusive_poll_lock(state_directory):
+        pass
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "hardlink"])
 def test_poll_lock_rejects_unsafe_existing_paths(
     tmp_path: Path,
     unsafe_kind: str,
@@ -613,6 +746,10 @@ def test_poll_lock_rejects_unsafe_existing_paths(
         target.write_text("", encoding="utf-8")
         target.chmod(0o600)
         lock_path.symlink_to(target)
+    elif unsafe_kind == "hardlink":
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o600)
+        (tmp_path / "alias.lock").hardlink_to(lock_path)
     else:
         lock_path.write_text("", encoding="utf-8")
         lock_path.chmod(0o644)

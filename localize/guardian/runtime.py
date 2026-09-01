@@ -100,10 +100,6 @@ def _resolved_config_path(path: str | Path) -> Path:
     return Path(os.path.abspath(Path(path).expanduser()))
 
 
-def _permission_bits(path: Path) -> int:
-    return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
-
-
 def _trusted_owners() -> frozenset[int]:
     owners = {0}
     if hasattr(os, "getuid"):
@@ -183,27 +179,89 @@ def _prepare_private_state(config_path: Path) -> tuple[Path, Path]:
 
     directory, database = _private_state_paths(config_path)
     try:
-        if directory.is_symlink():
-            raise GuardianRuntimeError("Guardian state path must remain private.")
-        if directory.exists():
-            metadata = directory.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(metadata.st_mode) or _permission_bits(directory) != 0o700:
-                raise GuardianRuntimeError("Guardian state path must remain private.")
-        else:
+        created = False
+        try:
             directory.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            # Another first invocation may have created the shared state
+            # boundary before either process acquired poll.lock.
+            pass
+        if created:
             directory.chmod(0o700)
-
-        if database.is_symlink():
+        metadata = directory.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
             raise GuardianRuntimeError("Guardian state path must remain private.")
-        if database.exists():
+
+        try:
             metadata = database.stat(follow_symlinks=False)
-            if not stat.S_ISREG(metadata.st_mode) or _permission_bits(database) != 0o600:
+        except FileNotFoundError:
+            pass
+        else:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
                 raise GuardianRuntimeError("Guardian state path must remain private.")
     except GuardianRuntimeError:
         raise
     except OSError:
         raise GuardianRuntimeError("Guardian state path must remain private.") from None
     return directory, database
+
+
+def _poll_locking_is_available() -> bool:
+    """Return whether this platform provides the required process lock."""
+
+    return fcntl is not None and callable(getattr(fcntl, "flock", None))
+
+
+def _validate_poll_lock_descriptor(descriptor: int) -> None:
+    """Require the exact private regular inode used for process locking."""
+
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise GuardianRuntimeError("Guardian poll lock is unavailable or unsafe.")
+
+
+def _preflight_poll_lock(state_directory: Path) -> None:
+    """Validate an existing lock inode without creating or acquiring it."""
+
+    if not _poll_locking_is_available():
+        raise GuardianRuntimeError(
+            "Guardian process locking is unavailable on this platform."
+        )
+    lock_path = state_directory / "poll.lock"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        descriptor = os.open(lock_path, flags)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian poll lock is unavailable or unsafe."
+        ) from None
+    try:
+        _validate_poll_lock_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager
@@ -226,16 +284,7 @@ def _exclusive_poll_lock(state_directory: Path) -> Iterator[None]:
         raise GuardianRuntimeError("Guardian poll lock is unavailable or unsafe.") from None
     locked = False
     try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-        ):
-            raise GuardianRuntimeError(
-                "Guardian poll lock is unavailable or unsafe."
-            )
+        _validate_poll_lock_descriptor(descriptor)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
