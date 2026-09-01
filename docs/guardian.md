@@ -517,7 +517,10 @@ credentials. `RunAtLoad` plus a conservative `StartInterval` wakes the wrapper
 periodically; persistent state records the start of each poll attempt and uses
 top-level `schedule.hour` (0-23) and `schedule.minute` (0-59) to decide whether
 the once-daily run is due in the machine's local wall-clock time. The default
-is `00:00`, preserving earlier behavior. This provides catch-up after sleep,
+is `00:00`, preserving earlier behavior. A private per-config process lock
+prevents a manual run and scheduler wake from starting overlapping polls;
+scheduled lock contention exits successfully while a manual caller receives a
+clear already-running error. This provides catch-up after sleep,
 logout, or a missed wall-clock time without running the full model workflow
 every interval. A failed scheduled attempt is not retried on the next 15-minute
 wake; use an explicit manual `guardian run` after diagnosing it. Manual runs

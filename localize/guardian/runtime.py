@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
+import errno
 import hashlib
 import json
 import os
@@ -21,6 +22,11 @@ from typing import Any
 
 import httpx
 import yaml
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Guardian scheduling is POSIX-only today.
+    fcntl = None  # type: ignore[assignment]
 
 from localize.guardian.codex import CodexDriver
 from localize.guardian.config import GuardianConfigError, parse_guardian_config_yaml
@@ -82,6 +88,10 @@ _WRITE_MODES = frozenset(
 
 class GuardianRuntimeError(RuntimeError):
     """A redacted production-wiring failure safe for operator output."""
+
+
+class _GuardianPollAlreadyRunning(RuntimeError):
+    """Signal that another process owns this config's exclusive poll lock."""
 
 
 def _resolved_config_path(path: str | Path) -> Path:
@@ -196,6 +206,55 @@ def _prepare_private_state(config_path: Path) -> tuple[Path, Path]:
     return directory, database
 
 
+@contextmanager
+def _exclusive_poll_lock(state_directory: Path) -> Iterator[None]:
+    """Hold one private, non-blocking process lock for the complete poll."""
+
+    if fcntl is None:
+        raise GuardianRuntimeError(
+            "Guardian process locking is unavailable on this platform."
+        )
+    lock_path = state_directory / "poll.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError:
+        raise GuardianRuntimeError("Guardian poll lock is unavailable or unsafe.") from None
+    locked = False
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise _GuardianPollAlreadyRunning from None
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(descriptor)
+
+
 def _require_private_operator_directory(path: Path) -> Path:
     """Require a current-user, non-symlink 0700 directory and safe ancestors."""
 
@@ -221,6 +280,8 @@ def _require_private_operator_directory(path: Path) -> Path:
 
 
 def _safe_operator_relative_path(raw_path: str) -> PurePosixPath:
+    """Normalize one non-empty relative operator path without traversal."""
+
     if (
         not isinstance(raw_path, str)
         or not raw_path
@@ -337,6 +398,8 @@ def _read_private_operator_file(
 
 
 def _decode_operator_yaml(content: bytes) -> Mapping[str, Any]:
+    """Decode one bounded UTF-8 YAML object or fail through the redacted boundary."""
+
     try:
         payload = yaml.safe_load(content.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError):
@@ -351,6 +414,8 @@ def _decode_operator_yaml(content: bytes) -> Mapping[str, Any]:
 
 
 def _copy_private_bundle_file(root: Path, relative: PurePosixPath, content: bytes) -> Path:
+    """Copy immutable snapshot bytes below a fresh private bundle root."""
+
     destination = root.joinpath(*relative.parts)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     current = root
@@ -363,6 +428,8 @@ def _copy_private_bundle_file(root: Path, relative: PurePosixPath, content: byte
 
 
 def _operator_bundle_digest(files: Mapping[str, bytes]) -> str:
+    """Hash sorted path and raw-byte tuples without concatenation ambiguity."""
+
     digest = hashlib.sha256()
     for name in sorted(files):
         encoded_name = name.encode("utf-8")
@@ -830,23 +897,16 @@ def _exit_code(outcome: PollOutcome) -> int:
     return 0
 
 
-def run_once(config_path: Path, scheduled: bool = False) -> int:
-    """Load trusted policy and execute one finite Guardian poll.
+def _poll_with_locked_state(
+    *,
+    config: GuardianConfig,
+    resolved_config: Path,
+    state_directory: Path,
+    state_path: Path,
+    scheduled: bool,
+) -> int:
+    """Execute a poll while the caller holds the config's process lock."""
 
-    Scheduled calls run at most once per local calendar day after the first
-    attempted wake, regardless of its outcome. Manual invocations always poll.
-    Credential contents and
-    untrusted exception messages never cross this adapter's error boundary.
-    """
-
-    if not isinstance(scheduled, bool):
-        raise GuardianRuntimeError("Guardian scheduled flag is invalid.")
-    resolved_config = _resolved_config_path(config_path)
-    config = load_trusted_guardian_config(resolved_config)
-
-    _require_explicit_write_signing_key(config)
-
-    state_directory, state_path = _prepare_private_state(resolved_config)
     try:
         state_context = GuardianState(state_path)
     except Exception:
@@ -927,6 +987,36 @@ def run_once(config_path: Path, scheduled: bool = False) -> int:
         raise
     except Exception:
         raise GuardianRuntimeError("Guardian production runtime failed safely.") from None
+
+
+def run_once(config_path: Path, scheduled: bool = False) -> int:
+    """Load trusted policy and execute one finite, non-overlapping poll.
+
+    Scheduled calls run at most once per local calendar day after the first
+    attempted wake, regardless of its outcome. Manual invocations always poll.
+    Credential contents and untrusted exception messages never cross this
+    adapter's error boundary.
+    """
+
+    if not isinstance(scheduled, bool):
+        raise GuardianRuntimeError("Guardian scheduled flag is invalid.")
+    resolved_config = _resolved_config_path(config_path)
+    config = load_trusted_guardian_config(resolved_config)
+    _require_explicit_write_signing_key(config)
+    state_directory, state_path = _prepare_private_state(resolved_config)
+    try:
+        with _exclusive_poll_lock(state_directory):
+            return _poll_with_locked_state(
+                config=config,
+                resolved_config=resolved_config,
+                state_directory=state_directory,
+                state_path=state_path,
+                scheduled=scheduled,
+            )
+    except _GuardianPollAlreadyRunning:
+        if scheduled:
+            return 0
+        raise GuardianRuntimeError("Guardian poll is already running.") from None
 
 
 __all__: Sequence[str] = (

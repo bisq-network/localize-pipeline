@@ -577,6 +577,51 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
     assert _mode(state_path) == 0o600
 
 
+def test_run_once_never_overlaps_a_poll_for_the_same_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory, _state_path = runtime._prepare_private_state(config_path)
+    monkeypatch.setattr(
+        runtime,
+        "_build_controller",
+        lambda **_kwargs: pytest.fail("an overlapping poll must not start"),
+    )
+
+    with runtime._exclusive_poll_lock(state_directory):
+        assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+        with pytest.raises(runtime.GuardianRuntimeError, match="already running"):
+            runtime.run_once(config_path=config_path, scheduled=False)
+
+    lock_path = state_directory / "poll.lock"
+    assert lock_path.is_file()
+    assert _mode(lock_path) == 0o600
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode"])
+def test_poll_lock_rejects_unsafe_existing_paths(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    if unsafe_kind == "symlink":
+        target = tmp_path / "target.lock"
+        target.write_text("", encoding="utf-8")
+        target.chmod(0o600)
+        lock_path.symlink_to(target)
+    else:
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o644)
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="lock"):
+        with runtime._exclusive_poll_lock(state_directory):
+            pass
+
+
 def test_scheduled_run_skips_after_failed_attempt_on_same_day_but_manual_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
