@@ -109,6 +109,27 @@ def test_holistic_review_prompt_allows_grammatical_inflection():
     assert "must contain" not in prompt
 
 
+def test_holistic_review_prompt_requests_sibling_terminology_consistency():
+    prompt = _build_holistic_review_system_prompt(
+        target_language="Estonian",
+        keys_to_review=["user.bondedRoles.registration.proposalTxId"],
+        source_content="user.bondedRoles.registration.proposalTxId=Proposal transaction ID",
+        translated_content="user.bondedRoles.registration.proposalTxId=Ettepaneku tehingu ID",
+        style_rules_text="",
+    )
+
+    # The reviewer sees the whole translated file, so it is the stage that can
+    # align a concept named inline in a step-by-step instruction with its
+    # dedicated field/button label sharing the same dotted key prefix. Drafting
+    # cannot: co-changed siblings are translated concurrently and are absent
+    # from each other's context (bisq2#4962 reputation registration drift).
+    assert "Terminology Consistency Across Related Keys" in prompt
+    assert "same dotted prefix" in prompt
+    assert "only some of the related keys are in your review scope" in prompt
+    # Guidance must stay product-agnostic; no concrete product name leaks in.
+    assert "Bisq" not in prompt
+
+
 def test_prompt_only_glossary_is_not_exactly_enforced():
     glossary = {"entry": "запись"}
 
