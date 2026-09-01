@@ -18,6 +18,7 @@ from localize.guardian.models import (
     ProposedReplacement,
     RecurrenceCandidate,
     RepositoryPolicy,
+    SigningFormat,
     TrustedActor,
 )
 
@@ -40,5 +41,6 @@ __all__ = [
     "ProposedReplacement",
     "RecurrenceCandidate",
     "RepositoryPolicy",
+    "SigningFormat",
     "TrustedActor",
 ]

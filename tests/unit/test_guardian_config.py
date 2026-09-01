@@ -15,6 +15,7 @@ from localize.guardian import (
     PreventionPolicy,
     ProposedReplacement,
     RepositoryPolicy,
+    SigningFormat,
     TrustedActor,
 )
 from localize.guardian.config import GuardianConfigError, load_guardian_config
@@ -107,10 +108,12 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     assert config.runtime.codex_home == "~/.local/share/localize-guardian/codex"
     assert config.runtime.codex_executable == "codex"
     assert config.runtime.git_executable == "git"
+    assert config.runtime.signing_format is SigningFormat.OPENPGP
     assert config.runtime.signing_program == "gpg"
     assert config.runtime.github_token_command == ("gh", "auth", "token")
     assert config.runtime.codex_api_key_command == ()
     assert config.runtime.signing_key is None
+    assert config.runtime.signing_public_key is None
     assert config.schedule.hour == 0
     assert config.schedule.minute == 0
 
@@ -590,6 +593,75 @@ limits:
         "guardian",
     )
     assert config.runtime.signing_key == fingerprint
+    assert config.runtime.signing_format is SigningFormat.OPENPGP
+    assert config.runtime.signing_public_key is None
+
+
+def test_loads_exact_ssh_signing_identity(tmp_path: Path) -> None:
+    fingerprint = "SHA256:" + "A" * 43
+    config_text = f"""runtime:
+  signing_format: ssh
+  signing_program: /usr/bin/ssh-keygen
+  signing_key: {fingerprint}
+  signing_public_key: /keys/guardian.pub
+""" + _minimal_config()
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.runtime.signing_format is SigningFormat.SSH
+    assert config.runtime.signing_program == "/usr/bin/ssh-keygen"
+    assert config.runtime.signing_key == fingerprint
+    assert config.runtime.signing_public_key == "/keys/guardian.pub"
+
+
+@pytest.mark.parametrize(
+    "runtime_yaml, offending",
+    [
+        (
+            "signing_format: ssh\n  signing_key: SHA256:" + "A" * 43,
+            "signing_public_key",
+        ),
+        (
+            "signing_format: ssh\n  signing_key: SHA256:" + "A" * 43
+            + "\n  signing_public_key: /keys/guardian.pub",
+            "signing_program",
+        ),
+        (
+            "signing_format: ssh\n  signing_public_key: /keys/guardian.pub",
+            "signing_key",
+        ),
+        (
+            "signing_format: ssh\n  signing_key: " + "A" * 40
+            + "\n  signing_public_key: /keys/guardian.pub",
+            "SHA256",
+        ),
+        (
+            "signing_format: ssh\n  signing_key: SHA256:" + "A" * 42
+            + "\n  signing_public_key: /keys/guardian.pub",
+            "SHA256",
+        ),
+        (
+            "signing_format: ssh\n  signing_key: SHA256:" + "A" * 43
+            + "\n  signing_public_key: keys/guardian.pub",
+            "absolute",
+        ),
+        (
+            "signing_format: openpgp\n  signing_key: " + "A" * 40
+            + "\n  signing_public_key: /keys/guardian.pub",
+            "only valid",
+        ),
+        ("signing_format: x509", "signing_format"),
+    ],
+)
+def test_rejects_ambiguous_or_incomplete_signing_formats(
+    tmp_path: Path,
+    runtime_yaml: str,
+    offending: str,
+) -> None:
+    yaml_text = f"runtime:\n  {runtime_yaml}\n" + _minimal_config()
+
+    with pytest.raises(GuardianConfigError, match=offending):
+        load_guardian_config(_write_config(tmp_path, yaml_text))
 
 
 def test_chatgpt_auth_rejects_api_key_and_dollar_budget_configuration(

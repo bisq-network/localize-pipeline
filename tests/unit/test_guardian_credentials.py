@@ -26,6 +26,7 @@ def test_secret_command_uses_exact_argv_minimal_environment_and_redacted_errors(
     monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak-either")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/private/must-not-leak-agent.sock")
 
     command = credentials.SecretCommand(("gh", "auth", "token"), timeout_seconds=7)
 
@@ -41,6 +42,7 @@ def test_secret_command_uses_exact_argv_minimal_environment_and_redacted_errors(
     assert kwargs["env"]["PATH"] == "/usr/bin:/opt/bin"
     assert "GITHUB_TOKEN" not in kwargs["env"]
     assert "OPENAI_API_KEY" not in kwargs["env"]
+    assert "SSH_AUTH_SOCK" not in kwargs["env"]
     assert "secret-value" not in repr(command)
 
 

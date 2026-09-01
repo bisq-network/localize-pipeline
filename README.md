@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.18
+      - uses: bisq-network/localize-pipeline@v0.1.19
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -230,7 +230,7 @@ localize validate --config config.yaml
 localize run --dry-run --config config.yaml
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.18
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.19
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
@@ -271,6 +271,12 @@ default is `gpt-5.6-terra` with reasoning effort `high`. The dedicated Guardian
 login is kept outside monitored repositories; inherited API keys are not used
 in the default subscription mode.
 
+Write modes support the backward-compatible OpenPGP signer or an opt-in,
+agent-backed SSH signing key. The SSH path stores only an exact public-key
+fingerprint and public-key file; the agent socket reaches only the commit
+subprocess, and signatures are reverified before publication. See the full
+Guardian guide for setup and Keychain/launchd notes.
+
 Pipeline validation policy defaults to the exact repository base SHA. Projects
 that keep localization config outside the repository can opt into a private,
 operator-owned config snapshot with `pipeline_config_source: operator`.
@@ -296,7 +302,7 @@ the full guide for the macOS containment tradeoff.
 To onboard another repository without hand-copying files, run:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.18
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.19
 ```
 
 The command refuses dirty worktrees, creates a `localize/onboarding` branch, and
@@ -378,7 +384,7 @@ matches only.
 Pin a tagged release for production workflows once tags are available:
 
 ```yaml
-- uses: bisq-network/localize-pipeline@v0.1.18
+- uses: bisq-network/localize-pipeline@v0.1.19
 ```
 
 Use `@main` only when you intentionally want the latest unreleased changes.

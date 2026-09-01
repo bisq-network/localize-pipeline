@@ -18,7 +18,16 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from localize.guardian.signing import canonical_signing_key, signature_matches
+from localize.guardian.models import SigningFormat
+from localize.guardian.executable_trust import require_absolute_trusted_executable
+from localize.guardian.signing import (
+    SSHSigningMaterial,
+    canonical_signing_key,
+    canonical_ssh_fingerprint,
+    ssh_agent_environment,
+    ssh_signature_matches,
+    signature_matches,
+)
 from localize.guardian.process import ProcessLimits, run_bounded_process
 
 
@@ -43,7 +52,7 @@ _PROTECTED_ENVIRONMENT_KEYS = frozenset(
         "PATH",
     }
 )
-_SIGNING_ENVIRONMENT_KEYS = frozenset({"GNUPGHOME"})
+_OPENPGP_SIGNING_ENVIRONMENT_KEYS = frozenset({"GNUPGHOME"})
 _DEFAULT_AUTHOR_NAME = "Localize Guardian"
 _DEFAULT_AUTHOR_EMAIL = "localize-guardian@users.noreply.github.com"
 _COMMIT_SUBJECT = "[localize-guardian] Apply review feedback"
@@ -266,7 +275,43 @@ class _GitRunner:
     process_runner: ProcessRunner = field(repr=False)
     git_binary: str = "git"
     signing_program: str | None = None
+    signing_format: SigningFormat = SigningFormat.OPENPGP
+    ssh_signing_material: SSHSigningMaterial | None = None
     timeout_seconds: float = 120.0
+
+    def _ssh_material(self) -> SSHSigningMaterial:
+        material = self.ssh_signing_material
+        if self.signing_format is not SigningFormat.SSH or material is None:
+            raise WorkspaceError("exact SSH signing material is unavailable")
+        if self.signing_program is None:
+            raise WorkspaceError("SSH signing program is unavailable")
+        try:
+            canonical_ssh_fingerprint(material.fingerprint)
+            root = material.root
+            root_metadata = root.lstat()
+            if (
+                not root.is_absolute()
+                or stat.S_ISLNK(root_metadata.st_mode)
+                or not stat.S_ISDIR(root_metadata.st_mode)
+                or stat.S_IMODE(root_metadata.st_mode) != 0o700
+                or root_metadata.st_uid not in {0, os.getuid()}
+            ):
+                raise OSError
+            for path in (material.public_key, material.allowed_signers):
+                metadata = path.lstat()
+                path.relative_to(root)
+                if (
+                    not path.is_absolute()
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_uid not in {0, os.getuid()}
+                    or metadata.st_nlink != 1
+                ):
+                    raise OSError
+        except (OSError, ValueError):
+            raise WorkspaceError("exact SSH signing material is unavailable") from None
+        return material
 
     def run(
         self,
@@ -276,6 +321,14 @@ class _GitRunner:
         extra_environment: Mapping[str, str] | None = None,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        if "SSH_AUTH_SOCK" in self.environment:
+            raise WorkspaceError("base Git environment must not contain SSH_AUTH_SOCK")
+        if extra_environment and "SSH_AUTH_SOCK" in extra_environment and (
+            self.signing_format is not SigningFormat.SSH
+            or not arguments
+            or arguments[0] != "commit"
+        ):
+            raise WorkspaceError("SSH_AUTH_SOCK is only permitted for SSH git commit")
         environment = dict(self.environment)
         if extra_environment:
             overlap = _PROTECTED_ENVIRONMENT_KEYS.intersection(extra_environment)
@@ -290,7 +343,22 @@ class _GitRunner:
             "credential.helper=",
         ]
         if self.signing_program is not None:
-            command.extend(("-c", f"gpg.program={self.signing_program}"))
+            if self.signing_format is SigningFormat.SSH:
+                material = self._ssh_material()
+                command.extend(
+                    (
+                        "-c",
+                        "gpg.format=ssh",
+                        "-c",
+                        f"gpg.ssh.program={self.signing_program}",
+                        "-c",
+                        f"gpg.ssh.allowedSignersFile={material.allowed_signers}",
+                        "-c",
+                        "gpg.minTrustLevel=fully",
+                    )
+                )
+            else:
+                command.extend(("-c", f"gpg.program={self.signing_program}"))
         command.extend(("-C", str(self.path), *arguments))
         try:
             completed = self.process_runner(
@@ -516,7 +584,7 @@ def _validate_identity_value(value: str, *, label: str) -> str:
     return value
 
 
-def _signing_environment(values: Mapping[str, str] | None) -> dict[str, str]:
+def _openpgp_signing_environment(values: Mapping[str, str] | None) -> dict[str, str]:
     if values is None:
         configured_home = os.environ.get("GNUPGHOME")
         candidate = Path(configured_home) if configured_home else Path.home() / ".gnupg"
@@ -524,7 +592,7 @@ def _signing_environment(values: Mapping[str, str] | None) -> dict[str, str]:
             return {}
         return {"GNUPGHOME": str(candidate.resolve(strict=True))}
     if not isinstance(values, Mapping) or any(
-        key not in _SIGNING_ENVIRONMENT_KEYS or not isinstance(value, str)
+        key not in _OPENPGP_SIGNING_ENVIRONMENT_KEYS or not isinstance(value, str)
         for key, value in values.items()
     ):
         raise ValueError("signing_environment may only set GNUPGHOME")
@@ -535,6 +603,66 @@ def _signing_environment(values: Mapping[str, str] | None) -> dict[str, str]:
             raise ValueError("GNUPGHOME must be an absolute, non-symlinked directory")
         normalized["GNUPGHOME"] = str(home.resolve(strict=True))
     return normalized
+
+
+def _ssh_signing_environment(
+    values: Mapping[str, str] | None,
+    *,
+    require_socket: bool,
+) -> dict[str, str]:
+    if require_socket:
+        return ssh_agent_environment(values)
+    if values is not None and (
+        not isinstance(values, Mapping) or any(
+            key != "SSH_AUTH_SOCK" or not isinstance(value, str)
+            for key, value in values.items()
+        )
+    ):
+        raise ValueError("signing_environment may only set SSH_AUTH_SOCK")
+    if values is not None and "SSH_AUTH_SOCK" in values:
+        raw_socket = values["SSH_AUTH_SOCK"]
+        socket_path = Path(raw_socket)
+        if (
+            not raw_socket
+            or any(character in raw_socket for character in "\r\n\x00")
+            or not socket_path.is_absolute()
+            or ".." in socket_path.parts
+        ):
+            raise ValueError("SSH_AUTH_SOCK must be an absolute Unix socket path")
+    return {}
+
+
+def _canonical_signing_identity(
+    runner: _GitRunner,
+    signing_key: str | None,
+) -> str | None:
+    if runner.signing_format is SigningFormat.SSH:
+        expected = runner._ssh_material().fingerprint
+        if signing_key is not None and canonical_ssh_fingerprint(signing_key) != expected:
+            raise ValueError("signing key fingerprint does not match SSH signing material")
+        return expected
+    return canonical_signing_key(signing_key) if signing_key is not None else None
+
+
+def _commit_signing_environment(
+    runner: _GitRunner,
+    values: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if runner.signing_format is SigningFormat.SSH:
+        return ssh_agent_environment(
+            values,
+            temporary_root=runner._ssh_material().root,
+        )
+    return _openpgp_signing_environment(values)
+
+
+def _verification_signing_environment(
+    runner: _GitRunner,
+    values: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if runner.signing_format is SigningFormat.SSH:
+        return _ssh_signing_environment(values, require_socket=False)
+    return _openpgp_signing_environment(values)
 
 
 def _verify_commit_signature(
@@ -548,10 +676,15 @@ def _verify_commit_signature(
         ("verify-commit", "--raw", commit_sha),
         extra_environment=signing_environment,
     )
-    if signing_key is not None and not signature_matches(
-        "\n".join((completed.stdout or "", completed.stderr or "")),
-        signing_key,
-    ):
+    output = "\n".join((completed.stdout or "", completed.stderr or ""))
+    if runner.signing_format is SigningFormat.SSH:
+        expected = _canonical_signing_identity(runner, signing_key)
+        assert expected is not None
+        if not ssh_signature_matches(output, expected):
+            raise WorkspaceError(
+                "verified SSH commit signer does not match the configured fingerprint"
+            )
+    elif signing_key is not None and not signature_matches(output, signing_key):
         raise WorkspaceError(
             "verified commit signer does not match the configured fingerprint"
         )
@@ -585,11 +718,15 @@ class GuardianWorkspace:
         """Commit exactly the already-validated files, then re-verify the commit."""
         if not isinstance(sign, bool):
             raise ValueError("sign must be a boolean")
-        if signing_key is not None:
-            signing_key = canonical_signing_key(signing_key)
+        if sign or signing_key is not None:
+            signing_key = _canonical_signing_identity(self._runner, signing_key)
         if not sign and signing_environment is not None:
             raise ValueError("signing_environment requires signed commits")
-        verified_signing_environment = _signing_environment(signing_environment) if sign else {}
+        verified_signing_environment = (
+            _commit_signing_environment(self._runner, signing_environment)
+            if sign
+            else {}
+        )
         author_name = _validate_identity_value(author_name, label="author_name")
         author_email = _validate_identity_value(author_email, label="author_email")
         normalized_paths = tuple(sorted(_normalize_relative_path(path) for path in expected_paths))
@@ -654,7 +791,10 @@ class GuardianWorkspace:
         ]
         command = ["commit", "--cleanup=verbatim", "--file=-"]
         if sign:
-            command.append("-S" if signing_key is None else f"-S{signing_key}")
+            if self._runner.signing_format is SigningFormat.SSH:
+                command.append(f"-S{self._runner._ssh_material().public_key}")
+            else:
+                command.append("-S" if signing_key is None else f"-S{signing_key}")
         else:
             command.append("--no-gpg-sign")
         identity_environment = {
@@ -700,7 +840,11 @@ class GuardianWorkspace:
                 self._runner,
                 commit_sha,
                 signing_key=signing_key,
-                signing_environment=verified_signing_environment,
+                signing_environment=(
+                    {}
+                    if self._runner.signing_format is SigningFormat.SSH
+                    else verified_signing_environment
+                ),
             )
         if _porcelain_status(self._runner):
             raise WorkspaceError("working tree is not clean after the Guardian commit")
@@ -725,9 +869,11 @@ class GuardianWorkspace:
 
         if not re.fullmatch(r"[0-9a-f]{64}", evidence_hash):
             raise ValueError("evidence_hash must be a lowercase SHA-256 digest")
-        if signing_key is not None:
-            signing_key = canonical_signing_key(signing_key)
-        verified_signing_environment = _signing_environment(signing_environment)
+        signing_key = _canonical_signing_identity(self._runner, signing_key)
+        verified_signing_environment = _commit_signing_environment(
+            self._runner,
+            signing_environment,
+        )
         author_name = _validate_identity_value(author_name, label="author_name")
         author_email = _validate_identity_value(author_email, label="author_email")
         normalized_paths = tuple(
@@ -777,7 +923,10 @@ class GuardianWorkspace:
             raise WorkspaceError("staged prevention paths do not match the allowlist")
 
         command = ["commit", "--cleanup=verbatim", "--file=-"]
-        command.append("-S" if signing_key is None else f"-S{signing_key}")
+        if self._runner.signing_format is SigningFormat.SSH:
+            command.append(f"-S{self._runner._ssh_material().public_key}")
+        else:
+            command.append("-S" if signing_key is None else f"-S{signing_key}")
         identity_environment = {
             "GIT_AUTHOR_EMAIL": author_email,
             "GIT_AUTHOR_NAME": author_name,
@@ -823,7 +972,11 @@ class GuardianWorkspace:
             self._runner,
             commit_sha,
             signing_key=signing_key,
-            signing_environment=verified_signing_environment,
+            signing_environment=(
+                {}
+                if self._runner.signing_format is SigningFormat.SSH
+                else verified_signing_environment
+            ),
         )
         if _porcelain_status(self._runner):
             raise WorkspaceError("working tree is not clean after prevention commit")
@@ -883,12 +1036,11 @@ class GuardianWorkspace:
         _verify_commit_signature(
             self._runner,
             commit.commit_sha,
-            signing_key=(
-                canonical_signing_key(signing_key)
-                if signing_key is not None
-                else None
+            signing_key=_canonical_signing_identity(self._runner, signing_key),
+            signing_environment=_verification_signing_environment(
+                self._runner,
+                signing_environment,
             ),
-            signing_environment=_signing_environment(signing_environment),
         )
 
         try:
@@ -916,6 +1068,15 @@ class GuardianWorkspace:
             raise WorkspaceError("prevention branch already exists at another commit")
 
         before_push()
+        _verify_commit_signature(
+            self._runner,
+            commit.commit_sha,
+            signing_key=_canonical_signing_identity(self._runner, signing_key),
+            signing_environment=_verification_signing_environment(
+                self._runner,
+                signing_environment,
+            ),
+        )
         self._runner.run(
             (
                 "push",
@@ -990,16 +1151,14 @@ class GuardianWorkspace:
         if _porcelain_status(self._runner):
             raise WorkspaceError("working tree is not clean before publication")
         if require_signature:
-            verified_signing_environment = _signing_environment(signing_environment)
             _verify_commit_signature(
                 self._runner,
                 commit.commit_sha,
-                signing_key=(
-                    canonical_signing_key(signing_key)
-                    if signing_key is not None
-                    else None
+                signing_key=_canonical_signing_identity(self._runner, signing_key),
+                signing_environment=_verification_signing_environment(
+                    self._runner,
+                    signing_environment,
                 ),
-                signing_environment=verified_signing_environment,
             )
 
         def credentials() -> dict[str, str]:
@@ -1026,8 +1185,19 @@ class GuardianWorkspace:
         if self._runner.revision("FETCH_HEAD^{commit}") != self.original_sha:
             raise WorkspaceError("remote branch changed since intake")
 
+        push_environment = credentials()
         if before_push is not None:
             before_push()
+        if require_signature:
+            _verify_commit_signature(
+                self._runner,
+                commit.commit_sha,
+                signing_key=_canonical_signing_identity(self._runner, signing_key),
+                signing_environment=_verification_signing_environment(
+                    self._runner,
+                    signing_environment,
+                ),
+            )
         self._runner.run(
             (
                 "push",
@@ -1036,7 +1206,7 @@ class GuardianWorkspace:
                 "origin",
                 f"{commit.commit_sha}:{self.revision.ref}",
             ),
-            extra_environment=credentials(),
+            extra_environment=push_environment,
         )
         remote_output = self._runner.run(
             ("ls-remote", "--refs", "origin", self.revision.ref),
@@ -1062,6 +1232,8 @@ def materialize_exact_checkout(
     credential_environment: CredentialEnvironment | None = None,
     git_binary: str = "git",
     signing_program: str | None = None,
+    signing_format: SigningFormat = SigningFormat.OPENPGP,
+    ssh_signing_material: SSHSigningMaterial | None = None,
     timeout_seconds: float = 120.0,
     _process_runner: ProcessRunner = _bounded_git_process,
 ) -> Iterator[GuardianWorkspace]:
@@ -1082,6 +1254,19 @@ def materialize_exact_checkout(
         or any(character in signing_program for character in "\r\n\x00")
     ):
         raise ValueError("signing_program must be a safe executable name or path")
+    if not isinstance(signing_format, SigningFormat):
+        raise TypeError("signing_format must be a SigningFormat")
+    if signing_format is SigningFormat.SSH:
+        if signing_program is None or ssh_signing_material is None:
+            raise ValueError(
+                "SSH signing requires a signing program and exact signing material"
+            )
+        require_absolute_trusted_executable(
+            (signing_program,),
+            field="signing_program",
+        )
+    elif ssh_signing_material is not None:
+        raise ValueError("SSH signing material is only valid with SSH signing")
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
@@ -1107,6 +1292,8 @@ def materialize_exact_checkout(
             process_runner=_process_runner,
             git_binary=git_binary,
             signing_program=signing_program,
+            signing_format=signing_format,
+            ssh_signing_material=ssh_signing_material,
             timeout_seconds=float(timeout_seconds),
         )
         runner.run(("init", "--quiet"))

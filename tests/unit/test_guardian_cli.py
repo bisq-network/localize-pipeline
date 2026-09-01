@@ -20,11 +20,12 @@ import pytest
 import yaml
 
 from localize import cli as root_cli
-from localize.guardian import FeedbackEvent, GuardianMode
+from localize.guardian import FeedbackEvent, GuardianMode, SigningFormat
 from localize.guardian import cli
 from localize.guardian import runtime as guardian_runtime
 from localize.guardian.config import load_guardian_config
 from localize.guardian.github import GitHubRepositoryIdentity
+from localize.guardian.signing import SSHSigningMaterial
 from localize.guardian.state import GuardianState
 
 
@@ -640,6 +641,101 @@ def test_doctor_requires_signing_only_for_write_modes(
     assert "commit signing: error" in apply_output
 
 
+def test_doctor_wires_the_complete_ssh_signing_identity_into_real_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    fingerprint = "SHA256:" + "A" * 43
+    configured = config_path.read_text(encoding="utf-8")
+    configured = _replace_once(
+        configured,
+        "mode: observe",
+        "mode: apply-owned-translations",
+    )
+    configured = _replace_once(
+        configured,
+        "  signing_format: openpgp\n  signing_program: gpg",
+        (
+            "  signing_format: ssh\n"
+            "  signing_program: /usr/bin/ssh-keygen\n"
+            f"  signing_key: {fingerprint}\n"
+            "  signing_public_key: /keys/guardian.pub"
+        ),
+    )
+    config_path.write_text(configured, encoding="utf-8")
+    config_path.chmod(0o600)
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(
+        cli,
+        "_probe_github",
+        lambda _config: (
+            GitHubRepositoryIdentity("acme/widgets", 100000001, False),
+        ),
+    )
+    probe = Mock(return_value=True)
+    monkeypatch.setattr(cli, "_signing_key_configured", probe)
+
+    assert cli.main(["doctor", "--config", str(config_path)]) == 0
+
+    probe.assert_called_once_with(
+        fingerprint,
+        git_executable="git",
+        signing_program="/usr/bin/ssh-keygen",
+        signing_format=SigningFormat.SSH,
+        signing_public_key="/keys/guardian.pub",
+        temporary_root=cli.guardian_state_dir(config_path),
+    )
+    assert "exact key signed and verified" in capsys.readouterr().out
+
+
+def test_ssh_doctor_uses_trusted_config_parent_without_creating_missing_state_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    state_directory = cli.guardian_state_dir(config_path)
+    state_directory.rmdir()
+    fingerprint = "SHA256:" + "A" * 43
+    configured = config_path.read_text(encoding="utf-8")
+    configured = _replace_once(
+        configured,
+        "mode: observe",
+        "mode: apply-owned-translations",
+    )
+    configured = _replace_once(
+        configured,
+        "  signing_format: openpgp\n  signing_program: gpg",
+        (
+            "  signing_format: ssh\n"
+            "  signing_program: /usr/bin/ssh-keygen\n"
+            f"  signing_key: {fingerprint}\n"
+            "  signing_public_key: /keys/guardian.pub"
+        ),
+    )
+    config_path.write_text(configured, encoding="utf-8")
+    config_path.chmod(0o600)
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(
+        cli,
+        "_probe_github",
+        lambda _config: (
+            GitHubRepositoryIdentity("acme/widgets", 100000001, False),
+        ),
+    )
+    probe = Mock(return_value=True)
+    monkeypatch.setattr(cli, "_signing_key_configured", probe)
+
+    assert cli.main(["doctor", "--config", str(config_path)]) == 0
+
+    assert not state_directory.exists()
+    assert probe.call_args.kwargs["temporary_root"] == config_path.parent
+
+
 def test_signing_probe_never_falls_back_to_global_git_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -724,6 +820,118 @@ def test_signing_probe_fails_closed_when_exact_key_cannot_sign(
         signing_program="/usr/bin/gpg",
     ) is False
     assert calls == 2
+
+
+def test_ssh_signing_probe_uses_frozen_key_and_agent_only_for_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprint = "SHA256:" + "A" * 43
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    captured_snapshot: dict[str, object] = {}
+
+    @contextmanager
+    def fake_snapshot(**kwargs: object):
+        captured_snapshot.update(kwargs)
+        root = Path(kwargs["temporary_root"])
+        yield SSHSigningMaterial(
+            root=root,
+            public_key=root / "signing-key.pub",
+            allowed_signers=root / "allowed-signers",
+            fingerprint=fingerprint,
+        )
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, dict(kwargs["env"])))  # type: ignore[arg-type]
+        output = (
+            'Good "git" signature for localize-guardian with ED25519 key '
+            f"{fingerprint}\n"
+            if "verify-commit" in argv
+            else ""
+        )
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(cli, "snapshot_ssh_signing_material", fake_snapshot)
+    monkeypatch.setattr(
+        cli,
+        "ssh_agent_environment",
+        lambda **_kwargs: {"SSH_AUTH_SOCK": "/private/test-agent.sock"},
+    )
+    monkeypatch.setattr(cli, "run_bounded_process", run)
+
+    assert cli._signing_key_configured(
+        fingerprint,
+        signing_format=SigningFormat.SSH,
+        signing_public_key="/keys/guardian.pub",
+        git_executable="/usr/bin/git",
+        signing_program="/usr/bin/ssh-keygen",
+        temporary_root=tmp_path,
+    )
+    assert len(calls) == 3
+    commit_call = next(call for call in calls if "commit" in call[0])
+    assert commit_call[1]["SSH_AUTH_SOCK"] == "/private/test-agent.sock"
+    assert all(
+        "SSH_AUTH_SOCK" not in environment
+        for arguments, environment in calls
+        if "commit" not in arguments
+    )
+    assert "gpg.format=ssh" in commit_call[0]
+    assert "gpg.ssh.program=/usr/bin/ssh-keygen" in commit_call[0]
+    assert any(argument.startswith("gpg.ssh.allowedSignersFile=") for argument in commit_call[0])
+    assert "gpg.minTrustLevel=fully" in commit_call[0]
+    assert any(argument.startswith("-S") for argument in commit_call[0])
+    assert captured_snapshot["public_key_path"] == "/keys/guardian.pub"
+    assert captured_snapshot["expected_fingerprint"] == fingerprint
+
+
+def test_ssh_signing_probe_rejects_wrong_verified_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprint = "SHA256:" + "A" * 43
+
+    @contextmanager
+    def fake_snapshot(**kwargs: object):
+        root = Path(kwargs["temporary_root"])
+        yield SSHSigningMaterial(
+            root=root,
+            public_key=root / "signing-key.pub",
+            allowed_signers=root / "allowed-signers",
+            fingerprint=fingerprint,
+        )
+
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(cli, "snapshot_ssh_signing_material", fake_snapshot)
+    monkeypatch.setattr(
+        cli,
+        "ssh_agent_environment",
+        lambda **_kwargs: {"SSH_AUTH_SOCK": "/private/test-agent.sock"},
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_bounded_process",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv,
+            0,
+            (
+                'Good "git" signature for localize-guardian with ED25519 key '
+                f"SHA256:{'B' * 43}\n"
+                if "verify-commit" in argv
+                else ""
+            ),
+            "",
+        ),
+    )
+
+    assert not cli._signing_key_configured(
+        fingerprint,
+        signing_format=SigningFormat.SSH,
+        signing_public_key="/keys/guardian.pub",
+        git_executable="/usr/bin/git",
+        signing_program="/usr/bin/ssh-keygen",
+        temporary_root=tmp_path,
+    )
 
 
 def test_doctor_consumes_secret_free_runtime_commands_from_config(

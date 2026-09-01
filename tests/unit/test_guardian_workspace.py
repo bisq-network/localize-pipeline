@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
+from localize.guardian.models import SigningFormat
+from localize.guardian.signing import SSHSigningMaterial
 from localize.guardian.workspace import (
     CommitResult,
     ExactRevision,
@@ -508,6 +512,327 @@ def test_default_commit_path_requests_and_verifies_signature(tmp_path):
     assert all("push" not in call for call in calls)
 
 
+def test_openpgp_profile_keeps_the_existing_git_flags_and_environment(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    fingerprint = "A" * 40
+    gnupg_home = tmp_path / "gnupg"
+    gnupg_home.mkdir(mode=0o700)
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    original_run = subprocess.run
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        arguments = tuple(args)
+        calls.append((arguments, dict(kwargs["env"])))
+        if "commit" in arguments and f"-S{fingerprint}" in arguments:
+            unsigned = tuple(
+                "--no-gpg-sign" if value == f"-S{fingerprint}" else value
+                for value in arguments
+            )
+            return original_run(unsigned, **kwargs)
+        if "verify-commit" in arguments:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                "",
+                f"[GNUPG:] VALIDSIG {fingerprint}\n",
+            )
+        return original_run(arguments, **kwargs)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        signing_program="/usr/bin/gpg",
+        _process_runner=signing_spy,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        workspace.commit_validated_changes(
+            expected_paths=("i18n/messages_ru.properties",),
+            pull_number=7,
+            feedback_urls=(
+                "https://github.example.com/acme/project/pull/7#discussion_r123",
+            ),
+            signing_key=fingerprint,
+            signing_environment={"GNUPGHOME": str(gnupg_home)},
+        )
+
+    signing_calls = [
+        call for call in calls if "commit" in call[0] or "verify-commit" in call[0]
+    ]
+    assert len(signing_calls) == 2
+    for arguments, environment in signing_calls:
+        assert "gpg.program=/usr/bin/gpg" in arguments
+        assert "gpg.format=ssh" not in arguments
+        assert not any(
+            argument.startswith("gpg.ssh.") for argument in arguments
+        )
+        assert environment["GNUPGHOME"] == str(gnupg_home.resolve())
+        assert "SSH_AUTH_SOCK" not in environment
+
+
+def test_ssh_signing_uses_exact_snapshot_and_limits_agent_socket_to_commit(
+    tmp_path,
+):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    fingerprint = "SHA256:" + "A" * 43
+    signing_root = tmp_path / "ssh-signing"
+    signing_root.mkdir(mode=0o700)
+    public_key = signing_root / "signing-key.pub"
+    allowed_signers = signing_root / "allowed-signers"
+    public_key.write_text("ssh-ed25519 AAAATest\n", encoding="ascii")
+    allowed_signers.write_text(
+        "localize-guardian ssh-ed25519 AAAATest\n",
+        encoding="ascii",
+    )
+    public_key.chmod(0o600)
+    allowed_signers.chmod(0o600)
+    material = SSHSigningMaterial(
+        root=signing_root,
+        public_key=public_key,
+        allowed_signers=allowed_signers,
+        fingerprint=fingerprint,
+    )
+    socket_root = Path(
+        tempfile.mkdtemp(prefix="lg-agent-", dir=str(Path("/tmp").resolve()))
+    )
+    socket_path = socket_root / "agent.sock"
+    agent_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    agent_socket.bind(str(socket_path))
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    original_run = subprocess.run
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        arguments = tuple(args)
+        calls.append((arguments, dict(kwargs["env"])))
+        if "commit" in arguments and any(
+            argument.startswith("-S") for argument in arguments
+        ):
+            unsigned = tuple(
+                "--no-gpg-sign" if value.startswith("-S") else value
+                for value in arguments
+            )
+            return original_run(unsigned, **kwargs)
+        if "verify-commit" in arguments:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                (
+                    'Good "git" signature for localize-guardian with ED25519 key '
+                    f"{fingerprint}\n"
+                ),
+                "",
+            )
+        return original_run(arguments, **kwargs)
+
+    try:
+        with materialize_exact_checkout(
+            _revision(ref="refs/heads/translation-review", sha=head_sha),
+            remote_url=remote.as_uri(),
+            allow_file_remote=True,
+            signing_format=SigningFormat.SSH,
+            signing_program="/usr/bin/ssh-keygen",
+            ssh_signing_material=material,
+            _process_runner=signing_spy,
+        ) as workspace:
+            (workspace.path / "i18n/messages_ru.properties").write_text(
+                "hello=Здравствуйте\n",
+                encoding="utf-8",
+            )
+            commit = workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                signing_key=fingerprint,
+                signing_environment={"SSH_AUTH_SOCK": str(socket_path)},
+            )
+            workspace.publish_commit(
+                commit,
+                signing_key=fingerprint,
+                signing_environment={"SSH_AUTH_SOCK": str(socket_path)},
+            )
+    finally:
+        agent_socket.close()
+        socket_path.unlink(missing_ok=True)
+        socket_root.rmdir()
+
+    commit_call = next(call for call in calls if "commit" in call[0])
+    assert commit_call[1]["SSH_AUTH_SOCK"] == str(socket_path)
+    assert f"-S{public_key}" in commit_call[0]
+    assert all(
+        "SSH_AUTH_SOCK" not in environment
+        for arguments, environment in calls
+        if "commit" not in arguments
+    )
+    verify_calls = [arguments for arguments, _environment in calls if "verify-commit" in arguments]
+    assert len(verify_calls) == 3
+    for arguments in verify_calls:
+        assert "gpg.format=ssh" in arguments
+        assert "gpg.ssh.program=/usr/bin/ssh-keygen" in arguments
+        assert f"gpg.ssh.allowedSignersFile={allowed_signers}" in arguments
+        assert "gpg.minTrustLevel=fully" in arguments
+    push_index = next(index for index, call in enumerate(calls) if "push" in call[0])
+    assert "verify-commit" in calls[push_index - 1][0]
+
+
+def test_ssh_signing_rejects_wrong_fingerprint_or_non_socket_agent(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    fingerprint = "SHA256:" + "A" * 43
+    signing_root = tmp_path / "ssh-signing"
+    signing_root.mkdir(mode=0o700)
+    public_key = signing_root / "signing-key.pub"
+    allowed_signers = signing_root / "allowed-signers"
+    public_key.write_text("ssh-ed25519 AAAATest\n", encoding="ascii")
+    allowed_signers.write_text(
+        "localize-guardian ssh-ed25519 AAAATest\n",
+        encoding="ascii",
+    )
+    public_key.chmod(0o600)
+    allowed_signers.chmod(0o600)
+    material = SSHSigningMaterial(
+        root=signing_root,
+        public_key=public_key,
+        allowed_signers=allowed_signers,
+        fingerprint=fingerprint,
+    )
+    fake_socket = tmp_path / "not-a-socket"
+    fake_socket.write_text("not a socket", encoding="ascii")
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        signing_format=SigningFormat.SSH,
+        signing_program="/usr/bin/ssh-keygen",
+        ssh_signing_material=material,
+    ) as workspace:
+        target = workspace.path / "i18n/messages_ru.properties"
+        target.write_text("hello=Здравствуйте\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="fingerprint"):
+            workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                signing_key="SHA256:" + "B" * 43,
+                signing_environment={"SSH_AUTH_SOCK": str(fake_socket)},
+            )
+        with pytest.raises(ValueError, match="SSH_AUTH_SOCK"):
+            workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                signing_key=fingerprint,
+                signing_environment={"SSH_AUTH_SOCK": str(fake_socket)},
+            )
+
+
+def test_git_runner_restricts_agent_socket_to_ssh_commit_subprocess(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    fingerprint = "SHA256:" + "A" * 43
+    signing_root = tmp_path / "ssh-signing"
+    signing_root.mkdir(mode=0o700)
+    public_key = signing_root / "signing-key.pub"
+    allowed_signers = signing_root / "allowed-signers"
+    public_key.write_text("ssh-ed25519 AAAATest\n", encoding="ascii")
+    allowed_signers.write_text(
+        "localize-guardian ssh-ed25519 AAAATest\n",
+        encoding="ascii",
+    )
+    public_key.chmod(0o600)
+    allowed_signers.chmod(0o600)
+    material = SSHSigningMaterial(
+        root=signing_root,
+        public_key=public_key,
+        allowed_signers=allowed_signers,
+        fingerprint=fingerprint,
+    )
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        signing_format=SigningFormat.SSH,
+        signing_program="/usr/bin/ssh-keygen",
+        ssh_signing_material=material,
+    ) as workspace:
+        workspace._runner.process_runner = lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            "",
+            "",
+        )
+        for operation in ("fetch", "push", "verify-commit", "status"):
+            with pytest.raises(WorkspaceError, match="SSH_AUTH_SOCK.*commit"):
+                workspace._runner.run(
+                    (operation,),
+                    extra_environment={"SSH_AUTH_SOCK": "/private/agent.sock"},
+                )
+
+
+def test_ssh_checkout_rejects_untrusted_signing_program_at_public_boundary(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    fingerprint = "SHA256:" + "A" * 43
+    signing_root = tmp_path / "ssh-signing"
+    signing_root.mkdir(mode=0o700)
+    public_key = signing_root / "signing-key.pub"
+    allowed_signers = signing_root / "allowed-signers"
+    public_key.write_text("ssh-ed25519 AAAATest\n", encoding="ascii")
+    allowed_signers.write_text(
+        "localize-guardian ssh-ed25519 AAAATest\n",
+        encoding="ascii",
+    )
+    public_key.chmod(0o600)
+    allowed_signers.chmod(0o600)
+    material = SSHSigningMaterial(
+        root=signing_root,
+        public_key=public_key,
+        allowed_signers=allowed_signers,
+        fingerprint=fingerprint,
+    )
+    untrusted_program = tmp_path / "untrusted-ssh-keygen"
+    untrusted_program.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    untrusted_program.chmod(0o777)
+
+    with pytest.raises(ValueError, match="trusted, non-symlinked executable"):
+        with materialize_exact_checkout(
+            _revision(ref="refs/heads/translation-review", sha=head_sha),
+            remote_url=remote.as_uri(),
+            allow_file_remote=True,
+            signing_format=SigningFormat.SSH,
+            signing_program=str(untrusted_program),
+            ssh_signing_material=material,
+        ):
+            pytest.fail("an untrusted SSH verification program must fail closed")
+
+
+def test_unsigned_openpgp_commit_still_rejects_malformed_supplied_key(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        with pytest.raises(ValueError, match="OpenPGP fingerprint"):
+            workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                sign=False,
+                signing_key="not-a-fingerprint",
+            )
+
+
 def test_signs_validated_prevention_modifications_and_new_tests_then_creates_branch(
     tmp_path,
 ):
@@ -597,6 +922,8 @@ def test_signs_validated_prevention_modifications_and_new_tests_then_creates_bra
     assert lease_checks == ["checked"]
     push_call = next(arguments for arguments, _env in calls if "push" in arguments)
     assert "--force-with-lease=refs/heads/guardian/prevention-abc:" in push_call
+    push_index = next(index for index, call in enumerate(calls) if "push" in call[0])
+    assert "verify-commit" in calls[push_index - 1][0]
     assert all(
         "prevention-secret" not in "\0".join(arguments)
         for arguments, _environment in calls
