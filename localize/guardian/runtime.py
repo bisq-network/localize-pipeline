@@ -243,12 +243,20 @@ def _poll_lock_inode_may_be_initializing(metadata: os.stat_result) -> bool:
     )
 
 
-def _poll_lock_path_may_be_initializing(lock_path: Path) -> bool:
+def _poll_lock_path_may_be_initializing_or_ready(lock_path: Path) -> bool:
+    """Recognize the safe states around a creator's final chmod."""
+
     try:
         metadata = lock_path.stat(follow_symlinks=False)
     except OSError:
         return False
-    return _poll_lock_inode_may_be_initializing(metadata)
+    return _poll_lock_inode_may_be_initializing(metadata) or (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and (not hasattr(os, "getuid") or metadata.st_uid == os.getuid())
+        and metadata.st_size == 0
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
 
 
 def _open_private_poll_lock(lock_path: Path) -> int:
@@ -282,7 +290,7 @@ def _open_private_poll_lock(lock_path: Path) -> int:
         except PermissionError:
             if (
                 time.monotonic() < deadline
-                and _poll_lock_path_may_be_initializing(lock_path)
+                and _poll_lock_path_may_be_initializing_or_ready(lock_path)
             ):
                 time.sleep(_POLL_LOCK_RETRY_SECONDS)
                 continue

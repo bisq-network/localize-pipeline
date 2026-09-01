@@ -889,6 +889,39 @@ def test_poll_lock_waits_for_an_exclusive_creator_to_finish_initializing(
     assert _mode(lock_path) == 0o600
 
 
+def test_poll_lock_retries_when_creator_finishes_after_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o000)
+    original_open = os.open
+    permission_failures = 0
+
+    def open_during_creator_transition(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        nonlocal permission_failures
+        if path == lock_path and not flags & os.O_EXCL and permission_failures == 0:
+            permission_failures += 1
+            lock_path.chmod(0o600)
+            raise PermissionError
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(runtime.os, "open", open_during_creator_transition)
+
+    with runtime._exclusive_poll_lock(state_directory):
+        pass
+
+    assert permission_failures == 1
+    assert _mode(lock_path) == 0o600
+
+
 def test_poll_lock_never_repairs_a_preexisting_unsafe_inode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

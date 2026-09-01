@@ -1025,7 +1025,7 @@ print(f"result={result}", flush=True)
     assert sorted(stdout.strip() for stdout, _stderr in results) == [
         "owner\nresult=7",
         "result=0",
-    ]
+    ], results
     assert all(stderr == "" for _stdout, stderr in results)
 
 
