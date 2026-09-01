@@ -46,6 +46,8 @@ from localize.guardian.models import (
     GuardianAssessment,
     GuardianConfig,
     GuardianMode,
+    PipelineConfigSnapshot,
+    PipelineConfigSource,
     ProposedReplacement,
     RecurrenceCandidate,
     RepositoryPolicy,
@@ -233,6 +235,9 @@ class _PollAccumulator:
 @dataclass(frozen=True)
 class _TargetScope:
     config_path: Path
+    config_root: Path
+    source_root: Path
+    config_bundle_digest: str | None
     path_locales: Mapping[str, str]
     changed_files: Mapping[str, ChangedFile]
 
@@ -390,8 +395,26 @@ def _target_scope(
     base_root: Path,
     policy: RepositoryPolicy,
     changed_files: Sequence[ChangedFile],
+    operator_pipeline_config: PipelineConfigSnapshot | None = None,
 ) -> _TargetScope:
-    config_path = _trusted_file(base_root, policy.pipeline_config_path)
+    if policy.pipeline_config_source is PipelineConfigSource.BASE:
+        config_root = base_root
+        config_path = _trusted_file(base_root, policy.pipeline_config_path)
+        config_bundle_digest = None
+    else:
+        if operator_pipeline_config is None:
+            raise ValueError("Operator pipeline config snapshot is unavailable.")
+        config_root = operator_pipeline_config.config_root
+        try:
+            relative_config = operator_pipeline_config.config_path.relative_to(
+                config_root
+            ).as_posix()
+        except ValueError:
+            raise ValueError(
+                "Operator pipeline config snapshot escapes its private root."
+            ) from None
+        config_path = _trusted_file(config_root, relative_config)
+        config_bundle_digest = operator_pipeline_config.bundle_digest
     profiles, locale_codes = _load_base_profiles(
         config_path,
         expected_source_locale=policy.source_locale,
@@ -430,6 +453,9 @@ def _target_scope(
         files_by_path[path] = changed_file
     return _TargetScope(
         config_path=config_path,
+        config_root=config_root,
+        source_root=base_root,
+        config_bundle_digest=config_bundle_digest,
         path_locales=path_locales,
         changed_files=files_by_path,
     )
@@ -608,6 +634,7 @@ class GuardianController:
         github_host: str = "github.com",
         signing_key: str | None = None,
         signing_environment: Mapping[str, str] | None = None,
+        operator_pipeline_configs: Mapping[str, PipelineConfigSnapshot] | None = None,
     ) -> None:
         if (
             config.mode
@@ -646,6 +673,7 @@ class GuardianController:
             signing_key if signing_key is not None else config.runtime.signing_key
         )
         self.signing_environment = signing_environment
+        self.operator_pipeline_configs = dict(operator_pipeline_configs or {})
 
     def poll_once(self) -> PollOutcome:
         """Run one finite poll, never retrying at the orchestration layer."""
@@ -919,6 +947,9 @@ class GuardianController:
                 base_root=base_workspace.path,
                 policy=policy,
                 changed_files=snapshot.changed_files,
+                operator_pipeline_config=self.operator_pipeline_configs.get(
+                    policy.base_repo
+                ),
             )
             authorized = authorize_feedback(
                 policy=policy,
@@ -1354,6 +1385,11 @@ class GuardianController:
                 prefix="localize-guardian-evidence-",
                 dir=evidence_parent,
             ) as temporary_directory:
+                evidence_kwargs = {}
+                if scope.config_bundle_digest is not None:
+                    evidence_kwargs["trusted_config_bundle_digest"] = (
+                        scope.config_bundle_digest
+                    )
                 bundle = self.evidence_builder(
                     destination=Path(temporary_directory) / "bundle",
                     repo_root=head_workspace.path,
@@ -1366,9 +1402,10 @@ class GuardianController:
                     changed_paths=changed_paths,
                     allowed_path_globs=policy.allowed_path_globs,
                     diff_text=_diff_text(changed_paths, scope.changed_files),
-                    trusted_config_root=base_workspace.path,
-                    trusted_source_root=base_workspace.path,
+                    trusted_config_root=scope.config_root,
+                    trusted_source_root=scope.source_root,
                     expected_source_locale=policy.source_locale,
+                    **evidence_kwargs,
                 )
                 try:
                     result = self._assessment_result(
@@ -1584,8 +1621,8 @@ class GuardianController:
                     allowed_paths=policy.allowed_path_globs,
                     replacements=replacements,
                     max_changes=self.config.limits.max_value_edits_per_run,
-                    trusted_config_root=base_workspace.path,
-                    trusted_source_root=base_workspace.path,
+                    trusted_config_root=scope.config_root,
+                    trusted_source_root=scope.source_root,
                     expected_source_locale=policy.source_locale,
                 )
                 outcome.prepared_value_edits += len(patch_result.changed_keys)

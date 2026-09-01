@@ -45,6 +45,7 @@ from localize.guardian.models import (
     CodexAuthMode,
     GuardianConfig,
     GuardianMode,
+    PipelineConfigSource,
     RepositoryPolicy,
 )
 from localize.guardian.prevention_runtime import (
@@ -61,6 +62,7 @@ from localize.guardian.process import (
 )
 from localize.guardian.runtime import (
     GuardianRuntimeError,
+    _snapshot_operator_pipeline_configs,
     _validate_subscription_codex_home,
     load_trusted_guardian_config,
 )
@@ -77,6 +79,11 @@ _STARTER_CONFIG = """# Generic, report-only Localize Guardian policy.
 # Replace every example name and numeric ID with values read from GitHub's API.
 # Login names are display labels; numeric IDs grant authority.
 mode: observe
+
+# Scheduled invocations catch up once daily after this local wall-clock time.
+schedule:
+  hour: 0
+  minute: 0
 
 runtime:
   codex_model: gpt-5.6-terra
@@ -129,6 +136,9 @@ repositories:
       - "localization/**"
     allowed_path_globs:
       - "src/main/resources/i18n/**"
+    # Set to operator to resolve the path beside this Guardian YAML instead of
+    # from the exact repository base SHA. See docs/guardian.md for permissions.
+    pipeline_config_source: base
     pipeline_config_path: .localize/config.yaml
     source_locale: en
     trusted_reviewers:
@@ -961,6 +971,54 @@ def _state_directory_doctor(config_path: Path) -> tuple[str, bool]:
     return "ok", True
 
 
+def _operator_pipeline_config_doctor(
+    config: GuardianConfig,
+    *,
+    config_path: Path,
+) -> tuple[str, bool]:
+    """Exercise the production snapshot path without external or model work."""
+
+    operator_count = sum(
+        repository.pipeline_config_source is PipelineConfigSource.OPERATOR
+        for repository in config.repositories
+    )
+    if operator_count == 0:
+        return "not configured (repository base mode)", True
+
+    runtime_dir = guardian_state_dir(config_path)
+    try:
+        if runtime_dir.exists():
+            _ensure_private_directory(runtime_dir)
+            with _snapshot_operator_pipeline_configs(
+                config=config,
+                guardian_config_path=config_path,
+                state_directory=runtime_dir,
+            ) as snapshots:
+                if len(snapshots) != operator_count:
+                    raise GuardianRuntimeError(
+                        "Guardian operator pipeline config is unavailable or unsafe."
+                    )
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix=".guardian-operator-config-doctor-",
+                dir=config_path.parent,
+            ) as temporary_directory:
+                scratch = Path(temporary_directory)
+                scratch.chmod(0o700)
+                with _snapshot_operator_pipeline_configs(
+                    config=config,
+                    guardian_config_path=config_path,
+                    state_directory=scratch,
+                ) as snapshots:
+                    if len(snapshots) != operator_count:
+                        raise GuardianRuntimeError(
+                            "Guardian operator pipeline config is unavailable or unsafe."
+                        )
+    except (GuardianCLIError, GuardianRuntimeError, OSError):
+        return "error (private config or glossary is unavailable or unsafe)", False
+    return f"ok ({operator_count} snapshotted)", True
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     config_path = _resolved_config_path(args.config)
     print("Guardian doctor")
@@ -975,6 +1033,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     state_status, state_ok = _state_directory_doctor(config_path)
     print(f"state directory: {state_status}")
     healthy &= state_ok
+
+    operator_status, operator_ok = _operator_pipeline_config_doctor(
+        config,
+        config_path=config_path,
+    )
+    print(f"operator pipeline configs: {operator_status}")
+    healthy &= operator_ok
+    if not operator_ok:
+        return 1
 
     codex_path = _command_available((config.runtime.codex_executable,))
     print(f"Codex executable: {'ok' if codex_path else 'error (not found)'}")

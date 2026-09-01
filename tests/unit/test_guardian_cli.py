@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import yaml
 
 from localize import cli as root_cli
 from localize.guardian import FeedbackEvent, GuardianMode
@@ -55,6 +56,45 @@ def _mode(path: Path) -> int:
 def _replace_once(value: str, needle: str, replacement: str) -> str:
     assert needle in value, f"template drift for {needle!r}"
     return value.replace(needle, replacement, 1)
+
+
+def _configure_operator_pipeline(config_path: Path) -> Path:
+    config_path.parent.chmod(0o700)
+    pipeline_path = config_path.parent / "pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_locale": "en",
+                "supported_locales": [{"code": "de", "name": "German"}],
+                "localization_format": "java_properties",
+                "localization_layout": {
+                    "id": "suffix",
+                    "base_name": "messages",
+                    "source_locale": "en",
+                },
+                "glossary_file_path": "glossary.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path.chmod(0o600)
+    glossary = config_path.parent / "glossary.json"
+    glossary.write_text('{"de": {}}\n', encoding="utf-8")
+    glossary.chmod(0o600)
+    config_text = config_path.read_text(encoding="utf-8")
+    config_text = _replace_once(
+        config_text,
+        "    pipeline_config_source: base",
+        "    pipeline_config_source: operator",
+    )
+    config_text = _replace_once(
+        config_text,
+        "    pipeline_config_path: .localize/config.yaml",
+        "    pipeline_config_path: pipeline.yaml",
+    )
+    config_path.write_text(config_text, encoding="utf-8")
+    config_path.chmod(0o600)
+    return glossary
 
 
 def _configure_scheduled_runtime(
@@ -762,6 +802,72 @@ def test_doctor_does_not_create_a_missing_state_directory(
     assert exit_code == 0
     assert not state_dir.exists()
     assert "created on first run or install" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("missing_state_directory", [False, True])
+def test_doctor_snapshots_operator_pipeline_config_without_persistent_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    missing_state_directory: bool,
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    _configure_operator_pipeline(config_path)
+    state_dir = cli.guardian_state_dir(config_path)
+    if missing_state_directory:
+        state_dir.rmdir()
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(
+        cli,
+        "_probe_github",
+        lambda _config: (
+            GitHubRepositoryIdentity("acme/widgets", 100000001, False),
+        ),
+    )
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert "operator pipeline configs: ok (1 snapshotted)" in capsys.readouterr().out
+    assert list(config_path.parent.glob(".guardian-operator-config-doctor-*")) == []
+    if missing_state_directory:
+        assert not state_dir.exists()
+    else:
+        assert list(state_dir.glob("operator-pipeline-config-*")) == []
+
+
+@pytest.mark.parametrize("unsafe_glossary", ["wrong-mode", "malformed"])
+def test_doctor_fails_before_external_probes_for_unsafe_operator_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unsafe_glossary: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    glossary = _configure_operator_pipeline(config_path)
+    if unsafe_glossary == "wrong-mode":
+        glossary.chmod(0o644)
+    else:
+        glossary.write_text("{malformed", encoding="utf-8")
+        glossary.chmod(0o600)
+    command_probe = Mock(return_value=True)
+    github_probe = Mock()
+    codex_probe = Mock(return_value=True)
+    monkeypatch.setattr(cli, "_command_available", command_probe)
+    monkeypatch.setattr(cli, "_probe_github", github_probe)
+    monkeypatch.setattr(cli, "_codex_capability_probe", codex_probe)
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "operator pipeline configs: error" in output
+    command_probe.assert_not_called()
+    github_probe.assert_not_called()
+    codex_probe.assert_not_called()
+    assert list(cli.guardian_state_dir(config_path).glob("operator-pipeline-config-*")) == []
 
 
 def test_run_creates_private_state_file_and_lazily_calls_controller(

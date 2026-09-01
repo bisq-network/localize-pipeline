@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
@@ -297,6 +298,7 @@ def build_evidence_bundle(
     trusted_config_root: Path | None = None,
     trusted_source_root: Path | None = None,
     expected_source_locale: str | None = None,
+    trusted_config_bundle_digest: str | None = None,
 ) -> EvidenceBundle:
     """Create a minimal evidence directory without copying the checkout.
 
@@ -309,6 +311,11 @@ def build_evidence_bundle(
         raise EvidenceError(f"Evidence destination already exists: {destination}.")
     if max_bytes <= 0:
         raise EvidenceError("Evidence size limit must be positive.")
+    if trusted_config_bundle_digest is not None and not re.fullmatch(
+        r"[0-9a-f]{64}",
+        trusted_config_bundle_digest,
+    ):
+        raise EvidenceError("Trusted pipeline config bundle digest is invalid.")
     root = repo_root.expanduser().resolve()
     if not root.is_dir():
         raise EvidenceError("Repository checkout does not exist.")
@@ -398,6 +405,8 @@ def build_evidence_bundle(
         "files": list(files),
         "placeholder_profile": str(config.get("placeholder_profile") or "standard"),
     }
+    if trusted_config_bundle_digest is not None:
+        manifest["pipeline_config_bundle_digest"] = trusted_config_bundle_digest
     payloads = {
         "INSTRUCTIONS.md": _INSTRUCTIONS,
         "manifest.json": _json_text(manifest),

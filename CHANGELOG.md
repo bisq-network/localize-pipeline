@@ -7,6 +7,27 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.18] - 2026-09-01
+
+### Added
+
+- Add opt-in operator-owned Guardian pipeline configs for projects that keep
+  localization policy outside the monitored repository. Config and glossary
+  inputs are permission-checked, bounded, validated, and snapshotted once per
+  poll while source-locale files remain pinned to the exact base SHA.
+- Add a strict configurable local daily Guardian schedule with explicit hour
+  and minute fields and backward-compatible midnight defaults.
+
+### Changed
+
+- Include the private pipeline-config bundle digest in Guardian evidence and
+  assessment cache identity so policy changes cannot reuse stale assessments.
+- Make Java-properties escape linting pair-aware so a valid doubled backslash
+  cannot be misreported as an unknown escape sequence.
+- Adopt SPDX package-license metadata before setuptools removes the deprecated
+  table and license-classifier forms.
+- The default bootstrap action ref is now `v0.1.18`.
+
 ## [0.1.17] - 2026-08-31
 
 ### Added

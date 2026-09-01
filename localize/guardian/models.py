@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import re
 from types import MappingProxyType
+from pathlib import Path
 from typing import Mapping
 
 
@@ -23,6 +24,13 @@ class CodexAuthMode(str, Enum):
 
     CHATGPT = "chatgpt"
     API_KEY = "api-key"
+
+
+class PipelineConfigSource(str, Enum):
+    """Trusted origin for one repository's localization pipeline policy."""
+
+    BASE = "base"
+    OPERATOR = "operator"
 
 
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -50,6 +58,24 @@ class GuardianLimits:
     model_call_reservation_usd: float | None = None
     min_apply_confidence: float = 0.9
     raw_retention_days: int = 90
+
+
+@dataclass(frozen=True)
+class GuardianSchedule:
+    """Once-daily local wall-clock schedule used by scheduled invocations."""
+
+    hour: int = 0
+    minute: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.hour, bool) or not isinstance(self.hour, int):
+            raise ValueError("Schedule hour must be an integer.")
+        if isinstance(self.minute, bool) or not isinstance(self.minute, int):
+            raise ValueError("Schedule minute must be an integer.")
+        if not 0 <= self.hour <= 23:
+            raise ValueError("Schedule hour must be between 0 and 23.")
+        if not 0 <= self.minute <= 59:
+            raise ValueError("Schedule minute must be between 0 and 59.")
 
 
 @dataclass(frozen=True)
@@ -172,6 +198,7 @@ class RepositoryPolicy:
     trusted_bots: Mapping[str, tuple[TrustedActor, ...]]
     private_repo_model_opt_in: bool = False
     prevention: PreventionPolicy | None = None
+    pipeline_config_source: PipelineConfigSource = PipelineConfigSource.BASE
 
     def __post_init__(self) -> None:
         _validate_repository_name(self.base_repo, field_name="base_repo")
@@ -194,6 +221,11 @@ class RepositoryPolicy:
         }
         object.__setattr__(self, "trusted_reviewers", MappingProxyType(reviewers))
         object.__setattr__(self, "trusted_bots", MappingProxyType(bots))
+        object.__setattr__(
+            self,
+            "pipeline_config_source",
+            PipelineConfigSource(self.pipeline_config_source),
+        )
 
     def trusted_reviewers_for(self, locale: str) -> tuple[TrustedActor, ...]:
         """Return only the reviewers trusted for this repository and locale."""
@@ -269,12 +301,26 @@ class GuardianConfig:
     mode: GuardianMode = GuardianMode.OBSERVE
     limits: GuardianLimits = field(default_factory=GuardianLimits)
     runtime: GuardianRuntime = field(default_factory=GuardianRuntime)
+    schedule: GuardianSchedule = field(default_factory=GuardianSchedule)
 
     @property
     def report_only(self) -> bool:
         """Whether this configuration forbids preparing or applying changes."""
 
         return self.mode is GuardianMode.OBSERVE
+
+
+@dataclass(frozen=True)
+class PipelineConfigSnapshot:
+    """Immutable private copy of one operator-owned pipeline config bundle."""
+
+    config_root: Path
+    config_path: Path
+    bundle_digest: str
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.bundle_digest):
+            raise ValueError("Pipeline config bundle digest must be SHA-256 hex.")
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,9 @@ from localize.guardian.models import (
     GuardianLimits,
     GuardianMode,
     GuardianRuntime,
+    GuardianSchedule,
     PreventionPolicy,
+    PipelineConfigSnapshot,
     RepositoryPolicy,
     TrustedActor,
 )
@@ -650,6 +652,56 @@ def test_scheduled_run_catches_up_when_last_attempt_was_previous_local_day(
     assert calls == 1
 
 
+def test_operator_pipeline_config_is_snapshotted_before_controller_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    sequence: list[str] = []
+
+    @contextmanager
+    def fake_snapshot(**_kwargs: object) -> Iterator[dict[str, PipelineConfigSnapshot]]:
+        sequence.append("snapshot-enter")
+        try:
+            yield {
+                "acme/widgets": PipelineConfigSnapshot(
+                    config_root=tmp_path,
+                    config_path=config_path,
+                    bundle_digest="d" * 64,
+                )
+            }
+        finally:
+            sequence.append("snapshot-exit")
+
+    @contextmanager
+    def fake_credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    class FakeController:
+        def poll_once(self) -> PollOutcome:
+            sequence.append("github-model-poll")
+            return PollOutcome(lease_acquired=True)
+
+    monkeypatch.setattr(
+        runtime,
+        "_snapshot_operator_pipeline_configs",
+        fake_snapshot,
+    )
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+
+    assert runtime.run_once(config_path=config_path) == 0
+    assert sequence == ["snapshot-enter", "github-model-poll", "snapshot-exit"]
+    with GuardianState(tmp_path / ".guardian/state.sqlite3") as state:
+        audit = state.latest_health("pipeline-config")
+    assert audit is not None
+    assert audit.details == {
+        "repository": "acme/widgets",
+        "bundle_digest": "d" * 64,
+    }
+
+
 def test_failed_scheduled_poll_is_not_retried_until_manual_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -686,7 +738,11 @@ def test_failed_scheduled_poll_is_not_retried_until_manual_request(
         attempt = state.latest_health("guardian-poll-attempt")
     assert attempt is not None
     assert attempt.status == "attempted"
-    assert attempt.details == {"scheduled": False}
+    assert attempt.details == {
+        "scheduled": False,
+        "local_date": NOW.date().isoformat(),
+        "local_minute": NOW.hour * 60 + NOW.minute,
+    }
 
 
 def test_model_capacity_circuit_is_a_failed_runtime_outcome() -> None:
@@ -708,7 +764,92 @@ def test_scheduled_due_uses_local_day_instead_of_utc_day() -> None:
         )
     )
 
-    assert runtime._scheduled_poll_is_due(state, now=now) is False
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(),
+    ) is False
+
+
+def test_scheduled_due_does_not_repeat_across_dst_fallback() -> None:
+    now = datetime(2026, 10, 25, 0, 15, tzinfo=timezone(timedelta(hours=1)))
+    prior = datetime(2026, 10, 25, 0, 5, tzinfo=timezone(timedelta(hours=2)))
+    state = SimpleNamespace(
+        latest_health=lambda _component: SimpleNamespace(
+            status="attempted",
+            checked_at=prior,
+            details={
+                "scheduled": True,
+                "local_date": "2026-10-25",
+                "local_minute": 5,
+            },
+        )
+    )
+
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(hour=0, minute=0),
+    ) is False
+
+
+def test_manual_poll_before_schedule_does_not_suppress_scheduled_poll() -> None:
+    now = datetime(2026, 8, 30, 8, 7, tzinfo=timezone.utc)
+    manual = datetime(2026, 8, 30, 7, 0, tzinfo=timezone.utc)
+    state = SimpleNamespace(
+        latest_health=lambda _component: SimpleNamespace(
+            status="attempted",
+            checked_at=manual,
+            details={
+                "scheduled": False,
+                "local_date": "2026-08-30",
+                "local_minute": 7 * 60,
+            },
+        )
+    )
+
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(hour=8, minute=7),
+    ) is True
+
+
+def test_scheduled_due_uses_configured_local_clock() -> None:
+    now = datetime(2026, 8, 30, 5, 14, tzinfo=timezone(timedelta(hours=2)))
+    state = SimpleNamespace(latest_health=lambda _component: None)
+
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(hour=5, minute=15),
+    ) is False
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now + timedelta(minutes=1),
+        schedule=GuardianSchedule(hour=5, minute=15),
+    ) is True
+
+
+def test_run_once_uses_configured_schedule_for_due_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    config_path.write_text(
+        "schedule: {hour: 13, minute: 0}\n"
+        + config_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
+    monkeypatch.setattr(
+        runtime,
+        "_build_controller",
+        lambda **_kwargs: pytest.fail("controller must not run before 13:00"),
+    )
+
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
 
 
 def test_run_once_redacts_setup_and_poll_exception_messages(
