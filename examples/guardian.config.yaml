@@ -1,0 +1,116 @@
+# Generic, report-only Localize Guardian policy.
+#
+# Every numeric ID below is an inert placeholder. Replace it with the immutable
+# ID returned by the GitHub API for your repository, users, bots, and owners.
+# Login names are display labels and never grant authority.
+mode: observe
+
+# The scheduled assessment defaults are explicit here so model use and effort
+# remain an operator decision. Before enabling either write mode, configure an
+# exact GPG key ID; global Git user.signingkey is not visible inside Guardian's
+# isolated commit workspace.
+runtime:
+  codex_model: gpt-5.6-terra
+  codex_reasoning_effort: high
+  # Default: consume the operator's Codex/ChatGPT plan allowance, not API spend.
+  codex_auth_mode: chatgpt
+  # ChatGPT mode only; remove this key when selecting api-key mode.
+  codex_home: ~/.local/share/localize-guardian/codex
+  # `guardian install` requires actual non-symlink absolute executable paths for
+  # Codex, Git, and the GitHub helper. Do not use an npm shim with an
+  # `/usr/bin/env` shebang; point at the platform-native Codex binary. API-key
+  # mode additionally requires an absolute model-key helper, and write modes an
+  # absolute signing program. Keep helpers outside monitored repositories.
+  # codex_executable: /absolute/path/to/codex
+  # github_token_command: [/absolute/path/to/github-token-helper]
+  # API billing is explicit opt-in. Change codex_auth_mode to api-key, set this
+  # helper, and uncomment both USD limits below.
+  # codex_api_key_command: [/absolute/path/to/model-key-helper]
+  # signing_key: REPLACE_WITH_FULL_GPG_FINGERPRINT
+
+limits:
+  run_timeout_seconds: 1800
+  max_attempts: 2
+  max_value_edits_per_run: 10
+  # Report-only mode creates no prevention drafts. This cap provides two full
+  # assessment attempts; further same-day work defers after the cap is spent.
+  max_prevention_drafts_per_run: 0
+  max_model_calls_per_day: 2
+  # API-key mode only:
+  # daily_cost_limit_usd: 2.00
+  # model_call_reservation_usd: 2.00
+  min_apply_confidence: 0.90
+  raw_retention_days: 30
+
+repositories:
+  - base_repo: acme/widgets
+    base_repo_id: 100000001
+    # Exact target branch, never a glob.
+    base_branch: main
+    private_repo_model_opt_in: false
+
+    allowed_pr_authors:
+      - login: localization-service[bot]
+        id: 100000002
+        type: Bot
+    allowed_head_owners:
+      - login: localization-service[bot]
+        id: 100000002
+        type: Bot
+    allowed_head_repositories:
+      - full_name: localization-service/widgets
+        id: 100000003
+    allowed_branch_globs:
+      - "localization/**"
+    allowed_path_globs:
+      - "src/main/resources/i18n/**"
+
+    pipeline_config_path: .localize/config.yaml
+    source_locale: en
+
+    # Prevention is intentionally absent in the report-only default. To use
+    # `propose-prevention`, every repository needs its own explicit block like
+    # the one below, with operator-controlled IDs, refs, paths, tests, and a
+    # credential-free test environment and operator-maintained sandbox prefix.
+    # Guardian probes the exact prefix before each command. The probe requires
+    # workspace read/write, denies outside read/write, and denies AF_INET bind,
+    # loopback-connect, and (where supported) filesystem AF_UNIX-connect canaries.
+    # Commands are argv arrays, never shell. Exact checkouts have no ignored
+    # project venv, so use an absolute operator-controlled test interpreter.
+    # prevention:
+    #   target_repository:
+    #     full_name: acme/localization-pipeline
+    #     id: 100000006
+    #     base_branch: main
+    #   push_repository:
+    #     full_name: localization-service/localization-pipeline
+    #     id: 100000007
+    #     branch_prefix: guardian/prevention-
+    #   allowed_code_path_globs:
+    #     - "localize/**/*.py"
+    #   allowed_test_path_globs:
+    #     - "tests/**/*.py"
+    #   focused_test_argv:
+    #     - [/absolute/path/to/python, -m, pytest, tests/unit/test_rules.py, -q]
+    #   sandbox_argv_prefix:
+    #     - /usr/bin/sandbox-exec
+    #     - -f
+    #     - /Users/operator/.config/localize-guardian/test.sb
+    #     - --
+    #   max_changed_files: 4
+    #   max_changed_bytes: 262144
+    #   private_target_model_opt_in: false
+
+    # Human translation authority is scoped to this repository and locale.
+    trusted_reviewers:
+      de:
+        - login: german-maintainer
+          id: 100000004
+          type: User
+
+    # Bots need their own explicit trust; human-list trust never carries over.
+    trusted_bots:
+      de:
+        - login: translation-reviewer[bot]
+          id: 100000005
+          type: Bot

@@ -10,6 +10,9 @@ pull requests. The repository is `bisq-network/localize-pipeline`.
 - Mixed-format localization projects through configured profiles.
 - GitHub Actions, local CLI dry-runs, or Docker Compose plus cron deployments.
 - AISuite, OpenAI-compatible endpoints, or local model endpoints.
+- Optional, operator-owned and self-hosted post-PR review through Localize
+  Guardian; this repository does not operate the Guardian for consuming
+  projects.
 
 ## Stable Agent Entry Points
 
@@ -19,7 +22,10 @@ pull requests. The repository is `bisq-network/localize-pipeline`.
 - `docs/new-project-deployment.md` - Docker/server deployment.
 - `docs/repository-structure.md` - module boundaries.
 - `docs/new-format-checklist.md` - required work for future formats.
+- `docs/guardian.md` - self-hosted Guardian trust model, setup, scheduling, and
+  recovery.
 - `config.example.yaml` - minimal generic starter config.
+- `examples/guardian.config.yaml` - generic report-only Guardian policy.
 - `examples/generic-java-properties/` - Java properties example.
 - `examples/generic-json/` - JSON example.
 - `profiles/bisq/` and `profiles/bisq-mobile/` - production profile examples.
@@ -33,7 +39,20 @@ localize doctor --config config.yaml
 localize smoke --config config.yaml
 localize run --dry-run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
+localize guardian init --config "$HOME/.config/localize/guardian.yaml"
+localize guardian login --config "$HOME/.config/localize/guardian.yaml"
+localize guardian doctor --config "$HOME/.config/localize/guardian.yaml"
+localize guardian run --config "$HOME/.config/localize/guardian.yaml"
+localize guardian status --config "$HOME/.config/localize/guardian.yaml"
 ```
+
+Guardian authority must include the exact target base branch plus numeric
+repository and actor IDs. It defaults to `gpt-5.6-terra` with reasoning effort
+`high`, using a dedicated ChatGPT-plan login rather than metered API billing;
+API-key mode is explicit opt-in. It rejects `--plugin` and ignores
+`LOCALIZE_PLUGIN_MODULES` and adapter entry points. A scheduled failure consumes
+that local day's single attempt; retry only with an explicit manual
+`guardian run` after diagnosis.
 
 ## Stable Python Boundaries
 

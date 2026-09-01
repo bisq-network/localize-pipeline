@@ -41,6 +41,20 @@ def test_build_verify_builds_and_smoke_tests_wheel():
     assert "localize --help" in run
 
 
+def test_build_verify_delegates_guardian_cgroup_for_kernel_regression():
+    steps = _workflow()["jobs"]["test-and-package"]["steps"]
+    verification = next(
+        step for step in steps if step["name"] == "Run linters, scanners, and tests"
+    )
+    run = verification["run"]
+
+    assert "LOCALIZE_GUARDIAN_TEST_CGROUP" in run
+    assert "cgroup.procs" in run
+    assert "cgroup.kill" in run
+    assert "trap cleanup_guardian_cgroup EXIT" in run
+    assert run.index("export LOCALIZE_GUARDIAN_TEST_CGROUP") < run.index("pytest")
+
+
 def test_build_verify_reports_exact_required_status_context():
     jobs = _workflow()["jobs"]
 

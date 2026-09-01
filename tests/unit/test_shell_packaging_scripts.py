@@ -118,6 +118,7 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "ARG GRPC_VERSION=1.82.1" in dockerfile
     assert "ARG X_MOD_VERSION=0.40.0" in dockerfile
     assert "ARG GO_GIT_VERSION=5.19.2" in dockerfile
+    assert "ARG X_CRYPTO_VERSION=0.55.0" in dockerfile
     assert "ARG X_TEXT_VERSION=0.41.0" in dockerfile
     assert "ARG X_TEXT_VERSION=0.40.0" in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
@@ -127,9 +128,11 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert 'go get "google.golang.org/grpc@v${GRPC_VERSION}"' in dockerfile
     assert 'go get "golang.org/x/mod@v${X_MOD_VERSION}"' in dockerfile
     assert 'go get "github.com/go-git/go-git/v5@v${GO_GIT_VERSION}"' in dockerfile
+    assert 'go get "golang.org/x/crypto@v${X_CRYPTO_VERSION}"' in dockerfile
     assert 'go get "golang.org/x/sys@v${X_SYS_VERSION}"' in dockerfile
     assert dockerfile.count('go get "golang.org/x/text@v${X_TEXT_VERSION}"') == 2
     assert "golang[.]org/x/mod[[:space:]]+v${X_MOD_VERSION}" in dockerfile
+    assert "golang[.]org/x/crypto[[:space:]]+v${X_CRYPTO_VERSION}" in dockerfile
     assert "COPY --from=yq-builder /out/yq /usr/bin/yq" in dockerfile
     assert "COPY --from=tx-builder /out/tx /usr/local/bin/tx" in dockerfile
     assert "COPY --from=gosu-builder /out/gosu /usr/sbin/gosu" in dockerfile
