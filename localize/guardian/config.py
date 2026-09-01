@@ -18,6 +18,8 @@ from localize.guardian.models import (
     GuardianLimits,
     GuardianMode,
     GuardianRuntime,
+    GuardianSchedule,
+    PipelineConfigSource,
     PreventionPolicy,
     RepositoryPolicy,
     TrustedActor,
@@ -121,6 +123,14 @@ _CONFIG_SCHEMA: dict[str, Any] = {
     "required": ["repositories"],
     "properties": {
         "mode": {"enum": [mode.value for mode in GuardianMode]},
+        "schedule": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "hour": {"type": "integer", "minimum": 0, "maximum": 23},
+                "minute": {"type": "integer", "minimum": 0, "maximum": 59},
+            },
+        },
         "runtime": {
             "type": "object",
             "additionalProperties": False,
@@ -238,6 +248,9 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                     "allowed_branch_globs": _NON_EMPTY_UNIQUE_STRINGS,
                     "allowed_path_globs": _NON_EMPTY_UNIQUE_STRINGS,
                     "pipeline_config_path": _NON_EMPTY_STRING,
+                    "pipeline_config_source": {
+                        "enum": [source.value for source in PipelineConfigSource]
+                    },
                     "source_locale": {
                         "type": "string",
                         "pattern": r"^[A-Za-z0-9][A-Za-z0-9_-]*$",
@@ -774,6 +787,12 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
                 allowed_branch_globs=tuple(raw_policy["allowed_branch_globs"]),
                 allowed_path_globs=tuple(raw_policy["allowed_path_globs"]),
                 pipeline_config_path=raw_policy["pipeline_config_path"],
+                pipeline_config_source=PipelineConfigSource(
+                    raw_policy.get(
+                        "pipeline_config_source",
+                        PipelineConfigSource.BASE.value,
+                    )
+                ),
                 source_locale=raw_policy["source_locale"],
                 trusted_reviewers=actors_for("trusted_reviewers"),
                 trusted_bots=actors_for("trusted_bots"),
@@ -951,11 +970,21 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
             "assessment plus every configured prevention authoring call for "
             "every allowed attempt."
         )
+    raw_schedule = raw_config.get("schedule", {})
+    schedule_defaults = GuardianSchedule()
+    try:
+        schedule = GuardianSchedule(
+            hour=raw_schedule.get("hour", schedule_defaults.hour),
+            minute=raw_schedule.get("minute", schedule_defaults.minute),
+        )
+    except ValueError as exc:
+        raise GuardianConfigError(f"Invalid guardian configuration at schedule: {exc}") from None
     return GuardianConfig(
         repositories=tuple(repositories),
         mode=mode,
         limits=limits,
         runtime=runtime,
+        schedule=schedule,
     )
 
 

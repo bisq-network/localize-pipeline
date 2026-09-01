@@ -4,18 +4,25 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
+import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import yaml
 
 from localize import cli as root_cli
 from localize.guardian import FeedbackEvent, GuardianMode
 from localize.guardian import cli
+from localize.guardian import runtime as guardian_runtime
 from localize.guardian.config import load_guardian_config
 from localize.guardian.github import GitHubRepositoryIdentity
 from localize.guardian.state import GuardianState
@@ -55,6 +62,45 @@ def _mode(path: Path) -> int:
 def _replace_once(value: str, needle: str, replacement: str) -> str:
     assert needle in value, f"template drift for {needle!r}"
     return value.replace(needle, replacement, 1)
+
+
+def _configure_operator_pipeline(config_path: Path) -> Path:
+    config_path.parent.chmod(0o700)
+    pipeline_path = config_path.parent / "pipeline.yaml"
+    pipeline_path.write_text(
+        yaml.safe_dump(
+            {
+                "source_locale": "en",
+                "supported_locales": [{"code": "de", "name": "German"}],
+                "localization_format": "java_properties",
+                "localization_layout": {
+                    "id": "suffix",
+                    "base_name": "messages",
+                    "source_locale": "en",
+                },
+                "glossary_file_path": "glossary.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    pipeline_path.chmod(0o600)
+    glossary = config_path.parent / "glossary.json"
+    glossary.write_text('{"de": {}}\n', encoding="utf-8")
+    glossary.chmod(0o600)
+    config_text = config_path.read_text(encoding="utf-8")
+    config_text = _replace_once(
+        config_text,
+        "    pipeline_config_source: base",
+        "    pipeline_config_source: operator",
+    )
+    config_text = _replace_once(
+        config_text,
+        "    pipeline_config_path: .localize/config.yaml",
+        "    pipeline_config_path: pipeline.yaml",
+    )
+    config_path.write_text(config_text, encoding="utf-8")
+    config_path.chmod(0o600)
+    return glossary
 
 
 def _configure_scheduled_runtime(
@@ -761,26 +807,324 @@ def test_doctor_does_not_create_a_missing_state_directory(
 
     assert exit_code == 0
     assert not state_dir.exists()
+    assert list(config_path.parent.glob(".guardian-poll-lock-doctor-*")) == []
     assert "created on first run or install" in capsys.readouterr().out
 
 
-def test_run_creates_private_state_file_and_lazily_calls_controller(
+@pytest.mark.parametrize("missing_state_directory", [False, True])
+def test_doctor_snapshots_operator_pipeline_config_without_persistent_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    missing_state_directory: bool,
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    _configure_operator_pipeline(config_path)
+    state_dir = cli.guardian_state_dir(config_path)
+    if missing_state_directory:
+        state_dir.rmdir()
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(
+        cli,
+        "_probe_github",
+        lambda _config: (
+            GitHubRepositoryIdentity("acme/widgets", 100000001, False),
+        ),
+    )
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert "operator pipeline configs: ok (1 snapshotted)" in capsys.readouterr().out
+    assert list(config_path.parent.glob(".guardian-operator-config-doctor-*")) == []
+    if missing_state_directory:
+        assert not state_dir.exists()
+    else:
+        assert list(state_dir.glob("operator-pipeline-config-*")) == []
+
+
+@pytest.mark.parametrize("unsafe_glossary", ["wrong-mode", "malformed"])
+def test_doctor_fails_before_external_probes_for_unsafe_operator_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unsafe_glossary: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    glossary = _configure_operator_pipeline(config_path)
+    if unsafe_glossary == "wrong-mode":
+        glossary.chmod(0o644)
+    else:
+        glossary.write_text("{malformed", encoding="utf-8")
+        glossary.chmod(0o600)
+    command_probe = Mock(return_value=True)
+    github_probe = Mock()
+    codex_probe = Mock(return_value=True)
+    monkeypatch.setattr(cli, "_command_available", command_probe)
+    monkeypatch.setattr(cli, "_probe_github", github_probe)
+    monkeypatch.setattr(cli, "_codex_capability_probe", codex_probe)
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "operator pipeline configs: error" in output
+    command_probe.assert_not_called()
+    github_probe.assert_not_called()
+    codex_probe.assert_not_called()
+    assert list(cli.guardian_state_dir(config_path).glob("operator-pipeline-config-*")) == []
+
+
+def test_run_leaves_private_state_creation_to_the_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = _init_config(tmp_path)
-    run_once = Mock(return_value=None)
+    state_path = cli.guardian_state_path(config_path)
+    captured: dict[str, object] = {}
+
+    def run_once(**kwargs: object) -> None:
+        assert not state_path.exists()
+        captured.update(kwargs)
+
     imported = Mock(return_value=SimpleNamespace(run_once=run_once))
     monkeypatch.setattr(cli.importlib, "import_module", imported)
 
     exit_code = cli.main(["run", "--config", str(config_path), "--scheduled"])
 
-    state_path = cli.guardian_state_path(config_path)
     assert exit_code == 0
-    assert state_path.is_file()
-    assert _mode(state_path) == 0o600
+    assert not state_path.exists()
     imported.assert_called_once_with("localize.guardian.controller")
-    run_once.assert_called_once_with(config_path=config_path.resolve(), scheduled=True)
+    assert captured == {
+        "config_path": config_path.resolve(),
+        "scheduled": True,
+    }
+
+
+def test_run_accepts_a_private_state_directory_created_by_a_racer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
+    config_path.chmod(0o600)
+    state_directory = cli.guardian_state_dir(config_path)
+
+    def racing_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        assert path == state_directory
+        assert parents is True
+        assert exist_ok is False
+        os.mkdir(path, mode)
+        raise FileExistsError
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+    run_once = Mock(return_value=0)
+    monkeypatch.setattr(
+        cli.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(run_once=run_once),
+    )
+
+    assert cli.main(["run", "--config", str(config_path)]) == 0
+    assert _mode(state_directory) == 0o700
+    run_once.assert_called_once()
+
+
+@pytest.mark.skipif(
+    not guardian_runtime._poll_locking_is_available(),
+    reason="POSIX flock is unavailable",
+)
+def test_first_scheduled_cli_runs_share_one_lock_from_clean_state(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
+    config_path.chmod(0o600)
+    gate = tmp_path / "start"
+    ready_paths = tuple(tmp_path / f"ready-{index}" for index in range(2))
+    project_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(project_root), existing_pythonpath)
+        if value
+    )
+    script = """
+import os
+from pathlib import Path
+import sys
+import time
+from localize.guardian import cli, runtime
+
+os.umask(0o777)
+config_path = Path(sys.argv[1])
+gate = Path(sys.argv[2])
+ready = Path(sys.argv[3])
+contended = Path(sys.argv[4])
+ready.touch()
+deadline = time.monotonic() + 5
+while not gate.exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.005)
+
+def locked_poll(**_kwargs):
+    print("owner", flush=True)
+    deadline = time.monotonic() + 5
+    while not contended.exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("contender did not finish")
+        time.sleep(0.005)
+    return 7
+
+runtime._poll_with_locked_state = locked_poll
+result = cli.main(["run", "--config", str(config_path), "--scheduled"])
+if result == 0:
+    contended.touch()
+print(f"result={result}", flush=True)
+"""
+    contended = tmp_path / "contended"
+    processes = tuple(
+        subprocess.Popen(
+            (
+                sys.executable,
+                "-c",
+                script,
+                str(config_path),
+                str(gate),
+                str(ready_paths[index]),
+                str(contended),
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        for index in range(2)
+    )
+
+    ready_deadline = time.monotonic() + 10
+    while not all(path.exists() for path in ready_paths):
+        if time.monotonic() >= ready_deadline:
+            break
+        time.sleep(0.005)
+    all_ready = all(path.exists() for path in ready_paths)
+    gate.touch()
+    results = tuple(process.communicate(timeout=10) for process in processes)
+
+    assert all_ready, results
+    assert [process.returncode for process in processes] == [0, 0], results
+    assert sorted(stdout.strip() for stdout, _stderr in results) == [
+        "owner\nresult=7",
+        "result=0",
+    ], results
+    assert all(stderr == "" for _stdout, stderr in results)
+
+
+def test_run_waits_for_a_live_restrictive_umask_directory_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
+    config_path.chmod(0o600)
+    state_directory = cli.guardian_state_dir(config_path)
+    creator_is_normalizing = threading.Event()
+    release_creator = threading.Event()
+    contender_inspected_restricted_directory = threading.Event()
+    original_chmod = Path.chmod
+    original_stat = Path.stat
+    results: dict[str, int] = {}
+    run_once = Mock(return_value=0)
+    monkeypatch.setattr(
+        cli.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(run_once=run_once),
+    )
+
+    def delayed_creator_chmod(
+        path: Path,
+        mode: int,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path == state_directory and threading.current_thread().name == "creator":
+            creator_is_normalizing.set()
+            assert release_creator.wait(timeout=5)
+        original_chmod(path, mode, *args, **kwargs)
+
+    def observed_stat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if (
+            path == state_directory
+            and threading.current_thread().name == "contender"
+            and stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            contender_inspected_restricted_directory.set()
+        return metadata
+
+    def run(name: str) -> None:
+        results[name] = cli._cmd_run(
+            SimpleNamespace(config=str(config_path), scheduled=True)
+        )
+
+    monkeypatch.setattr(Path, "chmod", delayed_creator_chmod)
+    monkeypatch.setattr(Path, "stat", observed_stat)
+    previous_umask = os.umask(0o777)
+    try:
+        creator = threading.Thread(target=run, args=("creator",), name="creator")
+        creator.start()
+        assert creator_is_normalizing.wait(timeout=5)
+        contender = threading.Thread(target=run, args=("contender",), name="contender")
+        contender.start()
+        assert contender_inspected_restricted_directory.wait(timeout=5)
+        release_creator.set()
+        creator.join(timeout=5)
+        contender.join(timeout=5)
+    finally:
+        release_creator.set()
+        os.umask(previous_umask)
+
+    assert not creator.is_alive()
+    assert not contender.is_alive()
+    assert results == {"creator": 0, "contender": 0}
+    assert _mode(state_directory) == 0o700
+    assert run_once.call_count == 2
+
+
+def test_run_reports_the_safe_manual_overlap_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    runtime = SimpleNamespace(
+        run_once=Mock(
+            side_effect=cli.GuardianRuntimeError(
+                "Guardian poll is already running."
+            )
+        )
+    )
+    monkeypatch.setattr(cli.importlib, "import_module", lambda _name: runtime)
+
+    exit_code = cli.main(["run", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.err == "error: Guardian poll is already running.\n"
 
 
 def test_run_reports_controller_failure_without_echoing_exception_text(
@@ -801,6 +1145,121 @@ def test_run_reports_controller_failure_without_echoing_exception_text(
     assert secret not in captured.out
     assert secret not in captured.err
     assert "RuntimeError" in captured.err
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "hardlink"])
+def test_doctor_rejects_an_unsafe_existing_poll_lock(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_directory = cli.guardian_state_dir(config_path)
+    lock_path = state_directory / "poll.lock"
+    if unsafe_kind == "symlink":
+        target = tmp_path / "target.lock"
+        target.write_text("", encoding="utf-8")
+        target.chmod(0o600)
+        lock_path.symlink_to(target)
+    elif unsafe_kind == "hardlink":
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o600)
+        (tmp_path / "alias.lock").hardlink_to(lock_path)
+    else:
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o644)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+    assert list(
+        cli.guardian_state_dir(config_path).glob(".guardian-poll-lock-doctor-*")
+    ) == []
+
+
+def test_doctor_rejects_a_hardlinked_state_database(tmp_path: Path) -> None:
+    config_path = _init_config(tmp_path)
+    state_path = cli.guardian_state_path(config_path)
+    state_path.write_text("", encoding="utf-8")
+    state_path.chmod(0o600)
+    (tmp_path / "state-alias").hardlink_to(state_path)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+
+
+def test_doctor_rejects_a_hardlinked_sqlite_sidecar_without_mutating_it(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_path = cli.guardian_state_path(config_path)
+    with GuardianState(state_path):
+        pass
+    wal_path = Path(f"{state_path}-wal")
+    if wal_path.exists():
+        wal_path.unlink()
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_bytes(b"do not mutate")
+    sentinel.chmod(0o600)
+    wal_path.hardlink_to(sentinel)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+    assert sentinel.read_bytes() == b"do not mutate"
+
+
+@pytest.mark.parametrize("flock_behavior", ["unsupported", "ineffective"])
+def test_doctor_exercises_real_flock_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flock_behavior: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+
+    def fake_flock(_descriptor: int, _operation: int) -> None:
+        if flock_behavior == "unsupported":
+            raise OSError(errno.ENOTSUP, "unsupported")
+
+    assert guardian_runtime.fcntl is not None
+    monkeypatch.setattr(guardian_runtime.fcntl, "flock", fake_flock)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (paths must be regular and private)"
+    assert list(
+        cli.guardian_state_dir(config_path).glob(".guardian-poll-lock-doctor-*")
+    ) == []
+
+
+def test_doctor_rejects_platforms_without_process_locking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    monkeypatch.setattr(guardian_runtime, "fcntl", None)
+
+    status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is False
+    assert status == "error (process locking is unavailable)"
+
+
+def test_doctor_validates_but_does_not_acquire_an_active_poll_lock(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_directory = cli.guardian_state_dir(config_path)
+
+    with guardian_runtime._exclusive_poll_lock(state_directory):
+        status, healthy = cli._state_directory_doctor(config_path)
+
+    assert healthy is True
+    assert status == "ok"
 
 
 def test_run_refuses_an_insecure_existing_state_directory(

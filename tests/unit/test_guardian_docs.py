@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from localize.guardian.config import load_guardian_config
-from localize.guardian.models import CodexAuthMode, GuardianMode
+from localize.guardian.models import CodexAuthMode, GuardianMode, PipelineConfigSource
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +47,9 @@ def test_guardian_example_is_valid_report_only_policy_with_numeric_identities():
     assert config.limits.max_model_calls_per_day == 2
     assert config.limits.daily_cost_limit_usd is None
     assert config.limits.model_call_reservation_usd is None
+    assert config.schedule.hour == 0
+    assert config.schedule.minute == 0
+    assert policy.pipeline_config_source is PipelineConfigSource.BASE
 
     assert policy.allowed_pr_authors
     assert policy.allowed_head_owners
@@ -137,6 +140,11 @@ def test_guardian_guide_documents_identity_privacy_and_write_boundaries():
     assert "base sha" in lowered
     assert "does not merge" in lowered
     assert "resolve review threads" in lowered
+    assert "`pipeline_config_source: operator`" in lowered
+    assert "snapshot" in lowered
+    assert "mode `0700`" in lowered
+    assert "mode `0600`" in lowered
+    assert "exact base sha" in lowered
 
 
 def test_guardian_guide_documents_hardened_codex_boundary():
@@ -267,6 +275,9 @@ def test_guardian_guide_has_consistent_cli_and_launchd_catch_up_instructions():
     assert "wake" in guide.casefold()
     assert "catch-up" in guide.casefold()
     assert "failed scheduled attempt is not retried" in guide.casefold()
+    assert "schedule.hour" in guide
+    assert "schedule.minute" in guide
+    assert "local wall-clock" in guide.casefold()
     assert "explicit manual `guardian run`" in guide
     assert "stages the files but does not load" in guide
     assert "runtime.codex_executable" in guide

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 import stat
 
-from localize.guardian.filesystem_trust import is_trusted_directory
+import pytest
+
+from localize.guardian import filesystem_trust
+from localize.guardian.filesystem_trust import (
+    create_or_wait_for_private_directory,
+    is_trusted_directory,
+)
 
 
 def _metadata(*, mode: int, owner: int = 0) -> SimpleNamespace:
@@ -39,3 +47,44 @@ def test_non_directory_is_never_a_trusted_boundary() -> None:
     metadata = SimpleNamespace(st_mode=stat.S_IFREG | 0o0755, st_uid=0)
 
     assert not is_trusted_directory(metadata, trusted_owners={0, 1000})
+
+
+def test_private_directory_wait_times_out_without_repairing_a_stale_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "private"
+    path.mkdir(mode=0o700)
+    path.chmod(0o000)
+    clock = iter((0.0, 0.5, 1.1))
+    sleeps: list[float] = []
+    monkeypatch.setattr(filesystem_trust.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(filesystem_trust.time, "sleep", sleeps.append)
+
+    try:
+        metadata = create_or_wait_for_private_directory(path)
+
+        assert stat.S_IMODE(metadata.st_mode) == 0o000
+        assert stat.S_IMODE(path.stat().st_mode) == 0o000
+        assert sleeps == [filesystem_trust._PRIVATE_DIRECTORY_RETRY_SECONDS]
+    finally:
+        path.chmod(0o700)
+
+
+def test_private_directory_does_not_wait_for_extra_permission_bits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "private"
+    path.mkdir(mode=0o700)
+    path.chmod(0o755)
+    monkeypatch.setattr(
+        filesystem_trust.time,
+        "sleep",
+        lambda _seconds: pytest.fail("unsafe permissions must fail without waiting"),
+    )
+
+    metadata = create_or_wait_for_private_directory(path)
+
+    assert stat.S_IMODE(metadata.st_mode) == 0o755
+    assert path.stat().st_uid == os.getuid()

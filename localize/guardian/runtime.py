@@ -8,14 +8,26 @@ state.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from datetime import date, datetime
+import errno
+import hashlib
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import stat
+import tempfile
+import time
 from typing import Any
 
 import httpx
+import yaml
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Guardian scheduling is POSIX-only today.
+    fcntl = None  # type: ignore[assignment]
 
 from localize.guardian.codex import CodexDriver
 from localize.guardian.config import GuardianConfigError, parse_guardian_config_yaml
@@ -30,7 +42,10 @@ from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
 )
-from localize.guardian.filesystem_trust import is_trusted_directory
+from localize.guardian.filesystem_trust import (
+    create_or_wait_for_private_directory,
+    is_trusted_directory,
+)
 from localize.guardian.github import (
     FeedbackRevision,
     GitHubAuthenticationError,
@@ -43,6 +58,9 @@ from localize.guardian.models import (
     CodexAuthMode,
     GuardianConfig,
     GuardianMode,
+    GuardianSchedule,
+    PipelineConfigSnapshot,
+    PipelineConfigSource,
     PreventionPolicy,
     RepositoryPolicy,
 )
@@ -54,7 +72,7 @@ from localize.guardian.prevention_runtime import (
 )
 from localize.guardian.scheduler import is_run_due
 from localize.guardian.signing import canonical_signing_key
-from localize.guardian.state import GuardianState
+from localize.guardian.state import GuardianState, _validate_sqlite_state_artifacts
 from localize.guardian.workspace import ExactRevision, materialize_exact_checkout
 
 
@@ -63,6 +81,9 @@ _GITHUB_HOST = "github.com"
 _POLL_ATTEMPT_COMPONENT = "guardian-poll-attempt"
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_CODEX_AUTH_BYTES = 1_048_576
+_MAX_OPERATOR_PIPELINE_FILE_BYTES = 1_048_576
+_POLL_LOCK_INITIALIZATION_TIMEOUT_SECONDS = 1.0
+_POLL_LOCK_RETRY_SECONDS = 0.002
 _WRITE_MODES = frozenset(
     {
         GuardianMode.APPLY_OWNED_TRANSLATIONS,
@@ -75,14 +96,14 @@ class GuardianRuntimeError(RuntimeError):
     """A redacted production-wiring failure safe for operator output."""
 
 
+class _GuardianPollAlreadyRunning(RuntimeError):
+    """Signal that another process owns this config's exclusive poll lock."""
+
+
 def _resolved_config_path(path: str | Path) -> Path:
     """Return an absolute path without silently following a symlinked leaf."""
 
     return Path(os.path.abspath(Path(path).expanduser()))
-
-
-def _permission_bits(path: Path) -> int:
-    return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
 
 
 def _trusted_owners() -> frozenset[int]:
@@ -164,27 +185,531 @@ def _prepare_private_state(config_path: Path) -> tuple[Path, Path]:
 
     directory, database = _private_state_paths(config_path)
     try:
-        if directory.is_symlink():
+        metadata = create_or_wait_for_private_directory(directory)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
             raise GuardianRuntimeError("Guardian state path must remain private.")
-        if directory.exists():
-            metadata = directory.stat(follow_symlinks=False)
-            if not stat.S_ISDIR(metadata.st_mode) or _permission_bits(directory) != 0o700:
-                raise GuardianRuntimeError("Guardian state path must remain private.")
-        else:
-            directory.mkdir(mode=0o700)
-            directory.chmod(0o700)
 
-        if database.is_symlink():
-            raise GuardianRuntimeError("Guardian state path must remain private.")
-        if database.exists():
-            metadata = database.stat(follow_symlinks=False)
-            if not stat.S_ISREG(metadata.st_mode) or _permission_bits(database) != 0o600:
-                raise GuardianRuntimeError("Guardian state path must remain private.")
     except GuardianRuntimeError:
         raise
     except OSError:
         raise GuardianRuntimeError("Guardian state path must remain private.") from None
     return directory, database
+
+
+def _poll_locking_is_available() -> bool:
+    """Return whether this platform provides the required process lock."""
+
+    return fcntl is not None and callable(getattr(fcntl, "flock", None))
+
+
+def _poll_lock_descriptor_metadata(descriptor: int) -> os.stat_result:
+    try:
+        return os.fstat(descriptor)
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian poll lock is unavailable or unsafe."
+        ) from None
+
+
+def _validate_poll_lock_descriptor(descriptor: int) -> os.stat_result:
+    """Require the exact private regular inode used for process locking."""
+
+    metadata = _poll_lock_descriptor_metadata(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise GuardianRuntimeError("Guardian poll lock is unavailable or unsafe.")
+    return metadata
+
+
+def _poll_lock_inode_may_be_initializing(metadata: os.stat_result) -> bool:
+    """Recognize only the restrictive-umask window of our exclusive creator."""
+
+    mode = stat.S_IMODE(metadata.st_mode)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and (not hasattr(os, "getuid") or metadata.st_uid == os.getuid())
+        and metadata.st_size == 0
+        and mode != 0o600
+        and mode & ~0o600 == 0
+    )
+
+
+def _poll_lock_path_may_be_initializing_or_ready(lock_path: Path) -> bool:
+    """Recognize the safe states around a creator's final chmod."""
+
+    try:
+        metadata = lock_path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return _poll_lock_inode_may_be_initializing(metadata) or (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and (not hasattr(os, "getuid") or metadata.st_uid == os.getuid())
+        and metadata.st_size == 0
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
+
+
+def _open_private_poll_lock(lock_path: Path) -> int:
+    """Create an exact 0600 lock or open a previously validated lock inode."""
+
+    flags = os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    deadline = time.monotonic() + _POLL_LOCK_INITIALIZATION_TIMEOUT_SECONDS
+    while True:
+        created = False
+        try:
+            try:
+                descriptor = os.open(
+                    lock_path,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                created = True
+            except FileExistsError:
+                descriptor = os.open(lock_path, flags)
+        except FileNotFoundError:
+            if time.monotonic() < deadline:
+                time.sleep(_POLL_LOCK_RETRY_SECONDS)
+                continue
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+        except PermissionError:
+            if (
+                time.monotonic() < deadline
+                and _poll_lock_path_may_be_initializing_or_ready(lock_path)
+            ):
+                time.sleep(_POLL_LOCK_RETRY_SECONDS)
+                continue
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+        except OSError:
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+            _validate_poll_lock_descriptor(descriptor)
+            return descriptor
+        except GuardianRuntimeError:
+            try:
+                metadata = _poll_lock_descriptor_metadata(descriptor)
+            except GuardianRuntimeError:
+                os.close(descriptor)
+                raise
+            os.close(descriptor)
+            if (
+                not created
+                and time.monotonic() < deadline
+                and _poll_lock_inode_may_be_initializing(metadata)
+            ):
+                time.sleep(_POLL_LOCK_RETRY_SECONDS)
+                continue
+            raise
+        except OSError:
+            os.close(descriptor)
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+
+
+def _preflight_poll_lock(state_directory: Path) -> None:
+    """Validate an existing lock inode without creating or acquiring it."""
+
+    if not _poll_locking_is_available():
+        raise GuardianRuntimeError(
+            "Guardian process locking is unavailable on this platform."
+        )
+    lock_path = state_directory / "poll.lock"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        descriptor = os.open(lock_path, flags)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian poll lock is unavailable or unsafe."
+        ) from None
+    try:
+        _validate_poll_lock_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _probe_poll_lock_semantics(parent_directory: Path) -> None:
+    """Prove exclusive contention and release on a disposable private inode."""
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".guardian-poll-lock-doctor-",
+            dir=parent_directory,
+        ) as raw_directory:
+            probe_directory = Path(raw_directory)
+            probe_directory.chmod(0o700)
+            with _exclusive_poll_lock(probe_directory):
+                try:
+                    with _exclusive_poll_lock(probe_directory):
+                        pass
+                except _GuardianPollAlreadyRunning:
+                    pass
+                else:
+                    raise GuardianRuntimeError(
+                        "Guardian process locking is unavailable on this platform."
+                    )
+            with _exclusive_poll_lock(probe_directory):
+                pass
+    except GuardianRuntimeError:
+        raise
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian process locking is unavailable on this platform."
+        ) from None
+
+
+@contextmanager
+def _exclusive_poll_lock(state_directory: Path) -> Iterator[None]:
+    """Hold one private, non-blocking process lock for the complete poll."""
+
+    if not _poll_locking_is_available():
+        raise GuardianRuntimeError(
+            "Guardian process locking is unavailable on this platform."
+        )
+    assert fcntl is not None
+    lock_path = state_directory / "poll.lock"
+    descriptor = _open_private_poll_lock(lock_path)
+    locked = False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise _GuardianPollAlreadyRunning from None
+            raise GuardianRuntimeError(
+                "Guardian poll lock is unavailable or unsafe."
+            ) from None
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(descriptor)
+
+
+def _validate_private_state_artifacts(database: Path) -> None:
+    """Apply one redacted runtime boundary to all SQLite state artifacts."""
+
+    try:
+        _validate_sqlite_state_artifacts(database)
+    except (OSError, ValueError):
+        raise GuardianRuntimeError("Guardian state path must remain private.") from None
+
+
+def _require_private_operator_directory(path: Path) -> Path:
+    """Require a current-user, non-symlink 0700 directory and safe ancestors."""
+
+    try:
+        _validate_trusted_ancestors(path)
+        metadata = path.stat(follow_symlinks=False)
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise GuardianRuntimeError(
+                "Guardian operator pipeline config is unavailable or unsafe."
+            )
+    except GuardianRuntimeError:
+        raise
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    return path
+
+
+def _safe_operator_relative_path(raw_path: str) -> PurePosixPath:
+    """Normalize one non-empty relative operator path without traversal."""
+
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or len(raw_path) > 4096
+        or not raw_path.isprintable()
+        or "\\" in raw_path
+        or "\x00" in raw_path
+    ):
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        )
+    path = PurePosixPath(raw_path)
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(character in raw_path for character in "*?[]")
+    ):
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        )
+    return path
+
+
+def _read_private_operator_file(
+    path: Path,
+    *,
+    root: Path,
+    required: bool,
+) -> bytes | None:
+    """Read one bounded 0600 file through a non-following descriptor."""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    current = root
+    for component in relative.parts[:-1]:
+        current = current / component
+        _require_private_operator_directory(current)
+
+    try:
+        leaf_metadata = path.lstat()
+    except FileNotFoundError:
+        if not required:
+            return None
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    if stat.S_ISLNK(leaf_metadata.st_mode) or not stat.S_ISREG(
+        leaf_metadata.st_mode
+    ):
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        )
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        if not required and not path.is_symlink():
+            return None
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_dev != leaf_metadata.st_dev
+            or metadata.st_ino != leaf_metadata.st_ino
+            or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > _MAX_OPERATOR_PIPELINE_FILE_BYTES
+        ):
+            raise GuardianRuntimeError(
+                "Guardian operator pipeline config is unavailable or unsafe."
+            )
+        chunks: list[bytes] = []
+        remaining = _MAX_OPERATOR_PIPELINE_FILE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > _MAX_OPERATOR_PIPELINE_FILE_BYTES:
+            raise GuardianRuntimeError(
+                "Guardian operator pipeline config is unavailable or unsafe."
+            )
+        return content
+    except GuardianRuntimeError:
+        raise
+    except OSError:
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    finally:
+        os.close(descriptor)
+
+
+def _decode_operator_yaml(content: bytes) -> Mapping[str, Any]:
+    """Decode one bounded UTF-8 YAML object or fail through the redacted boundary."""
+
+    try:
+        payload = yaml.safe_load(content.decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError):
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        ) from None
+    if not isinstance(payload, Mapping):
+        raise GuardianRuntimeError(
+            "Guardian operator pipeline config is unavailable or unsafe."
+        )
+    return payload
+
+
+def _copy_private_bundle_file(root: Path, relative: PurePosixPath, content: bytes) -> Path:
+    """Copy immutable snapshot bytes below a fresh private bundle root."""
+
+    destination = root.joinpath(*relative.parts)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    current = root
+    for component in relative.parts[:-1]:
+        current = current / component
+        current.chmod(0o700)
+    destination.write_bytes(content)
+    destination.chmod(0o600)
+    return destination
+
+
+def _operator_bundle_digest(files: Mapping[str, bytes]) -> str:
+    """Hash sorted path and raw-byte tuples without concatenation ambiguity."""
+
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        encoded_name = name.encode("utf-8")
+        content = files[name]
+        digest.update(len(encoded_name).to_bytes(4, "big"))
+        digest.update(encoded_name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+@contextmanager
+def _snapshot_operator_pipeline_configs(
+    *,
+    config: GuardianConfig,
+    guardian_config_path: Path,
+    state_directory: Path,
+) -> Iterator[dict[str, PipelineConfigSnapshot]]:
+    """Snapshot every operator pipeline config before external poll work starts."""
+
+    operator_policies = tuple(
+        policy
+        for policy in config.repositories
+        if policy.pipeline_config_source is PipelineConfigSource.OPERATOR
+    )
+    if not operator_policies:
+        yield {}
+        return
+
+    operator_root = _require_private_operator_directory(guardian_config_path.parent)
+    with tempfile.TemporaryDirectory(
+        prefix="operator-pipeline-config-",
+        dir=state_directory,
+    ) as temporary_directory:
+        snapshot_parent = Path(temporary_directory)
+        snapshot_parent.chmod(0o700)
+        snapshots: dict[str, PipelineConfigSnapshot] = {}
+        for index, policy in enumerate(operator_policies):
+            config_relative = _safe_operator_relative_path(
+                policy.pipeline_config_path
+            )
+            live_config_path = operator_root.joinpath(*config_relative.parts)
+            config_bytes = _read_private_operator_file(
+                live_config_path,
+                root=operator_root,
+                required=True,
+            )
+            assert config_bytes is not None
+            pipeline_config = _decode_operator_yaml(config_bytes)
+
+            configured_glossary = pipeline_config.get("glossary_file_path")
+            explicit_glossary = configured_glossary is not None
+            if configured_glossary is not None and not isinstance(
+                configured_glossary,
+                str,
+            ):
+                raise GuardianRuntimeError(
+                    "Guardian operator pipeline config is unavailable or unsafe."
+                )
+            glossary_relative_to_config = _safe_operator_relative_path(
+                configured_glossary or "glossary.json"
+            )
+            glossary_relative = PurePosixPath(
+                *config_relative.parent.parts,
+                *glossary_relative_to_config.parts,
+            )
+            live_glossary_path = operator_root.joinpath(*glossary_relative.parts)
+            glossary_bytes = _read_private_operator_file(
+                live_glossary_path,
+                root=operator_root,
+                required=explicit_glossary,
+            )
+            if glossary_bytes is not None:
+                try:
+                    glossary_payload = json.loads(glossary_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise GuardianRuntimeError(
+                        "Guardian operator pipeline config is unavailable or unsafe."
+                    ) from None
+                if not isinstance(glossary_payload, dict):
+                    raise GuardianRuntimeError(
+                        "Guardian operator pipeline config is unavailable or unsafe."
+                    )
+
+            bundle_files = {config_relative.as_posix(): config_bytes}
+            if glossary_bytes is not None:
+                bundle_files[glossary_relative.as_posix()] = glossary_bytes
+            snapshot_root = snapshot_parent / f"repository-{index}"
+            snapshot_root.mkdir(mode=0o700)
+            snapshot_config = _copy_private_bundle_file(
+                snapshot_root,
+                config_relative,
+                config_bytes,
+            )
+            if glossary_bytes is not None:
+                _copy_private_bundle_file(
+                    snapshot_root,
+                    glossary_relative,
+                    glossary_bytes,
+                )
+            snapshots[policy.base_repo] = PipelineConfigSnapshot(
+                config_root=snapshot_root.resolve(),
+                config_path=snapshot_config.resolve(),
+                bundle_digest=_operator_bundle_digest(bundle_files),
+            )
+        yield snapshots
 
 
 def _resolved_codex_home(config: GuardianConfig) -> Path:
@@ -356,6 +881,7 @@ def _build_controller(
     github_credential: SecretCommand,
     model_credential: SecretCommand | None,
     git_environment: Any,
+    operator_pipeline_configs: Mapping[str, PipelineConfigSnapshot] | None = None,
 ) -> GuardianController:
     """Assemble trusted production adapters without invoking a credential yet."""
 
@@ -460,6 +986,7 @@ def _build_controller(
         evidence_root=state_directory / "evidence",
         github_host=_GITHUB_HOST,
         signing_key=config.runtime.signing_key,
+        operator_pipeline_configs=operator_pipeline_configs,
     )
 
 
@@ -467,7 +994,12 @@ def _local_now() -> datetime:
     return datetime.now().astimezone()
 
 
-def _scheduled_poll_is_due(state: GuardianState, *, now: datetime) -> bool:
+def _scheduled_poll_is_due(
+    state: GuardianState,
+    *,
+    now: datetime,
+    schedule: GuardianSchedule,
+) -> bool:
     """Use the latest durable poll attempt as the once-daily checkpoint."""
 
     latest_attempt = state.latest_health(_POLL_ATTEMPT_COMPONENT)
@@ -480,13 +1012,51 @@ def _scheduled_poll_is_due(state: GuardianState, *, now: datetime) -> bool:
             if legacy_success is not None and legacy_success.status == "ok"
             else None
         )
+    if latest_attempt is not None:
+        details = getattr(latest_attempt, "details", {})
+        recorded_local_date = (
+            details.get("local_date") if isinstance(details, Mapping) else None
+        )
+        if isinstance(recorded_local_date, str):
+            try:
+                recorded_date = date.fromisoformat(recorded_local_date)
+            except ValueError:
+                pass
+            else:
+                if (
+                    recorded_date.isoformat() == recorded_local_date
+                    and recorded_date == now.date()
+                ):
+                    if details.get("scheduled") is True:
+                        return False
+                    recorded_local_minute = details.get("local_minute")
+                    if (
+                        isinstance(recorded_local_minute, int)
+                        and not isinstance(recorded_local_minute, bool)
+                        and 0 <= recorded_local_minute < 24 * 60
+                    ):
+                        scheduled_minute = schedule.hour * 60 + schedule.minute
+                        if recorded_local_minute >= scheduled_minute:
+                            return False
+                        return is_run_due(
+                            now=now,
+                            last_success=None,
+                            hour=schedule.hour,
+                            minute=schedule.minute,
+                        )
+                return is_run_due(
+                    now=now,
+                    last_success=None,
+                    hour=schedule.hour,
+                    minute=schedule.minute,
+                )
     return is_run_due(
         now=now,
         last_success=(
             latest_attempt.checked_at if latest_attempt is not None else None
         ),
-        hour=0,
-        minute=0,
+        hour=schedule.hour,
+        minute=schedule.minute,
     )
 
 
@@ -501,23 +1071,16 @@ def _exit_code(outcome: PollOutcome) -> int:
     return 0
 
 
-def run_once(config_path: Path, scheduled: bool = False) -> int:
-    """Load trusted policy and execute one finite Guardian poll.
+def _poll_with_locked_state(
+    *,
+    config: GuardianConfig,
+    resolved_config: Path,
+    state_directory: Path,
+    state_path: Path,
+    scheduled: bool,
+) -> int:
+    """Execute a poll while the caller holds the config's process lock."""
 
-    Scheduled calls run at most once per local calendar day after the first
-    attempted wake, regardless of its outcome. Manual invocations always poll.
-    Credential contents and
-    untrusted exception messages never cross this adapter's error boundary.
-    """
-
-    if not isinstance(scheduled, bool):
-        raise GuardianRuntimeError("Guardian scheduled flag is invalid.")
-    resolved_config = _resolved_config_path(config_path)
-    config = load_trusted_guardian_config(resolved_config)
-
-    _require_explicit_write_signing_key(config)
-
-    state_directory, state_path = _prepare_private_state(resolved_config)
     try:
         state_context = GuardianState(state_path)
     except Exception:
@@ -526,13 +1089,21 @@ def run_once(config_path: Path, scheduled: bool = False) -> int:
     try:
         with state_context as state:
             attempted_at = _local_now()
-            if scheduled and not _scheduled_poll_is_due(state, now=attempted_at):
+            if scheduled and not _scheduled_poll_is_due(
+                state,
+                now=attempted_at,
+                schedule=config.schedule,
+            ):
                 return 0
             state.record_health(
                 component=_POLL_ATTEMPT_COMPONENT,
                 status="attempted",
                 message="Guardian poll attempt started.",
-                details={"scheduled": scheduled},
+                details={
+                    "scheduled": scheduled,
+                    "local_date": attempted_at.date().isoformat(),
+                    "local_minute": attempted_at.hour * 60 + attempted_at.minute,
+                },
                 checked_at=attempted_at,
             )
             _validate_runtime_authority(config, scheduled=scheduled)
@@ -550,29 +1121,77 @@ def run_once(config_path: Path, scheduled: bool = False) -> int:
                 if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY
                 else None
             )
-            with git_credential_environment(
-                github_credential,
-                temporary_root=state_directory,
-            ) as git_environment:
-                controller = _build_controller(
-                    config=config,
-                    state=state,
-                    state_directory=state_directory,
-                    github_credential=github_credential,
-                    model_credential=model_credential,
-                    git_environment=git_environment,
-                )
-                try:
-                    outcome = controller.poll_once()
-                except Exception:
-                    raise GuardianRuntimeError(
-                        "Guardian poll failed before a bounded outcome was recorded."
-                    ) from None
-                return _exit_code(outcome)
+            with _snapshot_operator_pipeline_configs(
+                config=config,
+                guardian_config_path=resolved_config,
+                state_directory=state_directory,
+            ) as operator_pipeline_configs:
+                for repository, snapshot in operator_pipeline_configs.items():
+                    state.record_health(
+                        component="pipeline-config",
+                        status="ok",
+                        message="Operator pipeline config snapshot selected.",
+                        details={
+                            "repository": repository,
+                            "bundle_digest": snapshot.bundle_digest,
+                        },
+                        checked_at=attempted_at,
+                    )
+                with git_credential_environment(
+                    github_credential,
+                    temporary_root=state_directory,
+                ) as git_environment:
+                    controller = _build_controller(
+                        config=config,
+                        state=state,
+                        state_directory=state_directory,
+                        github_credential=github_credential,
+                        model_credential=model_credential,
+                        git_environment=git_environment,
+                        operator_pipeline_configs=operator_pipeline_configs,
+                    )
+                    try:
+                        outcome = controller.poll_once()
+                    except Exception:
+                        raise GuardianRuntimeError(
+                            "Guardian poll failed before a bounded outcome was recorded."
+                        ) from None
+                    return _exit_code(outcome)
     except GuardianRuntimeError:
         raise
     except Exception:
         raise GuardianRuntimeError("Guardian production runtime failed safely.") from None
+
+
+def run_once(config_path: Path, scheduled: bool = False) -> int:
+    """Load trusted policy and execute one finite, non-overlapping poll.
+
+    Scheduled calls run at most once per local calendar day after the first
+    attempted wake, regardless of its outcome. Manual invocations always poll.
+    Credential contents and untrusted exception messages never cross this
+    adapter's error boundary.
+    """
+
+    if not isinstance(scheduled, bool):
+        raise GuardianRuntimeError("Guardian scheduled flag is invalid.")
+    resolved_config = _resolved_config_path(config_path)
+    config = load_trusted_guardian_config(resolved_config)
+    _require_explicit_write_signing_key(config)
+    state_directory, state_path = _prepare_private_state(resolved_config)
+    try:
+        with _exclusive_poll_lock(state_directory):
+            _validate_private_state_artifacts(state_path)
+            return _poll_with_locked_state(
+                config=config,
+                resolved_config=resolved_config,
+                state_directory=state_directory,
+                state_path=state_path,
+                scheduled=scheduled,
+            )
+    except _GuardianPollAlreadyRunning:
+        if scheduled:
+            return 0
+        raise GuardianRuntimeError("Guardian poll is already running.") from None
 
 
 __all__: Sequence[str] = (

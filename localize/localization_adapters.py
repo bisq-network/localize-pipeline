@@ -101,7 +101,10 @@ def lint_properties_file(file_path: str) -> List[str]:
                     else:
                         in_continuation = False
 
-                    if re.search(r'\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])', value_to_check):
+                    if re.search(
+                        r'(?<!\\)(?:\\\\)*\\(?!u[0-9a-fA-F]{4}|[tnfr\\=:#\s!"])',
+                        value_to_check,
+                    ):
                         errors.append(
                             f"Linter Warning: Unknown escape sequence in value for key '{key}' on line {i}."
                         )

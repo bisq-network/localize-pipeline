@@ -45,12 +45,16 @@ from localize.guardian.models import (
     GuardianLimits,
     GuardianMode,
     GuardianRuntime,
+    PipelineConfigSnapshot,
+    PipelineConfigSource,
     PreventionPolicy,
     ProposedReplacement,
     RepositoryPolicy,
     TrustedActor,
 )
 from localize.guardian.policy import PatchResult
+from localize.guardian.evidence import build_evidence_bundle
+from localize.guardian.policy import apply_replacements
 from localize.guardian.state import GuardianState
 from localize.guardian.prevention_runtime import (
     PreventionBatchOutcome,
@@ -567,6 +571,9 @@ def _controller(
     driver: FakeCodexDriver,
     broker: FakeBroker,
     prevention_runner: FakePreventionRunner | None = None,
+    operator_pipeline_configs: dict[str, PipelineConfigSnapshot] | None = None,
+    evidence_builder=build_evidence_bundle,
+    replacement_applier=apply_replacements,
 ) -> GuardianController:
     return GuardianController(
         config=config,
@@ -580,7 +587,65 @@ def _controller(
         publish_credential_environment=lambda: {"GIT_ASKPASS": "/safe/helper"},
         evidence_root=tmp_path / "evidence",
         now=lambda: NOW,
+        operator_pipeline_configs=operator_pipeline_configs,
+        evidence_builder=evidence_builder,
+        replacement_applier=replacement_applier,
     )
+
+
+def test_operator_pipeline_config_uses_snapshot_with_exact_base_sources(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    base, _head, checkout, provider, broker, _sequence = runtime
+    operator_root = tmp_path / "operator-snapshot"
+    operator_root.mkdir()
+    operator_config = operator_root / "config.yaml"
+    shutil.copy2(base / ".localize/config.yaml", operator_config)
+    shutil.copy2(base / ".localize/glossary.json", operator_root / "glossary.json")
+    snapshot = PipelineConfigSnapshot(
+        config_root=operator_root,
+        config_path=operator_config,
+        bundle_digest="d" * 64,
+    )
+    policy = replace(
+        _policy(),
+        pipeline_config_source=PipelineConfigSource.OPERATOR,
+        pipeline_config_path="config.yaml",
+    )
+    evidence_calls: list[dict[str, object]] = []
+    apply_calls: list[dict[str, object]] = []
+
+    def evidence_spy(**kwargs):
+        evidence_calls.append(dict(kwargs))
+        return build_evidence_bundle(**kwargs)
+
+    def apply_spy(**kwargs):
+        apply_calls.append(dict(kwargs))
+        return apply_replacements(**kwargs)
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        outcome = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.PREPARE, policies=(policy,)),
+            checkout=checkout,
+            provider=provider,
+            driver=FakeCodexDriver(),
+            broker=broker,
+            operator_pipeline_configs={policy.base_repo: snapshot},
+            evidence_builder=evidence_spy,
+            replacement_applier=apply_spy,
+        ).poll_once()
+
+    assert outcome.runs_completed == 1
+    assert evidence_calls[0]["trusted_pipeline_config_path"] == operator_config
+    assert evidence_calls[0]["trusted_config_root"] == operator_root
+    assert evidence_calls[0]["trusted_source_root"].name == "checkout-1"
+    assert evidence_calls[0]["trusted_config_bundle_digest"] == "d" * 64
+    assert apply_calls[0]["pipeline_config_path"] == operator_config
+    assert apply_calls[0]["trusted_config_root"] == operator_root
+    assert apply_calls[0]["trusted_source_root"].name == "checkout-1"
 
 
 def test_propose_prevention_runs_before_translation_publish_and_records_draft(

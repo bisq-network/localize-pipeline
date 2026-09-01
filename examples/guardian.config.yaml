@@ -5,6 +5,12 @@
 # Login names are display labels and never grant authority.
 mode: observe
 
+# Scheduled invocations catch up once per local calendar day after this local
+# wall-clock time. Manual runs are always allowed.
+schedule:
+  hour: 0
+  minute: 0
+
 # The scheduled assessment defaults are explicit here so model use and effort
 # remain an operator decision. Before enabling either write mode, configure an
 # exact GPG key ID; global Git user.signingkey is not visible inside Guardian's
@@ -65,6 +71,10 @@ repositories:
     allowed_path_globs:
       - "src/main/resources/i18n/**"
 
+    # `base` (the backward-compatible default) loads project policy from the
+    # exact PR base SHA. `operator` resolves this same relative path beside this
+    # Guardian YAML and requires private 0700 directories and 0600 files.
+    pipeline_config_source: base
     pipeline_config_path: .localize/config.yaml
     source_locale: en
 

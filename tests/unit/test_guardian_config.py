@@ -7,11 +7,14 @@ from pathlib import Path
 import pytest
 
 from localize.guardian import (
+    AllowedHeadRepository,
     CodexAuthMode,
     ExactRepository,
     GuardianMode,
+    PipelineConfigSource,
     PreventionPolicy,
     ProposedReplacement,
+    RepositoryPolicy,
     TrustedActor,
 )
 from localize.guardian.config import GuardianConfigError, load_guardian_config
@@ -108,6 +111,8 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     assert config.runtime.github_token_command == ("gh", "auth", "token")
     assert config.runtime.codex_api_key_command == ()
     assert config.runtime.signing_key is None
+    assert config.schedule.hour == 0
+    assert config.schedule.minute == 0
 
     policy = config.repositories[0]
     assert policy.base_repo == "acme/widgets"
@@ -121,6 +126,7 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     )
     assert policy.allowed_head_repository_by_id(84).full_name == "localize-bot/widgets"
     assert policy.private_repo_model_opt_in is False
+    assert policy.pipeline_config_source is PipelineConfigSource.BASE
     assert policy.prevention is None
     assert policy.trusted_reviewers_for("ru") == (
         TrustedActor(login="locale-maintainer", id=101, type="User"),
@@ -130,6 +136,100 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     )
     assert policy.trusted_reviewers_for("de") == ()
     assert policy.trusted_bots_for("de") == ()
+
+
+def test_repository_policy_preserves_legacy_positional_defaults() -> None:
+    prevention = PreventionPolicy(
+        target_repository=ExactRepository("acme/pipeline", 501),
+        target_base_branch="main",
+        push_repository=ExactRepository("localize-bot/pipeline", 502),
+        push_branch_prefix="guardian/prevention-",
+        allowed_code_path_globs=("localize/*.py",),
+        allowed_test_path_globs=("tests/**/*.py",),
+        focused_test_argv=(("/opt/bin/pytest", "tests/unit/test_rules.py"),),
+        sandbox_argv_prefix=("/usr/bin/sandbox-exec", "--"),
+        max_changed_files=4,
+        max_changed_bytes=262_144,
+    )
+
+    policy = RepositoryPolicy(
+        "acme/widgets",
+        42,
+        "main",
+        (TrustedActor("localize-bot", 11, "Bot"),),
+        (TrustedActor("acme", 12, "Organization"),),
+        (AllowedHeadRepository("localize-bot/widgets", 84),),
+        ("localization/**",),
+        ("l10n/**",),
+        "config.yaml",
+        "en",
+        {"ru": (TrustedActor("reviewer", 101, "User"),)},
+        {},
+        True,
+        prevention,
+    )
+
+    assert policy.private_repo_model_opt_in is True
+    assert policy.prevention is prevention
+    assert policy.pipeline_config_source is PipelineConfigSource.BASE
+
+
+def test_parses_operator_pipeline_config_and_daily_schedule(tmp_path: Path) -> None:
+    config_text = _minimal_config().replace(
+        "repositories:\n",
+        "schedule:\n  hour: 5\n  minute: 15\nrepositories:\n",
+        1,
+    ).replace(
+        "    pipeline_config_path: .localize/config.yaml\n",
+        "    pipeline_config_source: operator\n"
+        "    pipeline_config_path: projects/widgets/config.yaml\n",
+        1,
+    )
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.schedule.hour == 5
+    assert config.schedule.minute == 15
+    assert config.repositories[0].pipeline_config_source is PipelineConfigSource.OPERATOR
+    assert config.repositories[0].pipeline_config_path == "projects/widgets/config.yaml"
+
+
+@pytest.mark.parametrize(
+    "schedule_yaml",
+    [
+        "schedule: {hour: -1, minute: 0}",
+        "schedule: {hour: 24, minute: 0}",
+        "schedule: {hour: 0, minute: -1}",
+        "schedule: {hour: 0, minute: 60}",
+        "schedule: {hour: 1.5, minute: 0}",
+        "schedule: {hour: 1.0, minute: 0}",
+        "schedule: {hour: 0, minute: 0, timezone: UTC}",
+    ],
+)
+def test_rejects_invalid_daily_schedule(
+    tmp_path: Path,
+    schedule_yaml: str,
+) -> None:
+    config_text = _minimal_config().replace(
+        "repositories:\n",
+        f"{schedule_yaml}\nrepositories:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match="schedule"):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+def test_rejects_unknown_pipeline_config_source(tmp_path: Path) -> None:
+    config_text = _minimal_config().replace(
+        "    pipeline_config_path: .localize/config.yaml\n",
+        "    pipeline_config_source: pull-request\n"
+        "    pipeline_config_path: .localize/config.yaml\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match="pipeline_config_source"):
+        load_guardian_config(_write_config(tmp_path, config_text))
 
 
 @pytest.mark.parametrize("repository", ["../widgets", "acme/..", "./widgets", "acme/."])

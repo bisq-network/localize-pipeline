@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+import sys
 
 import yaml
 
@@ -75,7 +76,7 @@ quality_gate:
     env = os.environ.copy()
     env.update(
         {
-            "PATH": f"{PROJECT_ROOT / 'venv' / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(PROJECT_ROOT),
             "TRANSLATOR_CONFIG_FILE": str(config_path),
             "ACTION_QUALITY_REPORT_DIR": str(report_folder),
@@ -137,7 +138,7 @@ def test_action_gate_rejects_target_repository_outside_workspace_before_git_rese
     env = os.environ.copy()
     env.update(
         {
-            "PATH": f"{PROJECT_ROOT / 'venv' / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(PROJECT_ROOT),
             "TRANSLATOR_CONFIG_FILE": str(config_path),
             "ACTION_QUALITY_REPORT_DIR": str(tmp_path / "reports"),

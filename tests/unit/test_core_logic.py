@@ -1033,6 +1033,34 @@ class TestValidationLogic(unittest.TestCase):
         finally:
             os.remove(temp_file_path)
 
+    def test_linting_treats_even_backslash_runs_as_literal_backslashes(self):
+        """A valid ``\\\\`` pair must not expose its second slash as an escape."""
+        from localize.translate_localization_files import lint_properties_file
+
+        content = (
+            r"regex=Use \\(deep|machine\\) learning" "\n"
+            r"literal=Unknown-looking \\z remains literal" "\n"
+            r"invalid=An odd run \\\z still contains an invalid escape" "\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            delete=False,
+            suffix=".properties",
+            encoding="utf-8",
+        ) as temp_f:
+            temp_f.write(content)
+            temp_file_path = temp_f.name
+
+        try:
+            errors = lint_properties_file(temp_file_path)
+            self.assertEqual(len(errors), 1)
+            self.assertIn(
+                "Unknown escape sequence in value for key 'invalid'",
+                errors[0],
+            )
+        finally:
+            os.remove(temp_file_path)
+
 
 class TestFileDetectionLogic(unittest.TestCase):
 

@@ -55,12 +55,31 @@ the final remote-write boundary, the controller enforces:
 - per-run value-edit limits, and a model call starts only when a durable slot is
   available under the configured UTC daily model-call budget.
 
-The repository's localization pipeline config and glossary are inputs to
-validation, not sources of Guardian authority. They are loaded from the exact
-trusted base SHA, never from the PR head. Their paths must remain inside that
-trusted tree, and the configured profile source locale must match the
-Guardian's local `source_locale` policy. A PR that changes those policy inputs
-cannot use its changed versions to authorize itself.
+The localization pipeline config and glossary are inputs to validation, not
+sources of Guardian authority. The backward-compatible default,
+`pipeline_config_source: base`, loads them from the exact trusted base SHA,
+never from the PR head. Their paths must remain inside that trusted tree.
+
+For a project whose pipeline config must stay outside its repository, set
+`pipeline_config_source: operator`. The existing relative
+`pipeline_config_path` then resolves beside the private Guardian YAML. Before
+any GitHub or model work, each scheduled or manual poll reads the pipeline
+config and its configured (or default) safe relative glossary through
+non-following file descriptors and snapshots them into a private per-poll
+bundle. The Guardian YAML directory and every bundle directory must be owned by
+the current operator with mode `0700`; pipeline-config and glossary files must
+be current-user-owned, non-symlink regular files with mode `0600`. Inputs are
+bounded and must be valid UTF-8 YAML or JSON. Unsafe ancestors, absolute paths,
+parent traversal, malformed content, and an absent explicitly configured
+glossary fail closed. A missing implicit default `glossary.json` remains valid,
+matching pipeline behavior.
+
+The private snapshot cannot change when an operator file is replaced during a
+poll. Its deterministic digest enters model evidence and the assessment cache
+identity. In both source modes, source-locale strings still come only from the
+exact base SHA, and the configured profile source locale must match the
+Guardian's local `source_locale` policy. A PR that changes these inputs cannot
+use its changed versions to authorize itself.
 
 On the translation-correction path, only value-only replacements are eligible.
 The read-only assessment model cannot add or remove keys, edit a source-locale
@@ -190,7 +209,7 @@ Create an operator-owned config from the report-only example:
 
 ```bash
 GUARDIAN_CONFIG="$HOME/.config/localize/guardian.yaml"
-mkdir -p "$HOME/.config/localize"
+install -d -m 700 "$HOME/.config/localize"
 localize guardian init --config "$GUARDIAN_CONFIG"
 ```
 
@@ -203,6 +222,9 @@ local audit output are clean.
 The Guardian config is strict: unknown fields, duplicate YAML keys, unsafe
 relative paths, duplicate identities, and malformed limits are errors. Never
 load it from a pull-request head or let a monitored repository modify it.
+Use `pipeline_config_source: operator` only when the pipeline config and
+glossary are stored under the same private config directory as described
+above; `base` remains the default.
 
 ### Codex authentication and credentials
 
@@ -294,7 +316,8 @@ localize guardian status --config "$GUARDIAN_CONFIG"
 ```
 
 `doctor` makes no monitored-repository or GitHub writes and redacts credential
-material. It checks the config, state directory, Codex executable and schema,
+material. It checks the config, state directory and process-lock safety without
+acquiring an active poll lock, the Codex executable and schema,
 the dedicated ChatGPT login or API-key helper, GitHub credential helper,
 GitHub identity, repository visibility, signing setup, and built-in adapters
 registered in the isolated Guardian process. Target-project adapter
@@ -492,8 +515,14 @@ localize guardian install --config "$GUARDIAN_CONFIG"
 
 The generated launchd property list and wrapper contain absolute paths and no
 credentials. `RunAtLoad` plus a conservative `StartInterval` wakes the wrapper
-periodically; persistent state records the start of each poll attempt and
-decides whether the once-daily run is due. This provides catch-up after sleep,
+periodically; persistent state records the start of each poll attempt and uses
+top-level `schedule.hour` (0-23) and `schedule.minute` (0-59) to decide whether
+the once-daily run is due in the machine's local wall-clock time. The default
+is `00:00`, preserving earlier behavior. A private process lock in the
+config's state directory prevents a manual run and scheduler wake from starting
+overlapping polls;
+scheduled lock contention exits successfully while a manual caller receives a
+clear already-running error. This provides catch-up after sleep,
 logout, or a missed wall-clock time without running the full model workflow
 every interval. A failed scheduled attempt is not retried on the next 15-minute
 wake; use an explicit manual `guardian run` after diagnosing it. Manual runs
@@ -513,6 +542,8 @@ policy changes. If the ChatGPT session expires or is revoked, run
 ## Operator checklist
 
 - Guardian config and credential helpers are outside monitored repositories.
+- Operator-sourced pipeline configs use a private `0700` Guardian directory and
+  current-user, non-symlink `0600` config and glossary files.
 - Every repository, target base branch, PR author, head owner, head branch,
   path, locale, reviewer, and bot constraint is explicit.
 - Project plugins are not expected to run inside the Guardian process.

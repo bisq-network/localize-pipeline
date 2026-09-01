@@ -8,6 +8,10 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
+import threading
+import time
 from types import SimpleNamespace
 from typing import Iterator
 
@@ -25,7 +29,9 @@ from localize.guardian.models import (
     GuardianLimits,
     GuardianMode,
     GuardianRuntime,
+    GuardianSchedule,
     PreventionPolicy,
+    PipelineConfigSnapshot,
     RepositoryPolicy,
     TrustedActor,
 )
@@ -563,7 +569,11 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
         and FakeController(),
     )
 
-    result = runtime.run_once(config_path=config_path)
+    previous_umask = os.umask(0o777)
+    try:
+        result = runtime.run_once(config_path=config_path)
+    finally:
+        os.umask(previous_umask)
 
     state_directory = tmp_path / ".guardian"
     state_path = state_directory / "state.sqlite3"
@@ -573,6 +583,388 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
     assert captured["github_command"].argv == ("gh", "auth", "token")
     assert _mode(state_directory) == 0o700
     assert _mode(state_path) == 0o600
+    assert _mode(state_directory / "poll.lock") == 0o600
+    assert all(
+        _mode(artifact) == 0o600 and artifact.stat().st_nlink == 1
+        for artifact in state_directory.glob("state.sqlite3*")
+    )
+
+
+def test_run_once_never_overlaps_a_poll_for_the_same_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory, _state_path = runtime._prepare_private_state(config_path)
+    monkeypatch.setattr(
+        runtime,
+        "_build_controller",
+        lambda **_kwargs: pytest.fail("an overlapping poll must not start"),
+    )
+
+    with runtime._exclusive_poll_lock(state_directory):
+        assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+        with pytest.raises(runtime.GuardianRuntimeError, match="already running"):
+            runtime.run_once(config_path=config_path, scheduled=False)
+
+    lock_path = state_directory / "poll.lock"
+    assert lock_path.is_file()
+    assert _mode(lock_path) == 0o600
+
+
+def test_prepare_private_state_accepts_a_directory_created_by_a_racer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+
+    def racing_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        assert path == state_directory
+        assert parents is False
+        assert exist_ok is False
+        os.mkdir(path, mode)
+        raise FileExistsError
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    directory, database = runtime._prepare_private_state(config_path)
+
+    assert directory == state_directory
+    assert database == state_directory / "state.sqlite3"
+    assert _mode(directory) == 0o700
+
+
+def test_prepare_private_state_secures_a_new_directory_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    previous_umask = os.umask(0o777)
+    try:
+        directory, _database = runtime._prepare_private_state(config_path)
+    finally:
+        os.umask(previous_umask)
+
+    assert _mode(directory) == 0o700
+
+
+def test_prepare_private_state_waits_for_a_live_restrictive_umask_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+    creator_is_normalizing = threading.Event()
+    release_creator = threading.Event()
+    contender_inspected_restricted_directory = threading.Event()
+    original_chmod = Path.chmod
+    original_stat = Path.stat
+    results: dict[str, object] = {}
+
+    def delayed_creator_chmod(
+        path: Path,
+        mode: int,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path == state_directory and threading.current_thread().name == "creator":
+            creator_is_normalizing.set()
+            assert release_creator.wait(timeout=5)
+        original_chmod(path, mode, *args, **kwargs)
+
+    def observed_stat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if (
+            path == state_directory
+            and threading.current_thread().name == "contender"
+            and stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            contender_inspected_restricted_directory.set()
+        return metadata
+
+    def prepare(name: str) -> None:
+        try:
+            results[name] = runtime._prepare_private_state(config_path)
+        except Exception as exc:
+            results[name] = exc
+
+    monkeypatch.setattr(Path, "chmod", delayed_creator_chmod)
+    monkeypatch.setattr(Path, "stat", observed_stat)
+    previous_umask = os.umask(0o777)
+    try:
+        creator = threading.Thread(target=prepare, args=("creator",), name="creator")
+        creator.start()
+        assert creator_is_normalizing.wait(timeout=5)
+        contender = threading.Thread(
+            target=prepare,
+            args=("contender",),
+            name="contender",
+        )
+        contender.start()
+        assert contender_inspected_restricted_directory.wait(timeout=5)
+        release_creator.set()
+        creator.join(timeout=5)
+        contender.join(timeout=5)
+    finally:
+        release_creator.set()
+        os.umask(previous_umask)
+
+    assert not creator.is_alive()
+    assert not contender.is_alive()
+    expected = (state_directory, state_directory / "state.sqlite3")
+    assert results == {"creator": expected, "contender": expected}
+    assert _mode(state_directory) == 0o700
+
+
+def test_prepare_private_state_rejects_a_hardlinked_database(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    database = state_directory / "state.sqlite3"
+    database.write_text("", encoding="utf-8")
+    database.chmod(0o600)
+    (tmp_path / "state-alias").hardlink_to(database)
+
+    directory, returned_database = runtime._prepare_private_state(config_path)
+
+    assert returned_database == database
+    with runtime._exclusive_poll_lock(directory):
+        with pytest.raises(runtime.GuardianRuntimeError, match="private"):
+            runtime._validate_private_state_artifacts(database)
+
+
+@pytest.mark.skipif(
+    not runtime._poll_locking_is_available(),
+    reason="POSIX flock is unavailable",
+)
+def test_first_poll_lock_creation_is_race_safe_across_processes(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    gate = tmp_path / "start"
+    ready_paths = tuple(tmp_path / f"ready-{index}" for index in range(2))
+    project_root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value
+        for value in (str(project_root), existing_pythonpath)
+        if value
+    )
+    script = """
+import os
+from pathlib import Path
+import sys
+import time
+from localize.guardian import runtime
+
+os.umask(0o777)
+config_path = Path(sys.argv[1])
+gate = Path(sys.argv[2])
+ready = Path(sys.argv[3])
+contended = Path(sys.argv[4])
+ready.touch()
+deadline = time.monotonic() + 5
+while not gate.exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit(2)
+    time.sleep(0.005)
+state_directory, _state_path = runtime._prepare_private_state(config_path)
+try:
+    with runtime._exclusive_poll_lock(state_directory):
+        print("locked", flush=True)
+        deadline = time.monotonic() + 5
+        while not contended.exists():
+            if time.monotonic() >= deadline:
+                raise SystemExit(3)
+            time.sleep(0.005)
+except runtime._GuardianPollAlreadyRunning:
+    contended.touch()
+    print("contended", flush=True)
+"""
+    contended = tmp_path / "contended"
+    processes = tuple(
+        subprocess.Popen(
+            (
+                sys.executable,
+                "-c",
+                script,
+                str(config_path),
+                str(gate),
+                str(ready_paths[index]),
+                str(contended),
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        for index in range(2)
+    )
+
+    ready_deadline = time.monotonic() + 10
+    while not all(path.exists() for path in ready_paths):
+        if time.monotonic() >= ready_deadline:
+            break
+        time.sleep(0.005)
+    all_ready = all(path.exists() for path in ready_paths)
+    gate.touch()
+    results = tuple(process.communicate(timeout=10) for process in processes)
+
+    assert all_ready, results
+    assert [process.returncode for process in processes] == [0, 0], results
+    assert sorted(stdout.strip() for stdout, _stderr in results) == [
+        "contended",
+        "locked",
+    ]
+    assert all(stderr == "" for _stdout, stderr in results)
+
+
+def test_poll_lock_is_released_when_the_poll_raises(tmp_path: Path) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        with runtime._exclusive_poll_lock(state_directory):
+            raise RuntimeError("sentinel")
+
+    with runtime._exclusive_poll_lock(state_directory):
+        pass
+
+
+def test_poll_lock_creation_secures_mode_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    previous_umask = os.umask(0o777)
+    try:
+        with runtime._exclusive_poll_lock(state_directory):
+            pass
+    finally:
+        os.umask(previous_umask)
+
+    assert _mode(state_directory / "poll.lock") == 0o600
+
+
+def test_poll_lock_waits_for_an_exclusive_creator_to_finish_initializing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o000)
+    waits = 0
+
+    def finish_creator(_seconds: float) -> None:
+        nonlocal waits
+        waits += 1
+        lock_path.chmod(0o600)
+
+    monkeypatch.setattr(runtime.time, "sleep", finish_creator)
+
+    with runtime._exclusive_poll_lock(state_directory):
+        pass
+
+    assert waits == 1
+    assert _mode(lock_path) == 0o600
+
+
+def test_poll_lock_retries_when_creator_finishes_after_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o000)
+    original_open = os.open
+    permission_failures = 0
+
+    def open_during_creator_transition(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        nonlocal permission_failures
+        if path == lock_path and not flags & os.O_EXCL and permission_failures == 0:
+            permission_failures += 1
+            lock_path.chmod(0o600)
+            raise PermissionError
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(runtime.os, "open", open_during_creator_transition)
+
+    with runtime._exclusive_poll_lock(state_directory):
+        pass
+
+    assert permission_failures == 1
+    assert _mode(lock_path) == 0o600
+
+
+def test_poll_lock_never_repairs_a_preexisting_unsafe_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o000)
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="lock"):
+        with runtime._exclusive_poll_lock(state_directory):
+            pass
+
+    assert _mode(lock_path) == 0o000
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "hardlink"])
+def test_poll_lock_rejects_unsafe_existing_paths(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    state_directory = tmp_path / ".guardian"
+    state_directory.mkdir(mode=0o700)
+    lock_path = state_directory / "poll.lock"
+    if unsafe_kind == "symlink":
+        target = tmp_path / "target.lock"
+        target.write_text("", encoding="utf-8")
+        target.chmod(0o600)
+        lock_path.symlink_to(target)
+    elif unsafe_kind == "hardlink":
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o600)
+        (tmp_path / "alias.lock").hardlink_to(lock_path)
+    else:
+        lock_path.write_text("", encoding="utf-8")
+        lock_path.chmod(0o644)
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="lock"):
+        with runtime._exclusive_poll_lock(state_directory):
+            pass
 
 
 def test_scheduled_run_skips_after_failed_attempt_on_same_day_but_manual_runs(
@@ -650,6 +1042,56 @@ def test_scheduled_run_catches_up_when_last_attempt_was_previous_local_day(
     assert calls == 1
 
 
+def test_operator_pipeline_config_is_snapshotted_before_controller_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    sequence: list[str] = []
+
+    @contextmanager
+    def fake_snapshot(**_kwargs: object) -> Iterator[dict[str, PipelineConfigSnapshot]]:
+        sequence.append("snapshot-enter")
+        try:
+            yield {
+                "acme/widgets": PipelineConfigSnapshot(
+                    config_root=tmp_path,
+                    config_path=config_path,
+                    bundle_digest="d" * 64,
+                )
+            }
+        finally:
+            sequence.append("snapshot-exit")
+
+    @contextmanager
+    def fake_credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    class FakeController:
+        def poll_once(self) -> PollOutcome:
+            sequence.append("github-model-poll")
+            return PollOutcome(lease_acquired=True)
+
+    monkeypatch.setattr(
+        runtime,
+        "_snapshot_operator_pipeline_configs",
+        fake_snapshot,
+    )
+    monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+
+    assert runtime.run_once(config_path=config_path) == 0
+    assert sequence == ["snapshot-enter", "github-model-poll", "snapshot-exit"]
+    with GuardianState(tmp_path / ".guardian/state.sqlite3") as state:
+        audit = state.latest_health("pipeline-config")
+    assert audit is not None
+    assert audit.details == {
+        "repository": "acme/widgets",
+        "bundle_digest": "d" * 64,
+    }
+
+
 def test_failed_scheduled_poll_is_not_retried_until_manual_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -686,7 +1128,11 @@ def test_failed_scheduled_poll_is_not_retried_until_manual_request(
         attempt = state.latest_health("guardian-poll-attempt")
     assert attempt is not None
     assert attempt.status == "attempted"
-    assert attempt.details == {"scheduled": False}
+    assert attempt.details == {
+        "scheduled": False,
+        "local_date": NOW.date().isoformat(),
+        "local_minute": NOW.hour * 60 + NOW.minute,
+    }
 
 
 def test_model_capacity_circuit_is_a_failed_runtime_outcome() -> None:
@@ -708,7 +1154,92 @@ def test_scheduled_due_uses_local_day_instead_of_utc_day() -> None:
         )
     )
 
-    assert runtime._scheduled_poll_is_due(state, now=now) is False
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(),
+    ) is False
+
+
+def test_scheduled_due_does_not_repeat_across_dst_fallback() -> None:
+    now = datetime(2026, 10, 25, 0, 15, tzinfo=timezone(timedelta(hours=1)))
+    prior = datetime(2026, 10, 25, 0, 5, tzinfo=timezone(timedelta(hours=2)))
+    state = SimpleNamespace(
+        latest_health=lambda _component: SimpleNamespace(
+            status="attempted",
+            checked_at=prior,
+            details={
+                "scheduled": True,
+                "local_date": "2026-10-25",
+                "local_minute": 5,
+            },
+        )
+    )
+
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(hour=0, minute=0),
+    ) is False
+
+
+def test_manual_poll_before_schedule_does_not_suppress_scheduled_poll() -> None:
+    now = datetime(2026, 8, 30, 8, 7, tzinfo=timezone.utc)
+    manual = datetime(2026, 8, 30, 7, 0, tzinfo=timezone.utc)
+    state = SimpleNamespace(
+        latest_health=lambda _component: SimpleNamespace(
+            status="attempted",
+            checked_at=manual,
+            details={
+                "scheduled": False,
+                "local_date": "2026-08-30",
+                "local_minute": 7 * 60,
+            },
+        )
+    )
+
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(hour=8, minute=7),
+    ) is True
+
+
+def test_scheduled_due_uses_configured_local_clock() -> None:
+    now = datetime(2026, 8, 30, 5, 14, tzinfo=timezone(timedelta(hours=2)))
+    state = SimpleNamespace(latest_health=lambda _component: None)
+
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now,
+        schedule=GuardianSchedule(hour=5, minute=15),
+    ) is False
+    assert runtime._scheduled_poll_is_due(
+        state,
+        now=now + timedelta(minutes=1),
+        schedule=GuardianSchedule(hour=5, minute=15),
+    ) is True
+
+
+def test_run_once_uses_configured_schedule_for_due_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    config_path.write_text(
+        "schedule: {hour: 13, minute: 0}\n"
+        + config_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
+    monkeypatch.setattr(
+        runtime,
+        "_build_controller",
+        lambda **_kwargs: pytest.fail("controller must not run before 13:00"),
+    )
+
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
 
 
 def test_run_once_redacts_setup_and_poll_exception_messages(

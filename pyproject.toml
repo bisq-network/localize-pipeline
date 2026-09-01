@@ -1,19 +1,18 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "localize-pipeline"
-version = "0.1.17"
+version = "0.1.18"
 description = "Agent-friendly AI localization pipeline that translates Java properties and JSON into pull requests"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 keywords = ["ai", "agents", "i18n", "l10n", "localization", "translation", "github-actions"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",

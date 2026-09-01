@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
-      - uses: bisq-network/localize-pipeline@v0.1.17
+      - uses: bisq-network/localize-pipeline@v0.1.18
         with:
           config-file: config.yaml
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -230,7 +230,7 @@ localize validate --config config.yaml
 localize run --dry-run --config config.yaml
 localize run --config config.yaml
 localize quality-gate --repo-root . --input-folder i18n --config config.yaml --validation-summary logs/translation_validation_summary.json --output-json logs/quality.json --output-markdown logs/quality.md --changed-files i18n/messages_de.properties
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.17
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.18
 localize memory stats --memory-file logs/translation_memory.json
 ```
 
@@ -271,6 +271,12 @@ default is `gpt-5.6-terra` with reasoning effort `high`. The dedicated Guardian
 login is kept outside monitored repositories; inherited API keys are not used
 in the default subscription mode.
 
+Pipeline validation policy defaults to the exact repository base SHA. Projects
+that keep localization config outside the repository can opt into a private,
+operator-owned config snapshot with `pipeline_config_source: operator`.
+Scheduled runs honor the configured local `schedule.hour` and
+`schedule.minute`, while manual runs remain available at any time.
+
 Guardian intentionally rejects `--plugin` and ignores
 `LOCALIZE_PLUGIN_MODULES` and adapter entry points, so project plugin code never
 runs inside its credential-bearing process. Keep its config and generated
@@ -290,7 +296,7 @@ the full guide for the macOS containment tradeoff.
 To onboard another repository without hand-copying files, run:
 
 ```bash
-localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.17
+localize bootstrap-pr --target-project-root path/to/repo --action-ref v0.1.18
 ```
 
 The command refuses dirty worktrees, creates a `localize/onboarding` branch, and
@@ -372,7 +378,7 @@ matches only.
 Pin a tagged release for production workflows once tags are available:
 
 ```yaml
-- uses: bisq-network/localize-pipeline@v0.1.17
+- uses: bisq-network/localize-pipeline@v0.1.18
 ```
 
 Use `@main` only when you intentionally want the latest unreleased changes.

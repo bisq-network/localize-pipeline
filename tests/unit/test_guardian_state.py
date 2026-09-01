@@ -130,6 +130,33 @@ def test_state_database_is_private_even_when_created_under_a_permissive_umask(
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_live_sqlite_artifacts_are_private_under_a_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "guardian.sqlite3"
+    previous_umask = os.umask(0o777)
+    try:
+        with GuardianState(path) as state:
+            state.record_health(
+                component="test",
+                status="ok",
+                message="force a WAL write",
+            )
+            artifacts = (
+                path,
+                Path(f"{path}-wal"),
+                Path(f"{path}-shm"),
+            )
+            assert all(artifact.is_file() for artifact in artifacts)
+            assert all(
+                artifact.stat().st_mode & 0o777 == 0o600
+                and artifact.stat().st_nlink == 1
+                for artifact in artifacts
+            )
+    finally:
+        os.umask(previous_umask)
+
+
 def test_state_refuses_a_symlink_without_touching_its_target(tmp_path: Path) -> None:
     target = tmp_path / "foreign.sqlite3"
     target.write_text("do not modify", encoding="utf-8")
@@ -142,6 +169,59 @@ def test_state_refuses_a_symlink_without_touching_its_target(tmp_path: Path) -> 
 
     assert target.read_text(encoding="utf-8") == "do not modify"
     assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_state_refuses_a_hardlinked_database_without_opening_it(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "guardian.sqlite3"
+    state_path.write_bytes(b"not a database")
+    state_path.chmod(0o600)
+    alias = tmp_path / "state-alias"
+    alias.hardlink_to(state_path)
+
+    with pytest.raises(ValueError, match="hard-linked"):
+        GuardianState(state_path)
+
+    assert state_path.read_bytes() == b"not a database"
+    assert state_path.stat().st_nlink == 2
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("unsafe_kind", ["hardlink", "symlink", "mode", "directory"])
+def test_state_refuses_unsafe_sqlite_sidecars_before_they_can_be_mutated(
+    tmp_path: Path,
+    suffix: str,
+    unsafe_kind: str,
+) -> None:
+    state_path = tmp_path / "guardian.sqlite3"
+    with GuardianState(state_path):
+        pass
+    sidecar = Path(f"{state_path}{suffix}")
+    if sidecar.exists() or sidecar.is_symlink():
+        sidecar.unlink()
+    sentinel = tmp_path / f"sentinel-{suffix.removeprefix('-')}"
+    if unsafe_kind == "directory":
+        sidecar.mkdir(mode=0o700)
+    else:
+        sentinel.write_bytes(b"do not mutate")
+        sentinel.chmod(0o600)
+        if unsafe_kind == "hardlink":
+            sidecar.hardlink_to(sentinel)
+        elif unsafe_kind == "symlink":
+            sidecar.symlink_to(sentinel)
+        else:
+            sidecar.write_bytes(b"do not mutate")
+            sidecar.chmod(0o644)
+
+    with pytest.raises(ValueError, match="state artifact"):
+        GuardianState(state_path)
+
+    if unsafe_kind in {"hardlink", "symlink"}:
+        assert sentinel.read_bytes() == b"do not mutate"
+    elif unsafe_kind == "mode":
+        assert sidecar.read_bytes() == b"do not mutate"
+        assert sidecar.stat().st_mode & 0o777 == 0o644
 
 
 def test_state_refuses_insecure_existing_files_and_directories(tmp_path: Path) -> None:

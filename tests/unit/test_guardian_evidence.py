@@ -120,6 +120,43 @@ def test_builds_minimal_machine_readable_bundle_with_untrusted_feedback(tmp_path
     )
 
 
+def test_pipeline_config_bundle_digest_is_manifested_and_keys_the_evidence(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = _write_project(repo)
+
+    common = dict(
+        repo_root=repo,
+        trusted_pipeline_config_path=config,
+        repository="acme/widgets",
+        pr_number=12,
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+        feedback=(_event(),),
+        changed_paths=("l10n/messages_ru.properties",),
+        allowed_path_globs=("l10n/*.properties",),
+        diff_text="safe diff",
+    )
+    first = build_evidence_bundle(
+        destination=tmp_path / "first",
+        trusted_config_bundle_digest="1" * 64,
+        **common,
+    )
+    second = build_evidence_bundle(
+        destination=tmp_path / "second",
+        trusted_config_bundle_digest="2" * 64,
+        **common,
+    )
+
+    manifest = json.loads(
+        (first.root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["pipeline_config_bundle_digest"] == "1" * 64
+    assert first.evidence_hash != second.evidence_hash
+
+
 def test_rejects_mixed_revisions_duplicate_ids_and_non_target_paths(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

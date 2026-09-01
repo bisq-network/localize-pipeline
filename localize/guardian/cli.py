@@ -35,7 +35,10 @@ from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
 )
-from localize.guardian.filesystem_trust import is_trusted_directory
+from localize.guardian.filesystem_trust import (
+    create_or_wait_for_private_directory,
+    is_trusted_directory,
+)
 from localize.guardian.github import (
     GitHubReader,
     GitHubRepositoryIdentity,
@@ -45,6 +48,7 @@ from localize.guardian.models import (
     CodexAuthMode,
     GuardianConfig,
     GuardianMode,
+    PipelineConfigSource,
     RepositoryPolicy,
 )
 from localize.guardian.prevention_runtime import (
@@ -61,6 +65,11 @@ from localize.guardian.process import (
 )
 from localize.guardian.runtime import (
     GuardianRuntimeError,
+    _poll_locking_is_available,
+    _preflight_poll_lock,
+    _probe_poll_lock_semantics,
+    _snapshot_operator_pipeline_configs,
+    _validate_private_state_artifacts,
     _validate_subscription_codex_home,
     load_trusted_guardian_config,
 )
@@ -77,6 +86,11 @@ _STARTER_CONFIG = """# Generic, report-only Localize Guardian policy.
 # Replace every example name and numeric ID with values read from GitHub's API.
 # Login names are display labels; numeric IDs grant authority.
 mode: observe
+
+# Scheduled invocations catch up once daily after this local wall-clock time.
+schedule:
+  hour: 0
+  minute: 0
 
 runtime:
   codex_model: gpt-5.6-terra
@@ -129,6 +143,9 @@ repositories:
       - "localization/**"
     allowed_path_globs:
       - "src/main/resources/i18n/**"
+    # Set to operator to resolve the path beside this Guardian YAML instead of
+    # from the exact repository base SHA. See docs/guardian.md for permissions.
+    pipeline_config_source: base
     pipeline_config_path: .localize/config.yaml
     source_locale: en
     trusted_reviewers:
@@ -277,30 +294,21 @@ def _owned_by_current_user(metadata: os.stat_result) -> bool:
 def _ensure_private_directory(path: Path) -> None:
     if path.is_symlink():
         raise GuardianCLIError(f"Refusing symlinked Guardian directory: {path}")
-    if path.exists():
-        metadata = path.stat(follow_symlinks=False)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise GuardianCLIError(f"Guardian runtime path is not a directory: {path}")
-        if not _owned_by_current_user(metadata):
-            raise GuardianCLIError(
-                f"Guardian runtime directory must be owned by the current user: {path}"
-            )
-        if stat.S_IMODE(metadata.st_mode) != 0o700:
-            raise GuardianCLIError(
-                f"Guardian runtime directory must have mode 0700: {path}"
-            )
-        return
     try:
-        path.mkdir(parents=True, mode=0o700)
-        path.chmod(0o700)
+        metadata = create_or_wait_for_private_directory(path, parents=True)
     except OSError as exc:
         raise GuardianCLIError(
             f"Could not create private Guardian directory: {path}"
         ) from exc
-    metadata = path.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise GuardianCLIError(f"Guardian runtime path is not a directory: {path}")
     if not _owned_by_current_user(metadata):
         raise GuardianCLIError(
             f"Guardian runtime directory must be owned by the current user: {path}"
+        )
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise GuardianCLIError(
+            f"Guardian runtime directory must have mode 0700: {path}"
         )
 
 
@@ -360,6 +368,8 @@ def _validate_private_regular_file(path: Path, *, mode: int) -> None:
         raise GuardianCLIError(f"Could not inspect Guardian file: {path}") from exc
     if not stat.S_ISREG(metadata.st_mode):
         raise GuardianCLIError(f"Guardian path is not a regular file: {path}")
+    if metadata.st_nlink != 1:
+        raise GuardianCLIError(f"Guardian file must not be hard-linked: {path}")
     if not _owned_by_current_user(metadata):
         raise GuardianCLIError(
             f"Guardian file must be owned by the current user: {path}"
@@ -947,18 +957,73 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _state_directory_doctor(config_path: Path) -> tuple[str, bool]:
     runtime_dir = guardian_state_dir(config_path)
-    if not runtime_dir.exists():
+    if not _poll_locking_is_available():
+        return "error (process locking is unavailable)", False
+    if not runtime_dir.exists() and not runtime_dir.is_symlink():
         if os.access(runtime_dir.parent, os.W_OK):
+            try:
+                _probe_poll_lock_semantics(runtime_dir.parent)
+            except GuardianRuntimeError:
+                return "error (paths must be regular and private)", False
             return "ready (created on first run or install)", True
         return "error (parent directory is not writable)", False
     try:
         _ensure_private_directory(runtime_dir)
         state_path = guardian_state_path(config_path)
-        if state_path.exists() or state_path.is_symlink():
-            _validate_private_regular_file(state_path, mode=0o600)
-    except GuardianCLIError:
+        _validate_private_state_artifacts(state_path)
+        _preflight_poll_lock(runtime_dir)
+        _probe_poll_lock_semantics(runtime_dir)
+    except (GuardianCLIError, GuardianRuntimeError):
         return "error (paths must be regular and private)", False
     return "ok", True
+
+
+def _operator_pipeline_config_doctor(
+    config: GuardianConfig,
+    *,
+    config_path: Path,
+) -> tuple[str, bool]:
+    """Exercise the production snapshot path without external or model work."""
+
+    operator_count = sum(
+        repository.pipeline_config_source is PipelineConfigSource.OPERATOR
+        for repository in config.repositories
+    )
+    if operator_count == 0:
+        return "not configured (repository base mode)", True
+
+    runtime_dir = guardian_state_dir(config_path)
+    try:
+        if runtime_dir.exists():
+            _ensure_private_directory(runtime_dir)
+            with _snapshot_operator_pipeline_configs(
+                config=config,
+                guardian_config_path=config_path,
+                state_directory=runtime_dir,
+            ) as snapshots:
+                if len(snapshots) != operator_count:
+                    raise GuardianRuntimeError(
+                        "Guardian operator pipeline config is unavailable or unsafe."
+                    )
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix=".guardian-operator-config-doctor-",
+                dir=config_path.parent,
+            ) as temporary_directory:
+                scratch = Path(temporary_directory)
+                scratch.chmod(0o700)
+                with _snapshot_operator_pipeline_configs(
+                    config=config,
+                    guardian_config_path=config_path,
+                    state_directory=scratch,
+                ) as snapshots:
+                    if len(snapshots) != operator_count:
+                        raise GuardianRuntimeError(
+                            "Guardian operator pipeline config is unavailable or unsafe."
+                        )
+    except (GuardianCLIError, GuardianRuntimeError, OSError):
+        return "error (private config or glossary is unavailable or unsafe)", False
+    return f"ok ({operator_count} snapshotted)", True
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -975,6 +1040,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     state_status, state_ok = _state_directory_doctor(config_path)
     print(f"state directory: {state_status}")
     healthy &= state_ok
+
+    operator_status, operator_ok = _operator_pipeline_config_doctor(
+        config,
+        config_path=config_path,
+    )
+    print(f"operator pipeline configs: {operator_status}")
+    healthy &= operator_ok
+    if not operator_ok:
+        return 1
 
     codex_path = _command_available((config.runtime.codex_executable,))
     print(f"Codex executable: {'ok' if codex_path else 'error (not found)'}")
@@ -1115,15 +1189,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
     try:
         _load_config_or_raise(config_path)
         _ensure_private_directory(guardian_state_dir(config_path))
-        _ensure_private_file(guardian_state_path(config_path))
         controller = importlib.import_module("localize.guardian.controller")
         run_once = getattr(controller, "run_once")
         result = run_once(config_path=config_path, scheduled=bool(args.scheduled))
         if result is None:
             return 0
         if isinstance(result, bool) or not isinstance(result, int):
-            raise TypeError("Guardian controller returned an unsupported result type.")
+            raise TypeError(
+                "Guardian controller returned an unsupported result type."
+            )
         return result
+    except GuardianRuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(
             f"error: Guardian run failed ({type(exc).__name__}); inspect the private audit log.",
