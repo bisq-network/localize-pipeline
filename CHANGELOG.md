@@ -7,6 +7,15 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+### Changed
+
+- Instruct the holistic reviewer to keep one consistent term for each domain
+  concept across related keys — for example a step-by-step `...how.info`
+  instruction and its dedicated `...proposalTxId` / `...lockupTxId` field
+  labels — so it repairs intra-run terminology drift that the drafting-stage
+  sibling context cannot reach (co-changed keys are translated concurrently and
+  are absent from each other's context).
+
 ## [0.1.17] - 2026-08-31
 
 ### Added
