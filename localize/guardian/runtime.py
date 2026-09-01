@@ -42,7 +42,10 @@ from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
 )
-from localize.guardian.filesystem_trust import is_trusted_directory
+from localize.guardian.filesystem_trust import (
+    create_or_wait_for_private_directory,
+    is_trusted_directory,
+)
 from localize.guardian.github import (
     FeedbackRevision,
     GitHubAuthenticationError,
@@ -182,17 +185,7 @@ def _prepare_private_state(config_path: Path) -> tuple[Path, Path]:
 
     directory, database = _private_state_paths(config_path)
     try:
-        created = False
-        try:
-            directory.mkdir(mode=0o700)
-            created = True
-        except FileExistsError:
-            # Another first invocation may have created the shared state
-            # boundary before either process acquired poll.lock.
-            pass
-        if created:
-            directory.chmod(0o700)
-        metadata = directory.stat(follow_symlinks=False)
+        metadata = create_or_wait_for_private_directory(directory)
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or (hasattr(os, "getuid") and metadata.st_uid != os.getuid())

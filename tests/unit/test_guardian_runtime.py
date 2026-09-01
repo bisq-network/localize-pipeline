@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 from typing import Iterator
@@ -655,6 +656,79 @@ def test_prepare_private_state_secures_a_new_directory_under_restrictive_umask(
     assert _mode(directory) == 0o700
 
 
+def test_prepare_private_state_waits_for_a_live_restrictive_umask_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    state_directory = tmp_path / ".guardian"
+    creator_is_normalizing = threading.Event()
+    release_creator = threading.Event()
+    contender_inspected_restricted_directory = threading.Event()
+    original_chmod = Path.chmod
+    original_stat = Path.stat
+    results: dict[str, object] = {}
+
+    def delayed_creator_chmod(
+        path: Path,
+        mode: int,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path == state_directory and threading.current_thread().name == "creator":
+            creator_is_normalizing.set()
+            assert release_creator.wait(timeout=5)
+        original_chmod(path, mode, *args, **kwargs)
+
+    def observed_stat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if (
+            path == state_directory
+            and threading.current_thread().name == "contender"
+            and stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            contender_inspected_restricted_directory.set()
+        return metadata
+
+    def prepare(name: str) -> None:
+        try:
+            results[name] = runtime._prepare_private_state(config_path)
+        except Exception as exc:
+            results[name] = exc
+
+    monkeypatch.setattr(Path, "chmod", delayed_creator_chmod)
+    monkeypatch.setattr(Path, "stat", observed_stat)
+    previous_umask = os.umask(0o777)
+    try:
+        creator = threading.Thread(target=prepare, args=("creator",), name="creator")
+        creator.start()
+        assert creator_is_normalizing.wait(timeout=5)
+        contender = threading.Thread(
+            target=prepare,
+            args=("contender",),
+            name="contender",
+        )
+        contender.start()
+        assert contender_inspected_restricted_directory.wait(timeout=5)
+        release_creator.set()
+        creator.join(timeout=5)
+        contender.join(timeout=5)
+    finally:
+        release_creator.set()
+        os.umask(previous_umask)
+
+    assert not creator.is_alive()
+    assert not contender.is_alive()
+    expected = (state_directory, state_directory / "state.sqlite3")
+    assert results == {"creator": expected, "contender": expected}
+    assert _mode(state_directory) == 0o700
+
+
 def test_prepare_private_state_rejects_a_hardlinked_database(
     tmp_path: Path,
 ) -> None:
@@ -695,11 +769,13 @@ def test_first_poll_lock_creation_is_race_safe_across_processes(
         if value
     )
     script = """
+import os
 from pathlib import Path
 import sys
 import time
 from localize.guardian import runtime
 
+os.umask(0o777)
 config_path = Path(sys.argv[1])
 gate = Path(sys.argv[2])
 ready = Path(sys.argv[3])

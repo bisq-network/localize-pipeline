@@ -8,8 +8,10 @@ import errno
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -956,11 +958,13 @@ def test_first_scheduled_cli_runs_share_one_lock_from_clean_state(
         if value
     )
     script = """
+import os
 from pathlib import Path
 import sys
 import time
 from localize.guardian import cli, runtime
 
+os.umask(0o777)
 config_path = Path(sys.argv[1])
 gate = Path(sys.argv[2])
 ready = Path(sys.argv[3])
@@ -1023,6 +1027,81 @@ print(f"result={result}", flush=True)
         "result=0",
     ]
     assert all(stderr == "" for _stdout, stderr in results)
+
+
+def test_run_waits_for_a_live_restrictive_umask_directory_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    config_path.write_text(cli._STARTER_CONFIG, encoding="utf-8")
+    config_path.chmod(0o600)
+    state_directory = cli.guardian_state_dir(config_path)
+    creator_is_normalizing = threading.Event()
+    release_creator = threading.Event()
+    contender_inspected_restricted_directory = threading.Event()
+    original_chmod = Path.chmod
+    original_stat = Path.stat
+    results: dict[str, int] = {}
+    run_once = Mock(return_value=0)
+    monkeypatch.setattr(
+        cli.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(run_once=run_once),
+    )
+
+    def delayed_creator_chmod(
+        path: Path,
+        mode: int,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path == state_directory and threading.current_thread().name == "creator":
+            creator_is_normalizing.set()
+            assert release_creator.wait(timeout=5)
+        original_chmod(path, mode, *args, **kwargs)
+
+    def observed_stat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        metadata = original_stat(path, *args, **kwargs)
+        if (
+            path == state_directory
+            and threading.current_thread().name == "contender"
+            and stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            contender_inspected_restricted_directory.set()
+        return metadata
+
+    def run(name: str) -> None:
+        results[name] = cli._cmd_run(
+            SimpleNamespace(config=str(config_path), scheduled=True)
+        )
+
+    monkeypatch.setattr(Path, "chmod", delayed_creator_chmod)
+    monkeypatch.setattr(Path, "stat", observed_stat)
+    previous_umask = os.umask(0o777)
+    try:
+        creator = threading.Thread(target=run, args=("creator",), name="creator")
+        creator.start()
+        assert creator_is_normalizing.wait(timeout=5)
+        contender = threading.Thread(target=run, args=("contender",), name="contender")
+        contender.start()
+        assert contender_inspected_restricted_directory.wait(timeout=5)
+        release_creator.set()
+        creator.join(timeout=5)
+        contender.join(timeout=5)
+    finally:
+        release_creator.set()
+        os.umask(previous_umask)
+
+    assert not creator.is_alive()
+    assert not contender.is_alive()
+    assert results == {"creator": 0, "contender": 0}
+    assert _mode(state_directory) == 0o700
+    assert run_once.call_count == 2
 
 
 def test_run_reports_the_safe_manual_overlap_error(

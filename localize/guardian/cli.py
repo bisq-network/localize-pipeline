@@ -35,7 +35,10 @@ from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
 )
-from localize.guardian.filesystem_trust import is_trusted_directory
+from localize.guardian.filesystem_trust import (
+    create_or_wait_for_private_directory,
+    is_trusted_directory,
+)
 from localize.guardian.github import (
     GitHubReader,
     GitHubRepositoryIdentity,
@@ -291,29 +294,11 @@ def _owned_by_current_user(metadata: os.stat_result) -> bool:
 def _ensure_private_directory(path: Path) -> None:
     if path.is_symlink():
         raise GuardianCLIError(f"Refusing symlinked Guardian directory: {path}")
-    created = False
     try:
-        path.mkdir(parents=True, mode=0o700)
-        created = True
-    except FileExistsError:
-        # A concurrent first run may have created the same private boundary.
-        pass
+        metadata = create_or_wait_for_private_directory(path, parents=True)
     except OSError as exc:
         raise GuardianCLIError(
             f"Could not create private Guardian directory: {path}"
-        ) from exc
-    if created:
-        try:
-            path.chmod(0o700)
-        except OSError as exc:
-            raise GuardianCLIError(
-                f"Could not secure private Guardian directory: {path}"
-            ) from exc
-    try:
-        metadata = path.stat(follow_symlinks=False)
-    except OSError as exc:
-        raise GuardianCLIError(
-            f"Could not inspect private Guardian directory: {path}"
         ) from exc
     if not stat.S_ISDIR(metadata.st_mode):
         raise GuardianCLIError(f"Guardian runtime path is not a directory: {path}")

@@ -24,6 +24,8 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   assessment cache identity so policy changes cannot reuse stale assessments.
 - Serialize scheduled and manual Guardian invocations with one private
   non-blocking process lock per config, preventing overlapping polls.
+- Make concurrent first-run state initialization tolerate a restrictive umask
+  through a bounded handoff without repairing pre-existing directories.
 - Make Java-properties escape linting pair-aware so a valid doubled backslash
   cannot be misreported as an unknown escape sequence.
 - Adopt SPDX package-license metadata before setuptools removes the deprecated
