@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read(relative_path: str) -> str:
+    """Read one repository file as UTF-8 text."""
     return (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
 
 
@@ -27,6 +28,7 @@ def _markdown_section(document: str, heading: str) -> str:
 
 
 def test_environment_reference_tracks_the_runtime_pr_batch_default():
+    """Keep the documented PR batch default equal to the shell default."""
     script = _read("update-translations.sh")
     reference = _read("docs/environment-variables.md")
 
@@ -45,11 +47,31 @@ def test_environment_reference_tracks_the_runtime_pr_batch_default():
 
 
 def test_server_guide_describes_compose_keys_as_runtime_secrets():
+    """Pin the documented and deployed Compose runtime-secret contract."""
     guide = _read("docs/new-project-deployment.md")
     compose = yaml.safe_load(_read("docker/docker-compose.yml"))
     translator = compose["services"]["translator"]
 
-    assert translator.get("secrets")
+    assert translator["secrets"] == [
+        {
+            "source": "gpg_bot_key",
+            "target": "gpg_bot_key",
+            "mode": 0o400,
+        },
+        {
+            "source": "deploy_key",
+            "target": "deploy_key",
+            "mode": 0o400,
+        },
+    ]
+    assert compose["secrets"] == {
+        "gpg_bot_key": {
+            "file": "${GPG_BOT_KEY_FILE:-../secrets/gpg_bot_key/bot_secret_key.asc}"
+        },
+        "deploy_key": {
+            "file": "${DEPLOY_KEY_FILE:-../secrets/deploy_key/id_ed25519}"
+        },
+    }
     assert "secrets" not in translator.get("build", {})
     assert "runtime secret" in guide.lower()
     assert "build secret" not in guide.lower()
@@ -57,6 +79,7 @@ def test_server_guide_describes_compose_keys_as_runtime_secrets():
 
 
 def test_server_guide_smokes_the_cli_without_running_the_repository_entrypoint():
+    """Require the server smoke check to bypass the production entrypoint."""
     guide = _read("docs/new-project-deployment.md")
 
     assert "--no-deps --entrypoint python3.11 translator" in guide
@@ -65,6 +88,7 @@ def test_server_guide_smokes_the_cli_without_running_the_repository_entrypoint()
 
 
 def test_local_docker_guide_uses_the_root_safe_compose_command_and_runtime_keys():
+    """Keep local commands rooted correctly and runtime-secret-aware."""
     guide = _read("docs/how-to-run-locally.md")
     canonical_compose_prefix = (
         "docker compose --env-file docker/.env -f docker/docker-compose.yml"
@@ -77,6 +101,7 @@ def test_local_docker_guide_uses_the_root_safe_compose_command_and_runtime_keys(
 
 
 def test_cron_template_uses_the_same_explicit_root_compose_command():
+    """Keep the cron template aligned with the root-level Compose command."""
     cron = _read("docker/translator-cron")
     canonical_run = (
         "/usr/bin/docker compose --env-file docker/.env "
@@ -89,6 +114,7 @@ def test_cron_template_uses_the_same_explicit_root_compose_command():
 
 
 def test_profile_edits_do_not_require_an_image_rebuild():
+    """Document that bind-mounted profile edits take effect without a rebuild."""
     guide = _read("docs/new-project-deployment.md")
     checks = _markdown_section(guide, "## Operational Checks")
     rebuild_bullet = next(
@@ -100,6 +126,7 @@ def test_profile_edits_do_not_require_an_image_rebuild():
 
 
 def test_security_strategy_matches_host_cron_and_runtime_secret_boundaries():
+    """Keep the security guide aligned with the deployed runtime boundaries."""
     strategy = _read("SECURITY_STRATEGY.md")
     server = _markdown_section(strategy, "## 1. Server Deployment Security")
     local = _markdown_section(strategy, "## 2. Local Development Security")

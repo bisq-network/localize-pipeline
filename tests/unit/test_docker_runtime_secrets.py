@@ -16,18 +16,22 @@ BUILD_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "build-verify.yml"
 
 
 def _dockerfile() -> str:
+    """Read the production Dockerfile."""
     return DOCKERFILE.read_text(encoding="utf-8")
 
 
 def _compose() -> dict:
+    """Load the production Compose model."""
     return yaml.safe_load(COMPOSE_FILE.read_text(encoding="utf-8"))
 
 
 def _entrypoint() -> str:
+    """Read the production container entrypoint."""
     return ENTRYPOINT.read_text(encoding="utf-8")
 
 
 def test_dockerfile_does_not_handle_private_keys_at_build_time():
+    """Prevent private-key operations from returning to image builds."""
     dockerfile = _dockerfile()
 
     assert "id=gpg_bot_key" not in dockerfile
@@ -39,6 +43,7 @@ def test_dockerfile_does_not_handle_private_keys_at_build_time():
 
 
 def test_compose_mounts_private_keys_only_as_runtime_secrets():
+    """Require exact read-only runtime key mounts and host sources."""
     compose = _compose()
     translator = compose["services"]["translator"]
     build = translator.get("build", {})
@@ -74,6 +79,7 @@ def test_compose_mounts_private_keys_only_as_runtime_secrets():
 
 
 def test_project_profiles_stay_out_of_the_image_and_mount_read_only_at_runtime():
+    """Keep project profiles out of layers and bind-mount them read-only."""
     ignore_patterns = {
         line.strip()
         for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
@@ -101,6 +107,7 @@ def test_project_profiles_stay_out_of_the_image_and_mount_read_only_at_runtime()
 
 
 def test_ci_image_build_does_not_stage_runtime_credentials():
+    """Prevent CI from staging dummy credentials into the build context."""
     workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
 
     assert "Create dummy secret files" not in workflow
@@ -112,6 +119,7 @@ def test_ci_image_build_does_not_stage_runtime_credentials():
 
 
 def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
+    """Require entrypoint installation of runtime SSH and GPG secrets."""
     entrypoint = _entrypoint()
 
     assert 'DEPLOY_KEY_PATH:-/run/secrets/deploy_key' in entrypoint
@@ -132,6 +140,7 @@ def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
 
 
 def test_entrypoint_reuses_runtime_secrets_after_privilege_drop():
+    """Require the unprivileged re-entry path to reuse installed secrets."""
     entrypoint = _entrypoint()
 
     assert 'if [ -s "$user_home/.ssh/deploy_key" ]; then' in entrypoint

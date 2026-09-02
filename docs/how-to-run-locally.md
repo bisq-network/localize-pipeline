@@ -35,5 +35,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml build
 docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator
 ```
 
-`-T` prevents Compose from consuming terminal input in scripts. No local
-Compose override or SSH agent forwarding is required.
+`-T` disables pseudo-TTY allocation. `docker compose run` still keeps standard
+input open by default; add `--interactive=false` when a script must not pass
+input to the container. No local Compose override or SSH agent forwarding is
+required.
