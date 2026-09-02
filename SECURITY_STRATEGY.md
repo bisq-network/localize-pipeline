@@ -6,7 +6,7 @@ This document outlines the security strategy for the automated translation servi
 
 1.  **Least Privilege**: Components (API tokens, SSH keys) are granted only the permissions necessary for their function.
 2.  **Dedicated Credentials**: The service uses dedicated credentials (SSH deploy keys, GPG keys) to limit the blast radius of a compromise.
-3.  **Secure by Default**: The default configuration for server deployment is secure, and local development overrides use secure methods like SSH agent forwarding.
+3.  **Secure by Default**: Server and local Docker runs use the same explicit runtime-secret mounts and pinned SSH host keys.
 4.  **No Secrets in Git**: All sensitive information is stored outside of the Git repository. The project's `.gitignore` file is configured to ignore the `docker/.env` and root `/.env` files, preventing accidental commits of secrets.
 
 ## 1. Server Deployment Security
@@ -15,19 +15,18 @@ This model is for the automated, scheduled execution of the service on a product
 
 ### Credential Management
 
-*   **Secrets File (`docker/.env`)**: All secrets—`OPENAI_API_KEY`, `TX_TOKEN`, `GITHUB_TOKEN`, and Git configuration—are stored in a single `docker/.env` file on the host. This file **must**:
+*   **Environment File (`docker/.env`)**: Token credentials (`OPENAI_API_KEY`, `TX_TOKEN`, and `GITHUB_TOKEN`) plus non-secret runtime and Git identity settings are stored in `docker/.env` on the host. Private deploy and signing keys remain separate host files. The environment file **must**:
     *   Be protected with strict file permissions (`chmod 600 docker/.env`).
     *   **NEVER** be committed to Git (it is listed in `.gitignore`).
 *   **SSH Deploy Key**: A dedicated, **passphrase-less** SSH key pair is used for the service.
-    *   The private key resides on the host server (e.g., in `~/.ssh/translator_deploy_key`).
+    *   The private key resides in a permission-restricted host file selected by `DEPLOY_KEY_FILE` (default: `secrets/deploy_key/id_ed25519`).
     *   The public key is configured as a **Deploy Key** with **write access** on the bot's **forked** GitHub repository. This key is used exclusively for pushing translated commits.
-*   **GPG Private Key**: The bot's GPG private key is stored on the host at `secrets/gpg_bot_key/bot_secret_key.asc` and protected with strict file permissions. It is imported into the container's GPG keyring at runtime by the entrypoint script.
+*   **GPG Private Key**: The bot's GPG private key is stored in the permission-restricted host file selected by `GPG_BOT_KEY_FILE` (default: `secrets/gpg_bot_key/bot_secret_key.asc`). It is imported into the container's GPG keyring at runtime by the entrypoint script.
 
 ### Docker Image and Container Security
 
-*   **Runtime Secrets**: API tokens and other secrets from `docker/.env` are injected into the container as environment variables at runtime.
-    *   For interactive sessions, these are available directly.
-    *   For automated `cron` jobs, the entrypoint script writes these variables to `/etc/environment` and sets permissions to `600` (`-rw-------`). This is necessary because the `cron` daemon does not inherit the runtime environment, and this file is the standard, secure mechanism for providing it.
+*   **Runtime Secrets**: API tokens from `docker/.env` are injected when Compose creates the container. Compose separately mounts the deploy and GPG key files read-only under `/run/secrets/`; the entrypoint consumes those files only after the container starts. None of these credentials is a Docker build input.
+    *   The scheduled job is a host-level cron entry that starts a new `docker compose run` process. There is no cron daemon or persistent environment file inside the container.
 *   **Privilege Dropping**: The container starts as `root` to perform initial setup (like cloning the repo and setting permissions) and then drops privileges to a non-root `appuser` to execute the main translation script.
 *   **No Persistent Container**: The service runs as a transient container via `docker compose run`, which is triggered by a host-level cron job. The container is created for the job and destroyed upon completion, minimizing its attack surface.
 
@@ -35,8 +34,7 @@ This model is for the automated, scheduled execution of the service on a product
 
 This model is for developers running the service on their local machines.
 
-*   **SSH Agent Forwarding**: The `docker-compose.override.yml` file (used only for local runs and gitignored) configures the container to use SSH Agent Forwarding.
-    *   **Benefit**: This is highly secure. Your local, passphrase-protected SSH private key **never leaves your host machine**. The container is only given access to the agent's socket, allowing it to perform Git operations without ever handling the key directly.
+*   **Runtime Key Mounts**: Local Docker runs use the same Compose runtime secrets as server runs. The deploy and signing keys remain host files, are mounted read-only under `/run/secrets/`, and are consumed by the entrypoint for the transient container. No ignored Compose override or SSH agent forwarding is part of the supported path.
 *   **Local `.env` File**: Local runs can use a local `docker/.env` file for API keys, which is also gitignored.
 
 ## Key Revocation Plan
@@ -46,7 +44,7 @@ Rapid revocation is critical if a credential is compromised.
 1.  **SSH Deploy Key Compromise**:
     1.  Immediately revoke the Deploy Key from the fork's settings on GitHub.
     2.  Delete the compromised SSH key pair from the server.
-    3.  Generate a new SSH key pair, add the new public key as a Deploy Key, and update the server's SSH config.
+    3.  Generate a new SSH key pair, add the new public key as a Deploy Key, and replace the host file selected by `DEPLOY_KEY_FILE`.
 
 2.  **GPG Signing Key Compromise**:
     1.  Remove the compromised GPG public key from the committer's GitHub account.

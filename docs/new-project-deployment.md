@@ -121,7 +121,8 @@ Never commit `docker/.env` or files under `secrets/`.
 
 ## 4. Add Deploy And Signing Keys
 
-For the Docker production image, place secrets in the expected paths:
+For the Compose deployment, place the runtime secret sources in the expected
+host paths:
 
 ```bash
 mkdir -p secrets/deploy_key secrets/gpg_bot_key
@@ -132,22 +133,30 @@ install -m 600 /path/to/bot_secret_key.asc secrets/gpg_bot_key/bot_secret_key.as
 Add the deploy key public half to the target fork with write access. Make sure
 the GPG key identity matches `GIT_AUTHOR_EMAIL`.
 
+Compose mounts these files read-only at `/run/secrets/deploy_key` and
+`/run/secrets/gpg_bot_key` when the container starts. The entrypoint then
+installs/imports them for the unprivileged runtime user. The private keys are
+not build inputs and are not stored in image layers.
+
 ## 5. Build
 
 ```bash
 docker compose --env-file docker/.env -f docker/docker-compose.yml build
 ```
 
-BuildKit mounts the deploy and GPG keys as build secrets. They are used during
-the build and are not copied into image layers.
+The image build does not read the deploy key, signing key, or project profiles.
+Compose supplies the keys as runtime secrets and bind-mounts the selected
+profile's config and glossary read-only when `translator` runs.
 
 ## 6. Validate The Container
 
-Run a low-risk format/config check:
+Run a low-risk CLI and format-registry smoke check without invoking the
+repository-managing entrypoint:
 
 ```bash
-docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator \
-  python -m localize.cli formats
+docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm \
+  --no-deps --entrypoint python3.11 translator \
+  -m localize.cli formats
 ```
 
 Then run the full pipeline manually:
@@ -201,8 +210,9 @@ More detail: [docs/maintenance/disk-space-management.md](maintenance/disk-space-
 ## Operational Checks
 
 - `git status` in the pipeline repo should be clean before deploys.
-- Rebuild after changes to `localize/`, `requirements.txt`, Docker files, or
-  profile files.
+- Rebuild after changes to `localize/`, `requirements.txt`, or Docker files.
+- Profile config and glossary changes are bind-mounted and take effect on the
+  next container run without rebuilding the image.
 - Run a manual `docker compose ... run -T --rm translator` after rebuilds.
 - Keep deploy keys and tokens scoped to the target repository.
 - Rotate keys periodically.
