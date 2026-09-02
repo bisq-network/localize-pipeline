@@ -115,7 +115,7 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "ARG GOSU_VERSION=1.19" in dockerfile
     assert "ARG GOSU_COMMIT=6456aaa0f3c854d199d0f037f068eb97515b7513" in dockerfile
     assert "ARG X_SYS_VERSION=0.46.0" in dockerfile
-    assert "ARG GRPC_VERSION=1.82.1" in dockerfile
+    assert "ARG GRPC_VERSION=1.83.1" in dockerfile
     assert "ARG X_MOD_VERSION=0.40.0" in dockerfile
     assert "ARG GO_GIT_VERSION=5.19.2" in dockerfile
     assert "ARG X_CRYPTO_VERSION=0.55.0" in dockerfile
