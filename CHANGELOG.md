@@ -7,6 +7,12 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+### Fixed
+
+- Build GitHub CLI 2.96.0 with gRPC-Go 1.83.1 so image audits reject
+  CVE-2026-84304, the HIGH advisory the pinned gRPC-Go 1.82.1 bundled into the
+  `gh` binary.
+
 ## [0.1.18] - 2026-09-01
 
 ### Added
