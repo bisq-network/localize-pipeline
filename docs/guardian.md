@@ -201,7 +201,8 @@ Prerequisites:
 - Python 3.11 or later and the `localize` package;
 - Codex CLI plus either a ChatGPT-plan login (the default) or an explicitly
   selected API credential;
-- Git and an explicit GPG signing-key ID for every Guardian write mode;
+- Git and an explicit OpenPGP or agent-backed SSH signing identity for every
+  Guardian write mode;
 - a narrowly scoped GitHub credential available from an OS secret store;
 - a persistent local directory for state and logs.
 
@@ -279,6 +280,54 @@ outside monitored repositories, owned by the operator, and executable only by
 that user. Do not put a token literal in a helper, environment file, or
 scheduler argument.
 
+### Commit signing
+
+OpenPGP is the backward-compatible default. Keep `signing_format: openpgp`, set
+`signing_program` to the trusted GPG executable, and set `signing_key` to the
+full 40- or 64-hex fingerprint (optionally suffixed by `!` for an exact GPG key
+selector). Existing OpenPGP installations need no migration.
+
+Agent-backed Git SSH signing is an opt-in alternative:
+
+```yaml
+runtime:
+  signing_format: ssh
+  signing_program: /usr/bin/ssh-keygen
+  signing_key: SHA256:REPLACE_WITH_EXACT_PUBLIC_KEY_FINGERPRINT
+  signing_public_key: /absolute/path/to/guardian-signing-key.pub
+```
+
+`signing_key` is the exact unpadded SHA-256 fingerprint printed by
+`ssh-keygen -l -E sha256 -f <public-key>`. The public-key file must contain
+exactly one supported key. It must be an absolute, non-symlink regular file,
+owned by the operator or root, not writable by group or other users, and have
+one link. Its ancestors must also be trusted. DSA, malformed or multiple keys,
+RSA keys below 3072 bits, and a fingerprint mismatch fail closed.
+
+The Guardian never reads or stores an SSH private key. Before external poll
+work it copies the validated public key into a private bounded snapshot and
+derives a one-key `allowed-signers` file. Git selects that frozen public key and
+asks the existing `ssh-agent` for the matching private operation. The validated
+agent endpoint must have a private `0700` parent. If a higher macOS system
+directory is root-owned but group-writable, Guardian hard-links the exact socket
+inode into the private signing snapshot and verifies both names before use;
+ordinary mutable ancestors still fail closed. `SSH_AUTH_SOCK` is passed only to
+the `git commit` subprocess—not to Codex,
+credential helpers, repository fetch/push, signature verification, or focused
+tests. The resulting commit is verified against the one-key trust file both
+after creation and immediately before publication.
+
+An existing GitHub SSH signing key can therefore be reused when its private
+half is already available through the operator's agent; only its public half
+and exact fingerprint enter config. Register the public key as a GitHub signing
+key as usual. On macOS, Keychain can remember the private key, but it must also
+be available to the launchd-visible agent (for example via
+`ssh-add --apple-use-keychain`). Do not place a private-key path, private key,
+or a literal agent-socket path in Guardian YAML or a launchd property list.
+Run `guardian doctor` from the same user/session used by the scheduled job; its
+real sign-and-verify probe catches an unavailable agent or key before writes
+are enabled.
+
 Interactive runs may resolve tools from the operator's `PATH`. Before staging a
 LaunchAgent, set `runtime.codex_executable`, `runtime.git_executable`,
 `runtime.github_token_command[0]`, and—only in API-key mode—
@@ -323,10 +372,12 @@ GitHub identity, repository visibility, signing setup, and built-in adapters
 registered in the isolated Guardian process. Target-project adapter
 compatibility is checked later from the exact base checkout during a run.
 For `apply-owned-translations` and `propose-prevention`, set
-`runtime.signing_key` explicitly. The doctor creates an ephemeral local commit
-and proves that exact key can sign and verify with global and system Git config
-disabled—the same isolation boundary used for Guardian commits. A global
-`user.signingkey` is deliberately not accepted.
+`runtime.signing_key` explicitly (and `runtime.signing_public_key` for SSH).
+The doctor creates an ephemeral local commit and proves that exact key can sign
+and verify with global and system Git config disabled—the same isolation
+boundary used for Guardian commits. For SSH it also uses the private one-key
+allowed-signers snapshot and withholds the agent socket from verification. A
+global `user.signingkey` is deliberately not accepted.
 `run` performs one finite poll. `status` shows the last completed feedback run,
 component health, pending feedback revisions, actions, and current UTC daily
 model calls (completed plus active or unknown reservations) without printing raw

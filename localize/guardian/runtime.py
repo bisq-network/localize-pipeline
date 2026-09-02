@@ -63,6 +63,7 @@ from localize.guardian.models import (
     PipelineConfigSource,
     PreventionPolicy,
     RepositoryPolicy,
+    SigningFormat,
 )
 from localize.guardian.prevention_runtime import (
     PreventionCodexAuthor,
@@ -71,7 +72,13 @@ from localize.guardian.prevention_runtime import (
     SandboxedTestRunner,
 )
 from localize.guardian.scheduler import is_run_due
-from localize.guardian.signing import canonical_signing_key
+from localize.guardian.signing import (
+    SSHSigningMaterial,
+    SigningError,
+    canonical_signing_key,
+    canonical_ssh_fingerprint,
+    snapshot_ssh_signing_material,
+)
 from localize.guardian.state import GuardianState, _validate_sqlite_state_artifacts
 from localize.guardian.workspace import ExactRevision, materialize_exact_checkout
 
@@ -790,6 +797,19 @@ def _validate_scheduled_executables(config: GuardianConfig) -> None:
 def _validate_runtime_authority(config: GuardianConfig, *, scheduled: bool) -> None:
     if config.runtime.codex_auth_mode is CodexAuthMode.CHATGPT:
         _validate_subscription_codex_home(config)
+    if (
+        config.mode in _WRITE_MODES
+        and config.runtime.signing_format is SigningFormat.SSH
+    ):
+        try:
+            require_absolute_trusted_executable(
+                (config.runtime.signing_program,),
+                field="runtime.signing_program",
+            )
+        except ExecutableTrustError:
+            raise GuardianRuntimeError(
+                "Guardian SSH signing authority is unavailable or unsafe."
+            ) from None
     if scheduled:
         _validate_scheduled_executables(config)
 
@@ -866,10 +886,46 @@ def _require_explicit_write_signing_key(config: GuardianConfig) -> None:
     if config.mode not in _WRITE_MODES:
         return
     try:
-        canonical_signing_key(key)  # type: ignore[arg-type]
+        if config.runtime.signing_format is SigningFormat.SSH:
+            canonical_ssh_fingerprint(key)  # type: ignore[arg-type]
+            public_key = config.runtime.signing_public_key
+            if public_key is None or not Path(public_key).is_absolute():
+                raise ValueError
+        else:
+            canonical_signing_key(key)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         raise GuardianRuntimeError(
-            "Guardian write modes require an explicit full signing key fingerprint."
+            "Guardian write modes require an explicit exact signing key fingerprint."
+        ) from None
+
+
+@contextmanager
+def _snapshot_poll_signing_material(
+    *,
+    config: GuardianConfig,
+    state_directory: Path,
+) -> Iterator[SSHSigningMaterial | None]:
+    """Freeze an SSH public identity before any external write-mode work."""
+
+    if (
+        config.mode not in _WRITE_MODES
+        or config.runtime.signing_format is not SigningFormat.SSH
+    ):
+        yield None
+        return
+    try:
+        assert config.runtime.signing_public_key is not None
+        assert config.runtime.signing_key is not None
+        with snapshot_ssh_signing_material(
+            public_key_path=config.runtime.signing_public_key,
+            expected_fingerprint=config.runtime.signing_key,
+            signing_program=config.runtime.signing_program,
+            temporary_root=state_directory,
+        ) as material:
+            yield material
+    except SigningError:
+        raise GuardianRuntimeError(
+            "Guardian SSH signing identity is unavailable or unsafe."
         ) from None
 
 
@@ -881,6 +937,7 @@ def _build_controller(
     github_credential: SecretCommand,
     model_credential: SecretCommand | None,
     git_environment: Any,
+    ssh_signing_material: SSHSigningMaterial | None = None,
     operator_pipeline_configs: Mapping[str, PipelineConfigSnapshot] | None = None,
 ) -> GuardianController:
     """Assemble trusted production adapters without invoking a credential yet."""
@@ -903,13 +960,25 @@ def _build_controller(
     )
 
     def checkout_factory(revision: ExactRevision):
-        return materialize_exact_checkout(
-            revision,
-            credential_environment=git_environment,
-            git_binary=config.runtime.git_executable,
-            signing_program=config.runtime.signing_program,
-            timeout_seconds=attempt_timeout,
-        )
+        checkout_kwargs: dict[str, Any] = {
+            "credential_environment": git_environment,
+            "git_binary": config.runtime.git_executable,
+            "signing_program": config.runtime.signing_program,
+            "timeout_seconds": attempt_timeout,
+        }
+        if config.runtime.signing_format is SigningFormat.SSH:
+            if ssh_signing_material is None:
+                if config.mode in _WRITE_MODES:
+                    raise GuardianRuntimeError(
+                        "Guardian SSH signing identity is unavailable or unsafe."
+                    )
+                checkout_kwargs["signing_program"] = None
+            else:
+                checkout_kwargs.update(
+                    signing_format=SigningFormat.SSH,
+                    ssh_signing_material=ssh_signing_material,
+                )
+        return materialize_exact_checkout(revision, **checkout_kwargs)
 
     def model_credential_provider() -> str | None:
         if config.runtime.codex_auth_mode is CodexAuthMode.CHATGPT:
@@ -1121,7 +1190,10 @@ def _poll_with_locked_state(
                 if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY
                 else None
             )
-            with _snapshot_operator_pipeline_configs(
+            with _snapshot_poll_signing_material(
+                config=config,
+                state_directory=state_directory,
+            ) as ssh_signing_material, _snapshot_operator_pipeline_configs(
                 config=config,
                 guardian_config_path=resolved_config,
                 state_directory=state_directory,
@@ -1148,6 +1220,7 @@ def _poll_with_locked_state(
                         github_credential=github_credential,
                         model_credential=model_credential,
                         git_environment=git_environment,
+                        ssh_signing_material=ssh_signing_material,
                         operator_pipeline_configs=operator_pipeline_configs,
                     )
                     try:

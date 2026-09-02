@@ -22,9 +22,13 @@ from localize.guardian.models import (
     PipelineConfigSource,
     PreventionPolicy,
     RepositoryPolicy,
+    SigningFormat,
     TrustedActor,
 )
-from localize.guardian.signing import canonical_signing_key
+from localize.guardian.signing import (
+    canonical_signing_key,
+    canonical_ssh_fingerprint,
+)
 
 
 class GuardianConfigError(ValueError):
@@ -146,6 +150,9 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                 "codex_executable": _NON_EMPTY_STRING,
                 "git_executable": _NON_EMPTY_STRING,
                 "signing_program": _NON_EMPTY_STRING,
+                "signing_format": {
+                    "enum": [signing_format.value for signing_format in SigningFormat]
+                },
                 "github_token_command": {
                     "type": "array",
                     "minItems": 1,
@@ -159,6 +166,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                     "items": _NON_EMPTY_STRING,
                 },
                 "signing_key": _NON_EMPTY_STRING,
+                "signing_public_key": _NON_EMPTY_STRING,
             },
         },
         "limits": {
@@ -809,12 +817,16 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
     auth_mode = CodexAuthMode(
         raw_runtime.get("codex_auth_mode", runtime_defaults.codex_auth_mode.value)
     )
+    signing_format = SigningFormat(
+        raw_runtime.get("signing_format", runtime_defaults.signing_format.value)
+    )
     for field in (
         "codex_model",
         "codex_executable",
         "git_executable",
         "signing_program",
         "signing_key",
+        "signing_public_key",
     ):
         value = raw_runtime.get(field)
         if value is not None:
@@ -824,9 +836,50 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
     raw_signing_key = raw_runtime.get("signing_key")
     if raw_signing_key is not None:
         try:
-            raw_signing_key = canonical_signing_key(raw_signing_key)
+            if signing_format is SigningFormat.SSH:
+                raw_signing_key = canonical_ssh_fingerprint(raw_signing_key)
+            else:
+                raw_signing_key = canonical_signing_key(raw_signing_key)
         except ValueError as exc:
             raise GuardianConfigError(f"runtime.signing_key {exc}") from None
+    raw_signing_public_key = raw_runtime.get("signing_public_key")
+    if signing_format is SigningFormat.SSH:
+        if raw_signing_key is None:
+            raise GuardianConfigError(
+                "runtime.signing_key is required with runtime.signing_format: ssh."
+            )
+        if raw_signing_public_key is None:
+            raise GuardianConfigError(
+                "runtime.signing_public_key is required with "
+                "runtime.signing_format: ssh."
+            )
+        public_key_path = PurePosixPath(raw_signing_public_key)
+        if (
+            not public_key_path.is_absolute()
+            or ".." in public_key_path.parts
+            or any(character in raw_signing_public_key for character in "*?[]\\")
+        ):
+            raise GuardianConfigError(
+                "runtime.signing_public_key must be an absolute POSIX file path."
+            )
+        if "signing_program" not in raw_runtime:
+            raise GuardianConfigError(
+                "runtime.signing_program is required with runtime.signing_format: ssh."
+            )
+        signing_program_path = PurePosixPath(raw_runtime["signing_program"])
+        if (
+            not signing_program_path.is_absolute()
+            or ".." in signing_program_path.parts
+        ):
+            raise GuardianConfigError(
+                "runtime.signing_program must be an absolute POSIX executable path "
+                "with runtime.signing_format: ssh."
+            )
+    elif raw_signing_public_key is not None:
+        raise GuardianConfigError(
+            "runtime.signing_public_key is only valid with "
+            "runtime.signing_format: ssh."
+        )
     codex_api_key_command = _runtime_command(
         raw_runtime,
         "codex_api_key_command",
@@ -875,6 +928,8 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
         ),
         codex_api_key_command=codex_api_key_command,
         signing_key=raw_signing_key,
+        signing_format=signing_format,
+        signing_public_key=raw_signing_public_key,
     )
 
     raw_limits = raw_config.get("limits", {})

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -33,8 +34,10 @@ from localize.guardian.models import (
     PreventionPolicy,
     PipelineConfigSnapshot,
     RepositoryPolicy,
+    SigningFormat,
     TrustedActor,
 )
+from localize.guardian.signing import SSHSigningMaterial, SigningError
 from localize.guardian.state import GuardianState
 from localize.guardian.workspace import ExactRevision
 from localize.guardian import runtime
@@ -42,6 +45,7 @@ from localize.guardian import runtime
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+_REAL_VALIDATE_RUNTIME_AUTHORITY = runtime._validate_runtime_authority
 
 
 @pytest.fixture(autouse=True)
@@ -240,6 +244,95 @@ def test_scheduled_signing_program_is_required_only_for_write_modes(
         runtime._validate_scheduled_executables(write_config)
 
 
+def test_manual_ssh_write_requires_a_trusted_absolute_signing_program(
+    tmp_path: Path,
+) -> None:
+    signing_program = shutil.which("ssh-keygen")
+    if signing_program is None:
+        pytest.skip("OpenSSH ssh-keygen is unavailable")
+    ssh_runtime = replace(
+        _config().runtime,
+        signing_format=SigningFormat.SSH,
+        signing_program=str(Path(signing_program).resolve()),
+        signing_key="SHA256:" + "A" * 43,
+        signing_public_key="/keys/guardian.pub",
+    )
+    config = replace(
+        _config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+        runtime=ssh_runtime,
+    )
+
+    _REAL_VALIDATE_RUNTIME_AUTHORITY(config, scheduled=False)
+
+    unsafe_program = tmp_path / "ssh-keygen"
+    unsafe_program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    unsafe_program.chmod(0o722)
+    config = replace(
+        config,
+        runtime=replace(ssh_runtime, signing_program=str(unsafe_program)),
+    )
+    with pytest.raises(runtime.GuardianRuntimeError, match="SSH signing authority"):
+        _REAL_VALIDATE_RUNTIME_AUTHORITY(config, scheduled=False)
+
+
+def test_ssh_signing_snapshot_is_exact_private_and_redacts_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprint = "SHA256:" + "A" * 43
+    public_key_path = "/keys/guardian.pub"
+    material = SSHSigningMaterial(
+        root=tmp_path,
+        public_key=tmp_path / "signing-key.pub",
+        allowed_signers=tmp_path / "allowed-signers",
+        fingerprint=fingerprint,
+    )
+    config = replace(
+        _config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+        runtime=replace(
+            _config().runtime,
+            signing_format=SigningFormat.SSH,
+            signing_program="/usr/bin/ssh-keygen",
+            signing_key=fingerprint,
+            signing_public_key=public_key_path,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    @contextmanager
+    def fake_snapshot(**kwargs: object) -> Iterator[SSHSigningMaterial]:
+        captured.update(kwargs)
+        yield material
+
+    monkeypatch.setattr(runtime, "snapshot_ssh_signing_material", fake_snapshot)
+    with runtime._snapshot_poll_signing_material(
+        config=config,
+        state_directory=tmp_path,
+    ) as selected:
+        assert selected is material
+    assert captured == {
+        "public_key_path": public_key_path,
+        "expected_fingerprint": fingerprint,
+        "signing_program": "/usr/bin/ssh-keygen",
+        "temporary_root": tmp_path,
+    }
+
+    @contextmanager
+    def failing_snapshot(**_kwargs: object) -> Iterator[SSHSigningMaterial]:
+        raise SigningError("secret path and agent diagnostic")
+        yield material
+
+    monkeypatch.setattr(runtime, "snapshot_ssh_signing_material", failing_snapshot)
+    with pytest.raises(runtime.GuardianRuntimeError, match="unavailable") as failure:
+        with runtime._snapshot_poll_signing_material(
+            config=config,
+            state_directory=tmp_path,
+        ):
+            pytest.fail("unsafe signing material must not be yielded")
+    assert "secret" not in str(failure.value)
+    assert failure.value.__cause__ is None
+
+
 class _Credential:
     def __init__(self, secret: str) -> None:
         self.secret = secret
@@ -398,6 +491,78 @@ def test_build_controller_wires_exact_runtime_policy_and_credentials(
         "credential_environment": git_environment,
         "git_binary": "/opt/bin/git",
         "signing_program": "/opt/bin/gpg",
+        "timeout_seconds": 120.0,
+    }
+
+
+def test_build_controller_wires_exact_ssh_snapshot_into_every_write_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprint = "SHA256:" + "A" * 43
+    config = replace(
+        _config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+        runtime=replace(
+            _config().runtime,
+            signing_format=SigningFormat.SSH,
+            signing_program="/usr/bin/ssh-keygen",
+            signing_key=fingerprint,
+            signing_public_key="/keys/guardian.pub",
+        ),
+    )
+    material = SSHSigningMaterial(
+        root=tmp_path,
+        public_key=tmp_path / "signing-key.pub",
+        allowed_signers=tmp_path / "allowed-signers",
+        fingerprint=fingerprint,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        runtime,
+        "CodexDriver",
+        lambda **_kwargs: SimpleNamespace(model="test"),
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "materialize_exact_checkout",
+        lambda revision, **kwargs: (
+            captured.update(revision=revision, checkout=kwargs) or object()
+        ),
+    )
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(
+            argv=config.runtime.github_token_command
+        ),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+        ssh_signing_material=material,
+    )
+    revision = ExactRevision(
+        host="github.com",
+        owner="acme",
+        repository="widgets",
+        ref="refs/heads/main",
+        sha="a" * 40,
+    )
+
+    controller["checkout_factory"](revision)
+
+    assert captured["revision"] is revision
+    assert captured["checkout"] == {
+        "credential_environment": controller["publish_credential_environment"],
+        "git_binary": "/opt/bin/git",
+        "signing_program": "/usr/bin/ssh-keygen",
+        "signing_format": SigningFormat.SSH,
+        "ssh_signing_material": material,
         "timeout_seconds": 120.0,
     }
 

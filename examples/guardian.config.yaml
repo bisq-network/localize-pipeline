@@ -13,8 +13,8 @@ schedule:
 
 # The scheduled assessment defaults are explicit here so model use and effort
 # remain an operator decision. Before enabling either write mode, configure an
-# exact GPG key ID; global Git user.signingkey is not visible inside Guardian's
-# isolated commit workspace.
+# exact signing identity; global Git user.signingkey is not visible inside
+# Guardian's isolated commit workspace. OpenPGP remains the default.
 runtime:
   codex_model: gpt-5.6-terra
   codex_reasoning_effort: high
@@ -32,7 +32,14 @@ runtime:
   # API billing is explicit opt-in. Change codex_auth_mode to api-key, set this
   # helper, and uncomment both USD limits below.
   # codex_api_key_command: [/absolute/path/to/model-key-helper]
+  # signing_format: openpgp
+  # signing_program: /absolute/path/to/gpg
   # signing_key: REPLACE_WITH_FULL_GPG_FINGERPRINT
+  # Agent-backed SSH alternative (all fields are required together):
+  # signing_format: ssh
+  # signing_program: /usr/bin/ssh-keygen
+  # signing_key: SHA256:REPLACE_WITH_EXACT_PUBLIC_KEY_FINGERPRINT
+  # signing_public_key: /absolute/path/to/guardian-signing-key.pub
 
 limits:
   run_timeout_seconds: 1800

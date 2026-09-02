@@ -33,6 +33,13 @@ class PipelineConfigSource(str, Enum):
     OPERATOR = "operator"
 
 
+class SigningFormat(str, Enum):
+    """Commit-signature format used by the trusted publication broker."""
+
+    OPENPGP = "openpgp"
+    SSH = "ssh"
+
+
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -92,6 +99,8 @@ class GuardianRuntime:
     github_token_command: tuple[str, ...] = ("gh", "auth", "token")
     codex_api_key_command: tuple[str, ...] = ()
     signing_key: str | None = None
+    signing_format: SigningFormat = SigningFormat.OPENPGP
+    signing_public_key: str | None = None
 
 
 @dataclass(frozen=True)

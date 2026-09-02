@@ -7,6 +7,32 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.19] - 2026-09-01
+
+### Added
+
+- Add opt-in, agent-backed SSH commit signing to Localize Guardian. SSH
+  identities are pinned by an exact SHA-256 public-key fingerprint and a
+  permission-checked single-key public file; OpenPGP remains the default.
+
+### Security
+
+- Snapshot SSH public signing material through a bounded non-following read,
+  derive a private one-key allowed-signers file, reject ambiguous or weak keys,
+  and reverify the exact signature both after commit creation and immediately
+  before publication.
+- Pin eligible macOS system-managed agent sockets to their exact inode inside
+  the private signing snapshot, then pass the validated `SSH_AUTH_SOCK` only to
+  the commit-signing subprocess. Model, credential-helper, fetch, push, test,
+  and verification subprocesses receive no SSH agent socket.
+- Make `guardian doctor` perform a real isolated SSH sign-and-verify probe and
+  reject an unavailable agent, substituted public identity, or untrusted
+  signing executable before a write-capable run.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.19`.
+
 ## [0.1.18] - 2026-09-01
 
 ### Added

@@ -233,7 +233,13 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     assert kwargs["limits"].require_linux_cgroup is True
     assert kwargs["env"]["CODEX_API_KEY"] == "explicit-model-key"
     assert "OPENAI_API_KEY" not in kwargs["env"]
-    for forbidden in ("GITHUB_TOKEN", "GH_TOKEN", "GIT_ASKPASS", "GNUPGHOME"):
+    for forbidden in (
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GIT_ASKPASS",
+        "GNUPGHOME",
+        "SSH_AUTH_SOCK",
+    ):
         assert forbidden not in kwargs["env"]
     assert result.usage == CodexUsage(input_tokens=12, output_tokens=3, cost_usd=0.02)
 
@@ -332,6 +338,7 @@ def test_sandboxed_runner_uses_identical_configured_argv_and_minimal_environment
     )
     monkeypatch.setenv("GITHUB_TOKEN", "forbidden")
     monkeypatch.setenv("OPENAI_API_KEY", "forbidden")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/private/forbidden-agent.sock")
     results = SandboxedTestRunner(timeout_seconds=23).run_pair(
         base_workspace=base,
         candidate_workspace=candidate,
@@ -368,6 +375,7 @@ def test_sandboxed_runner_uses_identical_configured_argv_and_minimal_environment
         assert kwargs["limits"].require_linux_cgroup is True
         assert "GITHUB_TOKEN" not in kwargs["env"]
         assert "OPENAI_API_KEY" not in kwargs["env"]
+        assert "SSH_AUTH_SOCK" not in kwargs["env"]
     assert [result.outcome for result in results] == [
         TestOutcome.FAILED,
         TestOutcome.PASSED,

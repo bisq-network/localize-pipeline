@@ -50,6 +50,7 @@ from localize.guardian.models import (
     GuardianMode,
     PipelineConfigSource,
     RepositoryPolicy,
+    SigningFormat,
 )
 from localize.guardian.prevention_runtime import (
     SandboxedTestRunner,
@@ -79,7 +80,15 @@ from localize.guardian.scheduler import (
     render_launchd_plist,
     render_launchd_runner,
 )
-from localize.guardian.signing import canonical_signing_key, signature_matches
+from localize.guardian.signing import (
+    SigningError,
+    canonical_signing_key,
+    canonical_ssh_fingerprint,
+    snapshot_ssh_signing_material,
+    ssh_agent_environment,
+    ssh_signature_matches,
+    signature_matches,
+)
 
 
 _STARTER_CONFIG = """# Generic, report-only Localize Guardian policy.
@@ -103,6 +112,9 @@ runtime:
   # executable names with absolute paths so launchd cannot resolve another binary.
   codex_executable: codex
   git_executable: git
+  # OpenPGP remains the backward-compatible default. For agent-backed SSH,
+  # replace these signing fields as documented in docs/guardian.md.
+  signing_format: openpgp
   signing_program: gpg
   github_token_command: [gh, auth, token]
   # API billing is opt-in: switch codex_auth_mode to api-key, configure this
@@ -110,6 +122,11 @@ runtime:
   # codex_api_key_command: [/usr/bin/security, find-generic-password, -w, -s, localize-guardian]
   # Required for write modes; global Git configuration is intentionally ignored.
   # signing_key: REPLACE_WITH_FULL_GPG_FINGERPRINT
+  # SSH alternative (all four fields are required together):
+  # signing_format: ssh
+  # signing_program: /usr/bin/ssh-keygen
+  # signing_key: SHA256:REPLACE_WITH_EXACT_PUBLIC_KEY_FINGERPRINT
+  # signing_public_key: /absolute/path/to/guardian-signing-key.pub
 
 limits:
   run_timeout_seconds: 1800
@@ -482,8 +499,22 @@ def _signing_key_configured(
     *,
     git_executable: str,
     signing_program: str,
+    signing_format: SigningFormat = SigningFormat.OPENPGP,
+    signing_public_key: str | None = None,
+    temporary_root: Path | None = None,
 ) -> bool:
     """Prove the exact configured key can sign in Guardian's isolated context."""
+
+    if signing_format is SigningFormat.SSH:
+        return _ssh_signing_key_configured(
+            configured_key,
+            signing_public_key=signing_public_key,
+            git_executable=git_executable,
+            signing_program=signing_program,
+            temporary_root=temporary_root,
+        )
+    if signing_format is not SigningFormat.OPENPGP or signing_public_key is not None:
+        return False
 
     try:
         configured_key = canonical_signing_key(configured_key)  # type: ignore[arg-type]
@@ -583,6 +614,143 @@ def _signing_key_configured(
     except (OSError, subprocess.SubprocessError, ProcessResourceError):
         return False
     return True
+
+
+def _ssh_signing_key_configured(
+    configured_key: str | None,
+    *,
+    signing_public_key: str | None,
+    git_executable: str,
+    signing_program: str,
+    temporary_root: Path | None,
+) -> bool:
+    """Actually sign and verify with one exact agent-backed SSH public key."""
+
+    try:
+        fingerprint = canonical_ssh_fingerprint(configured_key)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if signing_public_key is None:
+        return False
+    if not _command_available((git_executable,)) or not _command_available(
+        (signing_program,)
+    ):
+        return False
+    try:
+        require_absolute_trusted_executable(
+            (signing_program,),
+            field="runtime.signing_program",
+        )
+        parent = None if temporary_root is None else str(temporary_root)
+        with tempfile.TemporaryDirectory(
+            prefix="localize-guardian-ssh-probe-",
+            dir=parent,
+        ) as raw:
+            root = Path(raw).resolve(strict=True)
+            root.chmod(0o700)
+            isolated_home = root / "home"
+            repository = root / "repository"
+            isolated_home.mkdir(mode=0o700)
+            with snapshot_ssh_signing_material(
+                public_key_path=signing_public_key,
+                expected_fingerprint=fingerprint,
+                signing_program=signing_program,
+                temporary_root=root,
+            ) as material:
+                signing_socket = ssh_agent_environment(
+                    temporary_root=material.root,
+                )
+                environment = {
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "HOME": str(isolated_home),
+                    "LC_ALL": "C",
+                    "PATH": os.defpath,
+                }
+                git_prefix = [
+                    git_executable,
+                    "-c",
+                    "gpg.format=ssh",
+                    "-c",
+                    f"gpg.ssh.program={signing_program}",
+                    "-c",
+                    f"gpg.ssh.allowedSignersFile={material.allowed_signers}",
+                    "-c",
+                    "gpg.minTrustLevel=fully",
+                ]
+                commands = (
+                    (
+                        [*git_prefix, "init", "--quiet", str(repository)],
+                        environment,
+                    ),
+                    (
+                        [
+                            *git_prefix,
+                            "-C",
+                            str(repository),
+                            "-c",
+                            "user.name=Localize Guardian",
+                            "-c",
+                            "user.email=localize-guardian@users.noreply.github.com",
+                            "commit",
+                            "--allow-empty",
+                            "--no-verify",
+                            f"-S{material.public_key}",
+                            "--message=Localize Guardian signing probe",
+                        ],
+                        {**environment, **signing_socket},
+                    ),
+                    (
+                        [
+                            *git_prefix,
+                            "-C",
+                            str(repository),
+                            "verify-commit",
+                            "--raw",
+                            "HEAD",
+                        ],
+                        environment,
+                    ),
+                )
+                process_limits = ProcessLimits.for_timeout(
+                    20,
+                    max_file_size_bytes=8 * 1024 * 1024,
+                )
+                workspace_quota = WorkspaceQuota.capture(
+                    root,
+                    max_growth_bytes=16 * 1024 * 1024,
+                    max_added_entries=1_000,
+                )
+                verification_output = ""
+                for command, command_environment in commands:
+                    completed = run_bounded_process(
+                        command,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        shell=False,
+                        timeout=20,
+                        env=command_environment,
+                        start_new_session=True,
+                        limits=process_limits,
+                        workspace_quota=workspace_quota,
+                    )
+                    if completed.returncode != 0:
+                        return False
+                    verification_output = "\n".join(
+                        (completed.stdout or "", completed.stderr or "")
+                    )
+                return ssh_signature_matches(verification_output, fingerprint)
+    except (
+        ExecutableTrustError,
+        OSError,
+        SigningError,
+        ValueError,
+        subprocess.SubprocessError,
+        ProcessResourceError,
+    ):
+        return False
 
 
 def _command_available(command: Sequence[str]) -> bool:
@@ -978,6 +1146,37 @@ def _state_directory_doctor(config_path: Path) -> tuple[str, bool]:
     return "ok", True
 
 
+def _existing_safe_probe_parent(path: Path) -> Path | None:
+    """Return an existing trusted parent without creating or changing it."""
+
+    trusted_owners = {0}
+    if hasattr(os, "getuid"):
+        trusted_owners.add(os.getuid())
+    try:
+        metadata = path.lstat()
+        if (
+            not path.is_absolute()
+            or stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or not _owned_by_current_user(metadata)
+            or not is_trusted_directory(
+                metadata,
+                trusted_owners=trusted_owners,
+            )
+        ):
+            return None
+        for ancestor in path.parents:
+            ancestor_metadata = ancestor.lstat()
+            if stat.S_ISLNK(ancestor_metadata.st_mode) or not is_trusted_directory(
+                ancestor_metadata,
+                trusted_owners=trusted_owners,
+            ):
+                return None
+    except OSError:
+        return None
+    return path
+
+
 def _operator_pipeline_config_doctor(
     config: GuardianConfig,
     *,
@@ -1152,12 +1351,21 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         healthy = False
 
     configured_signing_key = config.runtime.signing_key
+    state_directory = guardian_state_dir(config_path)
+    signing_probe_root = (
+        state_directory
+        if state_ok and state_directory.is_dir() and not state_directory.is_symlink()
+        else _existing_safe_probe_parent(config_path.parent)
+    )
     if not write_mode:
         print(f"commit signing: not required ({config.mode.value} mode)")
     elif git_ready and signing_program_ready and _signing_key_configured(
         configured_signing_key,
         git_executable=config.runtime.git_executable,
         signing_program=config.runtime.signing_program,
+        signing_format=config.runtime.signing_format,
+        signing_public_key=config.runtime.signing_public_key,
+        temporary_root=signing_probe_root,
     ):
         print(
             "commit signing: exact key signed and verified in isolation "
