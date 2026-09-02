@@ -7,6 +7,19 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.20] - 2026-09-02
+
+### Security
+
+- Build GitHub CLI with gRPC-Go 1.83.2, resolving the image's
+  CVE-2026-84304 dependency finding for fragmented HTTP/2 DATA-frame heap
+  exhaustion and avoiding the affected range for the xDS server panic in
+  GHSA-2v4p-qf9q-27wj.
+
+### Changed
+
+- The default bootstrap action ref is now `v0.1.20`.
+
 ## [0.1.19] - 2026-09-01
 
 ### Added
