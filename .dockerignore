@@ -43,6 +43,7 @@ build/
 config.yaml
 config-mobile.yaml
 docker/config.docker.mobile.yaml
+profiles/
 docker/docker-compose.override*.yml
 docker/docker-compose.override*.yaml
 secrets/

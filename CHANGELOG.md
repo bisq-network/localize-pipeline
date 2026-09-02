@@ -15,10 +15,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   CVE-2026-84304 dependency finding for fragmented HTTP/2 DATA-frame heap
   exhaustion and avoiding the affected range for the xDS server panic in
   GHSA-2v4p-qf9q-27wj.
+- Exclude project profiles from the Docker build context; Compose bind-mounts
+  the selected config and glossary read-only at runtime, preventing ignored or
+  private profiles from entering image layers.
 
 ### Changed
 
 - The default bootstrap action ref is now `v0.1.20`.
+- Correct the deployment guides to document the 90-file PR batch default,
+  Compose runtime key mounts, host-level cron, and root-safe Compose commands.
+- Remove obsolete dummy credential files and unused secret-related build
+  arguments from the CI image build.
 
 ## [0.1.19] - 2026-09-01
 

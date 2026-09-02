@@ -11,6 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = PROJECT_ROOT / "docker" / "Dockerfile"
 COMPOSE_FILE = PROJECT_ROOT / "docker" / "docker-compose.yml"
 ENTRYPOINT = PROJECT_ROOT / "docker" / "docker-entrypoint.sh"
+DOCKERIGNORE = PROJECT_ROOT / ".dockerignore"
+BUILD_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "build-verify.yml"
 
 
 def _dockerfile() -> str:
@@ -69,6 +71,44 @@ def test_compose_mounts_private_keys_only_as_runtime_secrets():
         compose["secrets"]["deploy_key"]["file"]
         == "${DEPLOY_KEY_FILE:-../secrets/deploy_key/id_ed25519}"
     )
+
+
+def test_project_profiles_stay_out_of_the_image_and_mount_read_only_at_runtime():
+    ignore_patterns = {
+        line.strip()
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    compose = _compose()
+    mounts = [
+        mount
+        for mount in compose["services"]["translator"]["volumes"]
+        if isinstance(mount, dict)
+    ]
+    profile_mounts = {
+        mount["target"]: mount
+        for mount in mounts
+        if str(mount.get("source", "")).startswith("../profiles/")
+    }
+
+    assert "profiles/" in ignore_patterns
+    assert set(profile_mounts) == {"/app/config.yaml", "/app/glossary.json"}
+    assert all(mount.get("read_only") is True for mount in profile_mounts.values())
+    assert all(
+        mount.get("bind", {}).get("create_host_path") is False
+        for mount in profile_mounts.values()
+    )
+
+
+def test_ci_image_build_does_not_stage_runtime_credentials():
+    workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Create dummy secret files" not in workflow
+    assert "secrets/gpg_bot_key" not in workflow
+    assert "DUMMY_KEY" not in workflow
+    assert "SKIP_GPG_IMPORT=true" not in workflow
+    assert "SKIP_DEPLOY_KEY=true" not in workflow
+    assert "GPG_KEY_FINGERPRINT_FOR_TRUST" not in workflow
 
 
 def test_entrypoint_installs_runtime_ssh_and_gpg_secrets():
