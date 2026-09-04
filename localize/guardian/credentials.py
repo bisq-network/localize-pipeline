@@ -123,6 +123,37 @@ class SecretCommand:
         return value
 
 
+class CredentialSnapshot:
+    """Share one lazy credential-helper issuance for a bounded operation."""
+
+    __slots__ = ("_active", "_command", "_secret")
+
+    def __init__(self, command: SecretCommand) -> None:
+        if not isinstance(command, SecretCommand):
+            raise TypeError("command must be a SecretCommand")
+        self._command = command
+        self._secret: str | None = None
+        self._active = True
+
+    def read(self) -> str:
+        """Return the same in-memory credential for the snapshot lifetime."""
+
+        if not self._active:
+            raise CredentialError("credential snapshot is no longer active")
+        if self._secret is None:
+            self._secret = self._command.read()
+        return self._secret
+
+    def close(self) -> None:
+        """Drop the snapshot's reference to its credential."""
+
+        self._secret = None
+        self._active = False
+
+    def __repr__(self) -> str:
+        return "CredentialSnapshot(<redacted>)"
+
+
 def resolve_model_api_key(command: SecretCommand | None) -> str:
     """Resolve the model credential without persisting or logging it."""
 
@@ -132,15 +163,26 @@ def resolve_model_api_key(command: SecretCommand | None) -> str:
 
 
 @contextmanager
+def credential_snapshot(command: SecretCommand) -> Iterator[CredentialSnapshot]:
+    """Yield one lazily minted credential and invalidate it on exit."""
+
+    snapshot = CredentialSnapshot(command)
+    try:
+        yield snapshot
+    finally:
+        snapshot.close()
+
+
+@contextmanager
 def git_credential_environment(
-    command: SecretCommand,
+    command: SecretCommand | CredentialSnapshot,
     *,
     temporary_root: Path | str | None = None,
 ) -> Iterator[Callable[[], Mapping[str, str]]]:
     """Yield a lazy in-memory token provider for Git's static askpass helper."""
 
-    if not isinstance(command, SecretCommand):
-        raise TypeError("command must be a SecretCommand")
+    if not isinstance(command, (SecretCommand, CredentialSnapshot)):
+        raise TypeError("command must be a SecretCommand or CredentialSnapshot")
     root = None if temporary_root is None else str(Path(temporary_root))
     with tempfile.TemporaryDirectory(prefix="localize-guardian-credentials-", dir=root) as raw:
         directory = Path(raw)
@@ -172,7 +214,9 @@ def git_credential_environment(
 
 __all__: Sequence[str] = (
     "CredentialError",
+    "CredentialSnapshot",
     "SecretCommand",
+    "credential_snapshot",
     "git_credential_environment",
     "resolve_model_api_key",
 )

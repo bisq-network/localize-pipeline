@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from localize.guardian import process as guardian_process
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.process import (
     ProcessLimits,
     ProcessResourceError,
@@ -23,6 +24,21 @@ def _assert_file_stops_changing(path: Path) -> None:
     size = path.stat().st_size
     time.sleep(0.15)
     assert path.stat().st_size == size
+
+
+def test_workspace_quota_capture_stops_at_the_poll_deadline(tmp_path: Path) -> None:
+    (tmp_path / "first").write_text("one", encoding="utf-8")
+    (tmp_path / "second").write_text("two", encoding="utf-8")
+    ticks = iter((10.0, 10.0, 13.0))
+    deadline = PollDeadline(3, clock=lambda: next(ticks))
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        WorkspaceQuota.capture(
+            tmp_path,
+            max_growth_bytes=1024,
+            max_added_entries=10,
+            deadline=deadline,
+        )
 
 
 def test_kills_descendants_when_the_direct_child_exits(tmp_path: Path) -> None:

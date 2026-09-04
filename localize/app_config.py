@@ -26,6 +26,7 @@ from localize.localization_profiles import LocalizationProfile, load_localizatio
 from localize.model_provider import (
     ChatModelProvider,
     DEFAULT_MODEL_PROVIDER,
+    DEFAULT_TRANSLATION_MODEL,
     ModelProviderConfigurationError,
     REASONING_EFFORT_VALUES,
     create_model_provider,
@@ -37,6 +38,33 @@ from localize.semantic_quality import normalize_retained_source_word_allowlist
 
 
 TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES = frozenset({"exact", "prompt-only"})
+_GPT6_ASTRA_REASONING_EFFORTS = frozenset(
+    {"low", "medium", "high", "xhigh", "max"}
+)
+
+
+def _validate_model_reasoning_effort(
+    model: str,
+    reasoning_effort: Optional[str],
+    *,
+    field: str,
+) -> None:
+    """Reject explicit effort settings unsupported by a known OpenAI model."""
+
+    provider, separator, bare_model = model.partition(":")
+    if separator and provider.strip().lower() != "openai":
+        return
+    normalized_model = (bare_model if separator else provider).strip().lower()
+    if (
+        normalized_model.startswith("gpt-6-astra")
+        and reasoning_effort
+        and reasoning_effort not in _GPT6_ASTRA_REASONING_EFFORTS
+    ):
+        supported = ", ".join(sorted(_GPT6_ASTRA_REASONING_EFFORTS))
+        raise ValueError(
+            f"{field} '{reasoning_effort}' is not supported by {model}; "
+            f"supported efforts are: {supported}."
+        )
 
 
 @dataclass
@@ -112,6 +140,11 @@ class AppConfig:
         LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
     ))
     review_reasoning_effort: Optional[str] = None
+
+    # Optional third AI pass, run by the semantic-review sidecar after the
+    # translation files have been staged.
+    semantic_review_enabled: bool = False
+    semantic_review_model_name: Optional[str] = None
 
     # Placeholder-detection profile ("standard" or "java-indexed"). Runtime
     # entry points activate it after loading so this loader remains state-free.
@@ -256,7 +289,7 @@ def validate_config(
         ))
 
     dry_run = dry_run_override if dry_run_override is not None else _as_bool(config.get("dry_run", False), False)
-    model_name = str(config.get("model_name") or "gpt-4")
+    model_name = str(config.get("model_name") or DEFAULT_TRANSLATION_MODEL)
     review_model_name = str(config.get("review_model_name") or model_name)
     review_reasoning_effort = str(config.get("review_reasoning_effort") or "").strip()
     if review_reasoning_effort and review_reasoning_effort not in REASONING_EFFORT_VALUES:
@@ -266,6 +299,26 @@ def validate_config(
             + ", ".join(sorted(REASONING_EFFORT_VALUES))
             + ".",
         ))
+    else:
+        try:
+            _validate_model_reasoning_effort(
+                review_model_name,
+                review_reasoning_effort or None,
+                field="review_reasoning_effort",
+            )
+        except ValueError as exc:
+            issues.append(ConfigIssue("error", str(exc)))
+    try:
+        semantic_review_enabled, semantic_review_model_name = (
+            resolve_semantic_review_model(
+                config,
+                review_model_name=review_model_name,
+            )
+        )
+    except ValueError as exc:
+        issues.append(ConfigIssue("error", str(exc)))
+        semantic_review_enabled = False
+        semantic_review_model_name = None
     model_provider_name = normalize_model_provider_name(
         str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     )
@@ -275,9 +328,12 @@ def validate_config(
         issues.append(ConfigIssue("error", str(exc)))
         aisuite_provider_configs = {}
     try:
+        configured_model_names = [model_name, review_model_name]
+        if semantic_review_enabled and semantic_review_model_name:
+            configured_model_names.append(semantic_review_model_name)
         needs_openai_credentials = requires_openai_credentials(
             provider_name=model_provider_name,
-            model_names=(model_name, review_model_name),
+            model_names=tuple(configured_model_names),
             api_base_url=base_url,
             aisuite_provider_configs=aisuite_provider_configs,
         )
@@ -462,6 +518,65 @@ def _as_bool(value: Any, default: bool) -> bool:
         if normalized in {"false", "0", "no", "off"}:
             return False
     return default
+
+
+def resolve_semantic_review_model(
+    config: Mapping[str, Any],
+    *,
+    review_model_name: Optional[str] = None,
+) -> Tuple[bool, Optional[str]]:
+    """Return the enabled state and effective semantic-review model.
+
+    A missing or null block is disabled. An enabled block with an empty or null
+    model intentionally inherits the effective holistic-review model, then the
+    shared translation default. Malformed blocks fail instead of making the
+    estimator and the separately launched semantic reviewer disagree.
+    """
+    raw_semantic_review = config.get('semantic_review')
+    if raw_semantic_review is None:
+        return False, None
+    if not isinstance(raw_semantic_review, Mapping):
+        raise ValueError("semantic_review must be a mapping when configured.")
+
+    raw_enabled = raw_semantic_review.get('enabled', False)
+    if isinstance(raw_enabled, bool):
+        enabled = raw_enabled
+    elif isinstance(raw_enabled, str) and raw_enabled.strip().lower() in {
+        "true", "1", "yes", "on", "false", "0", "no", "off",
+    }:
+        enabled = _as_bool(raw_enabled, default=False)
+    else:
+        raise ValueError("semantic_review.enabled must be a boolean.")
+
+    raw_model = raw_semantic_review.get('model')
+    if raw_model is not None and not isinstance(raw_model, str):
+        raise ValueError("semantic_review.model must be a string or null.")
+    configured_model = str(raw_model or "").strip()
+    inherited_model = str(
+        review_model_name
+        or config.get('review_model_name')
+        or config.get('model_name')
+        or DEFAULT_TRANSLATION_MODEL
+    ).strip()
+    model = configured_model or inherited_model or DEFAULT_TRANSLATION_MODEL
+
+    raw_reasoning_effort = raw_semantic_review.get('reasoning_effort')
+    if raw_reasoning_effort is not None:
+        reasoning_effort = str(raw_reasoning_effort).strip()
+        if reasoning_effort and reasoning_effort not in REASONING_EFFORT_VALUES:
+            raise ValueError(
+                "semantic_review.reasoning_effort must be one of: "
+                + ", ".join(sorted(REASONING_EFFORT_VALUES))
+                + "."
+            )
+        if enabled:
+            _validate_model_reasoning_effort(
+                model,
+                reasoning_effort or None,
+                field="semantic_review.reasoning_effort",
+            )
+
+    return (enabled, model if enabled else None)
 
 
 def _resolve_dry_run(config: Dict[str, Any]) -> bool:
@@ -680,13 +795,28 @@ def load_app_config() -> AppConfig:
         process_all_files_env if process_all_files_env is not None else config.get('process_all_files', False),
         default=False,
     )
-    model_name = str(config.get('model_name') or 'gpt-4')
+    model_name = str(config.get('model_name') or DEFAULT_TRANSLATION_MODEL)
     review_model_name = review_model_env or str(config.get('review_model_name') or model_name)
     review_reasoning_effort = normalize_reasoning_effort(
         review_reasoning_effort_env
         if review_reasoning_effort_env is not None
         else config.get('review_reasoning_effort')
     )
+    try:
+        _validate_model_reasoning_effort(
+            review_model_name,
+            review_reasoning_effort,
+            field="review_reasoning_effort",
+        )
+        semantic_review_enabled, semantic_review_model_name = (
+            resolve_semantic_review_model(
+                config,
+                review_model_name=review_model_name,
+            )
+        )
+    except ValueError as exc:
+        logger.critical("CRITICAL: %s", exc)
+        sys.exit(1)
     model_provider_name = normalize_model_provider_name(
         str(config.get('model_provider', DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     )
@@ -821,13 +951,16 @@ def load_app_config() -> AppConfig:
     localization_layout = localization_profiles[0].localization_layout
 
     # Create the provider against the endpoint resolved earlier.
+    configured_model_names = [model_name, review_model_name]
+    if semantic_review_enabled and semantic_review_model_name:
+        configured_model_names.append(semantic_review_model_name)
     model_provider = _create_model_provider(
         dry_run,
         logger,
         model_provider_name,
         api_base_url,
         aisuite_provider_configs,
-        (model_name, review_model_name),
+        tuple(configured_model_names),
     )
     openai_client = getattr(model_provider, "client", None) if model_provider else None
 
@@ -875,6 +1008,8 @@ def load_app_config() -> AppConfig:
         localization_layout=localization_layout,
         localization_profiles=localization_profiles,
         review_reasoning_effort=review_reasoning_effort,
+        semantic_review_enabled=semantic_review_enabled,
+        semantic_review_model_name=semantic_review_model_name,
         placeholder_profile=placeholder_profile,
         translation_glossary_enforcement=translation_glossary_enforcement,
     )

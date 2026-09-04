@@ -3,6 +3,7 @@
 from localize.guardian.controller import GuardianController, PollOutcome
 from localize.guardian.models import (
     AllowedHeadRepository,
+    ClosedPrBackfillPolicy,
     CodexAuthMode,
     ExactRepository,
     FeedbackEvent,
@@ -12,6 +13,8 @@ from localize.guardian.models import (
     GuardianMode,
     GuardianRuntime,
     GuardianSchedule,
+    HistoricalCheckScope,
+    HistoricalRemediationPolicy,
     PipelineConfigSnapshot,
     PipelineConfigSource,
     PreventionPolicy,
@@ -24,6 +27,7 @@ from localize.guardian.models import (
 
 __all__ = [
     "AllowedHeadRepository",
+    "ClosedPrBackfillPolicy",
     "CodexAuthMode",
     "ExactRepository",
     "FeedbackEvent",
@@ -35,6 +39,8 @@ __all__ = [
     "PollOutcome",
     "GuardianRuntime",
     "GuardianSchedule",
+    "HistoricalCheckScope",
+    "HistoricalRemediationPolicy",
     "PipelineConfigSnapshot",
     "PipelineConfigSource",
     "PreventionPolicy",

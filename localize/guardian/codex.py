@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from jsonschema import Draft202012Validator
 
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.models import (
     CodexAuthMode,
     FeedbackEvent,
@@ -701,12 +702,13 @@ class CodexDriver:
         self,
         *,
         model: str,
-        reasoning_effort: str = "max",
+        reasoning_effort: str = "high",
         auth_mode: CodexAuthMode = CodexAuthMode.CHATGPT,
         codex_home: str | Path = "~/.local/share/localize-guardian/codex",
         executable: str = "codex",
         timeout_seconds: float = 1200,
         max_attempts: int = 2,
+        deadline: PollDeadline | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("model must not be blank.")
@@ -729,6 +731,7 @@ class CodexDriver:
         self.executable = executable
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
+        self.deadline = deadline
 
     def _argv(self, evidence_dir: Path, output_path: Path) -> list[str]:
         config_arguments = [
@@ -819,21 +822,33 @@ class CodexDriver:
             )
             output_path = temp_root / "result.json"
             argv = self._argv(evidence_dir, output_path)
-            process_limits = ProcessLimits.for_timeout(
-                self.timeout_seconds,
-                max_file_size_bytes=16 * 1024 * 1024,
-                require_linux_cgroup=True,
-            )
             workspace_quota = WorkspaceQuota.capture(
                 temp_root,
                 max_growth_bytes=128 * 1024 * 1024,
                 max_added_entries=20_000,
+                deadline=self.deadline,
             )
 
             for attempt in range(1, self.max_attempts + 1):
+                if self.deadline is not None:
+                    self.deadline.require_remaining()
                 output_path.unlink(missing_ok=True)
                 if attempt_observer is not None:
                     attempt_observer(attempt, "started", None)
+                try:
+                    effective_timeout = (
+                        self.timeout_seconds
+                        if self.deadline is None
+                        else self.deadline.remaining(self.timeout_seconds)
+                    )
+                except PollDeadlineExceeded:
+                    if attempt_observer is not None:
+                        attempt_observer(attempt, "not_started", None)
+                    raise
+                deadline_bound_timeout = (
+                    self.deadline is not None
+                    and effective_timeout < self.timeout_seconds
+                )
                 try:
                     completed = run_bounded_process(
                         argv,
@@ -841,12 +856,20 @@ class CodexDriver:
                         text=True,
                         capture_output=True,
                         check=False,
-                        timeout=self.timeout_seconds,
+                        timeout=effective_timeout,
                         env=environment,
                         start_new_session=True,
-                        limits=process_limits,
+                        limits=ProcessLimits.for_timeout(
+                            effective_timeout,
+                            max_file_size_bytes=16 * 1024 * 1024,
+                            require_linux_cgroup=True,
+                        ),
                         workspace_quota=workspace_quota,
                     )
+                except PollDeadlineExceeded:
+                    if attempt_observer is not None:
+                        attempt_observer(attempt, "failed", None)
+                    raise
                 except FileNotFoundError as exc:
                     if attempt_observer is not None:
                         attempt_observer(attempt, "not_started", None)
@@ -857,9 +880,18 @@ class CodexDriver:
                     timed_out = True
                     if attempt_observer is not None:
                         attempt_observer(attempt, "failed", None)
+                    if deadline_bound_timeout:
+                        raise PollDeadlineExceeded(
+                            "Guardian poll deadline was exceeded."
+                        ) from None
+                    if self.deadline is not None:
+                        try:
+                            self.deadline.require_remaining()
+                        except PollDeadlineExceeded:
+                            raise
                     if attempt == self.max_attempts:
                         raise CodexTimeoutError(
-                            f"Codex timed out after {self.timeout_seconds:g}s on "
+                            f"Codex timed out after {effective_timeout:g}s on "
                             f"{self.max_attempts} attempt(s)."
                         )
                     continue

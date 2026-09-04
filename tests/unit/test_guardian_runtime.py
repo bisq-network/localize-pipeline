@@ -21,9 +21,11 @@ import pytest
 
 from localize.guardian.controller import PollOutcome
 from localize.guardian.credentials import CredentialError
+from localize.guardian.deadline import PollDeadlineExceeded
 from localize.guardian.github import GitHubAuthenticationError
 from localize.guardian.models import (
     AllowedHeadRepository,
+    ClosedPrBackfillPolicy,
     CodexAuthMode,
     ExactRepository,
     GuardianConfig,
@@ -31,6 +33,7 @@ from localize.guardian.models import (
     GuardianMode,
     GuardianRuntime,
     GuardianSchedule,
+    HistoricalRemediationPolicy,
     PreventionPolicy,
     PipelineConfigSnapshot,
     RepositoryPolicy,
@@ -38,8 +41,16 @@ from localize.guardian.models import (
     TrustedActor,
 )
 from localize.guardian.signing import SSHSigningMaterial, SigningError
-from localize.guardian.state import GuardianState
-from localize.guardian.workspace import ExactRevision
+from localize.guardian.state import (
+    GuardianState,
+    HistoricalPullReference,
+    OpenPullAuthorityReference,
+)
+from localize.guardian.workspace import (
+    ExactRevision,
+    HistoricalRevision,
+    HistoricalWorkspace,
+)
 from localize.guardian import runtime
 
 
@@ -70,13 +81,12 @@ def _policy() -> RepositoryPolicy:
         base_branch="main",
         allowed_pr_authors=(TrustedActor("translation-bot", 102, "Bot"),),
         allowed_head_owners=(TrustedActor("contributor", 103, "User"),),
-        allowed_head_repositories=(
-            AllowedHeadRepository("contributor/widgets", 104),
-        ),
+        allowed_head_repositories=(AllowedHeadRepository("contributor/widgets", 104),),
         allowed_branch_globs=("localization/**",),
         allowed_path_globs=("l10n/**",),
         pipeline_config_path=".localize/config.yaml",
         source_locale="en",
+        publication_actor=TrustedActor("translation-machine", 102, "User"),
         trusted_reviewers={"ru": (TrustedActor("reviewer", 105, "User"),)},
         trusted_bots={},
     )
@@ -88,9 +98,12 @@ def _prevention_policy() -> PreventionPolicy:
         target_base_branch="main",
         push_repository=ExactRepository("guardian/pipeline", 201),
         push_branch_prefix="guardian/prevention-",
+        publication_actor=TrustedActor("translation-machine", 102, "User"),
         allowed_code_path_globs=("localize/*.py",),
         allowed_test_path_globs=("tests/**/*.py",),
-        focused_test_argv=(("venv/bin/pytest", "tests/unit/test_rule.py", "-q"),),
+        focused_test_argv=(
+            ("/opt/localize-guardian/bin/pytest", "tests/unit/test_rule.py", "-q"),
+        ),
         sandbox_argv_prefix=("/usr/bin/sandbox-exec", "-f", "/safe.sb"),
         max_changed_files=4,
         max_changed_bytes=16_384,
@@ -124,6 +137,38 @@ def _config(mode: GuardianMode = GuardianMode.OBSERVE) -> GuardianConfig:
     )
 
 
+def _config_with_closed_backfill(*, remediation: bool) -> GuardianConfig:
+    mode = GuardianMode.PROPOSE_PREVENTION if remediation else GuardianMode.OBSERVE
+    config = _config(mode)
+    remediation_policy = (
+        HistoricalRemediationPolicy(
+            push_repository=ExactRepository("contributor/widgets", 104),
+            push_branch_prefix="localization/remediation-",
+            publication_actor=TrustedActor("translation-machine", 102, "User"),
+        )
+        if remediation
+        else None
+    )
+    policy = replace(
+        config.repositories[0],
+        allowed_branch_globs=(
+            ("localization/**", "localization/remediation-*")
+            if remediation
+            else config.repositories[0].allowed_branch_globs
+        ),
+        closed_pr_backfill=ClosedPrBackfillPolicy(
+            lookback_days=120,
+            max_prs_per_poll=4,
+            remediation=remediation_policy,
+        ),
+    )
+    limits = replace(
+        config.limits,
+        max_remediation_drafts_per_run=1 if remediation else 0,
+    )
+    return replace(config, repositories=(policy,), limits=limits)
+
+
 def _write_minimal_config(path: Path) -> None:
     path.write_text(
         """mode: observe
@@ -131,6 +176,7 @@ repositories:
   - base_repo: acme/widgets
     base_repo_id: 101
     base_branch: main
+    publication_actor: {login: translation-machine, id: 102, type: User}
     allowed_pr_authors:
       - {login: translation-bot, id: 102, type: Bot}
     allowed_head_owners:
@@ -364,7 +410,9 @@ def test_authenticated_snapshot_provider_uses_reader_and_passes_all_previous_fee
             observed["policy"] = policy
             observed["response"] = client.get("/probe").json()
 
-        def collect_open_pull_requests(self, *, previous_feedback: object) -> tuple[str]:
+        def collect_open_pull_requests(
+            self, *, previous_feedback: object
+        ) -> tuple[str]:
             observed["previous"] = previous_feedback
             return ("snapshot",)
 
@@ -384,6 +432,87 @@ def test_authenticated_snapshot_provider_uses_reader_and_passes_all_previous_fee
     assert observed["policy"].repository == "acme/widgets"  # type: ignore[union-attr]
 
 
+def test_authenticated_snapshot_provider_loads_prior_feedback_only_per_hydrated_pull(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = _Credential("github-secret")
+    loaded: list[tuple[str, int]] = []
+    old = SimpleNamespace(source_id="12")
+    observed: dict[str, object] = {}
+
+    class FakeReader:
+        def __init__(self, _client: httpx.Client, _policy: object) -> None:
+            pass
+
+        def collect_open_pull_requests(self, **kwargs: object) -> tuple[str]:
+            observed.update(kwargs)
+            provider = kwargs["previous_feedback_for_pull"]
+            assert callable(provider)
+            assert provider(12) == (old,)
+            return ("snapshot",)
+
+    def previous_feedback(repository: str, pull_number: int) -> tuple[object, ...]:
+        loaded.append((repository, pull_number))
+        return (old,)
+
+    monkeypatch.setattr(runtime, "GitHubReader", FakeReader)
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=credential,  # type: ignore[arg-type]
+        transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+        previous_feedback_provider=previous_feedback,  # type: ignore[arg-type]
+    )
+
+    assert provider(_policy(), ()) == ("snapshot",)
+    assert provider.loads_previous_feedback_per_pull is True
+    assert loaded == [("acme/widgets", 12)]
+    assert "previous_feedback" not in observed
+
+
+def test_authenticated_snapshot_provider_preflights_one_exact_publication_actor() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/user"
+        return httpx.Response(
+            200,
+            json={"login": "translation-machine", "id": 102, "type": "User"},
+        )
+
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=_Credential("github-secret"),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+    expected = TrustedActor("old-display-name", 102, "User")
+
+    provider.require_publication_actor(_policy(), (expected, expected))
+
+    with pytest.raises(GitHubAuthenticationError, match="does not match"):
+        provider.require_publication_actor(
+            _policy(),
+            (TrustedActor("someone-else", 999, "User"),),
+        )
+
+
+def test_authenticated_snapshot_provider_rejects_bot_publisher_before_network() -> None:
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=_Credential("github-secret"),  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GitHubAuthenticationError, match="must be a User"):
+        provider.require_publication_actor(
+            _policy(),
+            (TrustedActor("installation-app[bot]", 102, "Bot"),),
+        )
+
+    assert requests == 0
+
+
 def test_authenticated_snapshot_provider_classifies_credential_failure() -> None:
     class FailingCredential:
         def read(self) -> str:
@@ -397,6 +526,174 @@ def test_authenticated_snapshot_provider_classifies_credential_failure() -> None
         provider(_policy(), ())
 
     assert "secret-bearing" not in str(raised.value)
+
+
+def test_authenticated_snapshot_provider_uses_ephemeral_reads_for_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential = _Credential("history-read-secret")
+    clients: list[httpx.Client] = []
+    captured: dict[str, object] = {}
+    previous = (SimpleNamespace(source_id="11"),)
+
+    cutoff = datetime(2026, 1, 1, tzinfo=UTC)
+    upper_bound = datetime(2026, 2, 1, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.setdefault("authorizations", []).append(
+            request.headers.get("Authorization")
+        )
+        return httpx.Response(200, json={"ok": True})
+
+    class FakeReader:
+        def __init__(self, client: httpx.Client, policy: object) -> None:
+            clients.append(client)
+            captured["policy"] = policy
+
+        def collect_closed_pull_requests(self, **kwargs: object) -> tuple[str]:
+            captured["closed_kwargs"] = kwargs
+            captured["closed_probe"] = clients[-1].get("/closed-probe").json()
+            return ("historical",)
+
+        def capture_base_revision(self) -> str:
+            captured["base_probe"] = clients[-1].get("/base-probe").json()
+            return "current-base"
+
+        def collect_exact_closed_pulls(
+            self,
+            expected_pulls: tuple[tuple[int, int], ...],
+        ) -> tuple[str]:
+            captured["exact_pulls"] = expected_pulls
+            captured["exact_probe"] = clients[-1].get("/exact-probe").json()
+            return ("exact-history",)
+
+        def collect_exact_open_pull(
+            self,
+            expected_pull: tuple[int, int],
+        ) -> str:
+            captured["exact_open_pull"] = expected_pull
+            captured["exact_open_probe"] = clients[-1].get(
+                "/exact-open-probe"
+            ).json()
+            return "exact-open"
+
+    monkeypatch.setattr(runtime, "GitHubReader", FakeReader)
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=credential,  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+
+    historical = provider.collect_closed_pull_requests(
+        _policy(),
+        previous,
+        cutoff=cutoff,
+        upper_bound=upper_bound,
+        max_prs_per_poll=4,
+        seen_pulls=((12, 120),),
+        excluded_pulls=((14, 140),),
+        priority_pull_groups=(((13, 130),),),
+    )
+    current_base = provider.capture_base_revision(_policy())
+    source = HistoricalPullReference(
+        repository="acme/widgets",
+        repository_id=101,
+        pull_id=500,
+        pr_number=12,
+        pull_revision_digest="1" * 64,
+        authority_digest="2" * 64,
+        policy_digest="3" * 64,
+        head_sha="4" * 40,
+        base_sha="5" * 40,
+    )
+    exact = provider.revalidate_closed_pull_requests(_policy(), (source,))
+    open_source = OpenPullAuthorityReference(
+        repository="acme/widgets",
+        repository_id=101,
+        pull_id=500,
+        pr_number=12,
+        authority_digest="6" * 64,
+        head_sha="4" * 40,
+        base_sha="5" * 40,
+    )
+    exact_open = provider.revalidate_open_pull_request(_policy(), open_source)
+
+    assert historical == ("historical",)
+    assert current_base == "current-base"
+    assert exact == ("exact-history",)
+    assert exact_open == "exact-open"
+    assert captured["exact_pulls"] == ((500, 12),)
+    assert captured["exact_open_pull"] == (500, 12)
+    assert captured["closed_kwargs"] == {
+        "cutoff": cutoff,
+        "upper_bound": upper_bound,
+        "max_prs_per_poll": 4,
+        "seen_pulls": ((12, 120),),
+        "excluded_pulls": ((14, 140),),
+        "priority_pull_groups": (((13, 130),),),
+        "previous_feedback": previous,
+    }
+    assert captured["closed_probe"] == {"ok": True}
+    assert captured["base_probe"] == {"ok": True}
+    assert captured["exact_probe"] == {"ok": True}
+    assert captured["exact_open_probe"] == {"ok": True}
+    assert captured["authorizations"] == [
+        "Bearer history-read-secret",
+        "Bearer history-read-secret",
+        "Bearer history-read-secret",
+        "Bearer history-read-secret",
+    ]
+    assert credential.calls == 4
+    assert len(clients) == 4
+    assert all(client.is_closed for client in clients)
+    assert all("Authorization" not in client.headers for client in clients)
+    assert "history-read-secret" not in repr(provider)
+
+
+@pytest.mark.parametrize("operation", ["closed", "exact", "base"])
+def test_historical_read_adapters_redact_credential_failure(
+    operation: str,
+) -> None:
+    class FailingCredential:
+        def read(self) -> str:
+            raise CredentialError("historical-secret-bearing diagnostic")
+
+    provider = runtime.AuthenticatedGitHubSnapshotProvider(
+        credential=FailingCredential(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(GitHubAuthenticationError) as raised:
+        if operation == "closed":
+            provider.collect_closed_pull_requests(
+                _policy(),
+                (),
+                cutoff=datetime(2026, 1, 1, tzinfo=UTC),
+                upper_bound=datetime(2026, 2, 1, tzinfo=UTC),
+                max_prs_per_poll=1,
+                seen_pulls=(),
+                excluded_pulls=(),
+                priority_pull_groups=(),
+            )
+        elif operation == "exact":
+            provider.revalidate_closed_pull_requests(
+                _policy(),
+                (
+                    HistoricalPullReference(
+                        repository="acme/widgets",
+                        repository_id=101,
+                        pull_id=500,
+                        pr_number=12,
+                        pull_revision_digest="1" * 64,
+                        authority_digest="2" * 64,
+                        policy_digest="3" * 64,
+                        head_sha="4" * 40,
+                        base_sha="5" * 40,
+                    ),
+                ),
+            )
+        else:
+            provider.capture_base_revision(_policy())
+
+    assert "historical-secret-bearing" not in str(raised.value)
 
 
 def test_build_controller_wires_exact_runtime_policy_and_credentials(
@@ -428,6 +725,7 @@ def test_build_controller_wires_exact_runtime_policy_and_credentials(
         "AuthenticatedGitHubSnapshotProvider",
         lambda **kwargs: captured.setdefault("snapshot", kwargs) or object(),
     )
+
     def resolve_model_key(helper: object) -> str:
         captured["model_helper"] = helper
         return "model-secret"
@@ -457,6 +755,10 @@ def test_build_controller_wires_exact_runtime_policy_and_credentials(
     assert controller_kwargs["snapshot_provider"] is captured["snapshot"]
     assert controller_kwargs["write_broker_factory"] is None
     assert controller_kwargs["prevention_runner"] is None
+    assert controller_kwargs["historical_snapshot_provider"] is None
+    assert controller_kwargs["historical_checkout_factory"] is None
+    assert controller_kwargs["current_base_provider"] is None
+    assert controller_kwargs["remediation_runner"] is None
     assert controller_kwargs["publish_credential_environment"] is git_environment
     assert controller_kwargs["evidence_root"] == tmp_path / "evidence"
     assert controller_kwargs["github_host"] == "github.com"
@@ -493,6 +795,405 @@ def test_build_controller_wires_exact_runtime_policy_and_credentials(
         "signing_program": "/opt/bin/gpg",
         "timeout_seconds": 120.0,
     }
+
+
+@pytest.mark.parametrize("mode", [GuardianMode.OBSERVE, GuardianMode.PREPARE])
+def test_closed_backfill_wires_read_only_historical_dependencies(
+    mode: GuardianMode,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(_config_with_closed_backfill(remediation=False), mode=mode)
+    captured: dict[str, object] = {}
+
+    class FakeProvider:
+        def __call__(self, *_args: object, **_kwargs: object) -> tuple[()]:
+            return ()
+
+        def collect_closed_pull_requests(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[()]:
+            return ()
+
+        def capture_base_revision(self, incoming: RepositoryPolicy) -> str:
+            captured["base_policy"] = incoming
+            return "current-base"
+
+    provider = FakeProvider()
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **_kwargs: provider,
+    )
+
+    @contextmanager
+    def materialize(
+        revision: HistoricalRevision,
+        **kwargs: object,
+    ) -> Iterator[HistoricalWorkspace]:
+        captured["revision"] = revision
+        captured["kwargs"] = kwargs
+        yield HistoricalWorkspace(path=tmp_path, revision=revision)
+
+    monkeypatch.setattr(runtime, "materialize_historical_checkout", materialize)
+
+    def git_environment() -> dict[str, str]:
+        return {"GIT_ASKPASS": "/private/read-helper"}
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=git_environment,
+    )
+
+    assert controller["historical_snapshot_provider"].__self__ is provider
+    assert controller["historical_checkout_factory"] is not None
+    assert controller["current_base_provider"].__self__ is provider
+    assert controller["remediation_runner"] is None
+    assert controller["current_base_provider"](config.repositories[0]) == "current-base"
+    assert captured["base_policy"] is config.repositories[0]
+    revision = HistoricalRevision(
+        host="github.com",
+        owner="acme",
+        repository="widgets",
+        sha="a" * 40,
+        pull_number=12,
+    )
+    with controller["historical_checkout_factory"](revision) as workspace:
+        assert isinstance(workspace, HistoricalWorkspace)
+        assert not hasattr(workspace, "commit_validated_changes")
+        assert not hasattr(workspace, "publish_commit")
+    assert captured["revision"] is revision
+    assert captured["kwargs"] == {
+        "credential_environment": git_environment,
+        "git_binary": "/opt/bin/git",
+        "timeout_seconds": 120.0,
+    }
+
+
+def test_historical_prevention_wires_exact_source_revalidation_without_remediation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _config_with_closed_backfill(remediation=False)
+    policy = replace(base.repositories[0], prevention=_prevention_policy())
+    config = replace(
+        base,
+        mode=GuardianMode.PROPOSE_PREVENTION,
+        repositories=(policy,),
+    )
+
+    class FakeProvider:
+        def __call__(self, *_args: object, **_kwargs: object) -> tuple[()]:
+            return ()
+
+        def collect_closed_pull_requests(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[()]:
+            return ()
+
+        def capture_base_revision(self, _policy: RepositoryPolicy) -> str:
+            return "current-base"
+
+        def revalidate_closed_pull_requests(
+            self,
+            _policy: RepositoryPolicy,
+            _sources: tuple[HistoricalPullReference, ...],
+        ) -> tuple[()]:
+            return ()
+
+    provider = FakeProvider()
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **_kwargs: provider,
+    )
+    monkeypatch.setattr(runtime, "PreventionCodexAuthor", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "SandboxedTestRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "PreventionCoordinator", lambda **_kwargs: object())
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+    )
+
+    assert controller["remediation_runner"] is None
+    assert (
+        controller["historical_source_snapshot_provider"]
+        == provider.revalidate_closed_pull_requests
+    )
+
+
+def test_explicit_closed_remediation_wires_separate_broker_and_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config_with_closed_backfill(remediation=True)
+    policy = config.repositories[0]
+    state = SimpleNamespace()
+    captured: dict[str, object] = {}
+
+    class FakeProvider:
+        def __call__(self, *_args: object, **_kwargs: object) -> tuple[()]:
+            return ()
+
+        def collect_closed_pull_requests(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[()]:
+            return ()
+
+        def capture_base_revision(self, incoming: RepositoryPolicy) -> str:
+            captured["base_policy"] = incoming
+            return "base"
+
+        def revalidate_closed_pull_requests(
+            self,
+            incoming: RepositoryPolicy,
+            sources: tuple[HistoricalPullReference, ...],
+        ) -> tuple[()]:
+            captured["source_policy"] = incoming
+            captured["source_pulls"] = sources
+            return ()
+
+    provider = FakeProvider()
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "AuthenticatedGitHubSnapshotProvider",
+        lambda **_kwargs: provider,
+    )
+    monkeypatch.setattr(runtime, "PreventionCodexAuthor", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "SandboxedTestRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "PreventionCoordinator", lambda **_kwargs: object())
+
+    remediation_runner = object()
+
+    def remediation_coordinator(**kwargs: object) -> object:
+        captured["remediation_coordinator"] = kwargs
+        return remediation_runner
+
+    monkeypatch.setattr(runtime, "RemediationCoordinator", remediation_coordinator)
+    monkeypatch.setattr(
+        runtime,
+        "RemediationGitHubBroker",
+        lambda **kwargs: captured.setdefault("remediation_broker", kwargs) or object(),
+    )
+
+    def git_environment() -> dict[str, str]:
+        return {"GIT_ASKPASS": "/private/write-helper"}
+
+    github_credential = SimpleNamespace(argv=config.runtime.github_token_command)
+    controller = runtime._build_controller(
+        config=config,
+        state=state,  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=github_credential,  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=git_environment,
+    )
+
+    assert controller["historical_snapshot_provider"].__self__ is provider
+    assert controller["historical_checkout_factory"] is not None
+    assert controller["current_base_provider"].__self__ is provider
+    assert controller["remediation_runner"] is remediation_runner
+    assert (
+        controller["historical_source_snapshot_provider"]
+        == provider.revalidate_closed_pull_requests
+    )
+    assert controller["current_base_provider"](policy) == "base"
+    assert captured["base_policy"] is policy
+    coordinator_kwargs = captured["remediation_coordinator"]
+    assert coordinator_kwargs == {
+        "state": state,
+        "broker_factory": coordinator_kwargs["broker_factory"],
+        "publish_credential_environment": git_environment,
+        "signing_key": "A" * 40,
+        "signing_environment": None,
+        "max_drafts": 1,
+    }
+    broker = coordinator_kwargs["broker_factory"](policy)
+    assert broker is captured["remediation_broker"]
+    assert captured["remediation_broker"] == {
+        "policy": policy,
+        "credential": github_credential,
+        "github_host": "github.com",
+        "base_url": "https://api.github.com",
+        "timeout_seconds": 30.0,
+    }
+    assert "github_credential" not in controller
+
+
+def test_zero_remediation_draft_limit_does_not_construct_write_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config_with_closed_backfill(remediation=True)
+    config = replace(
+        config,
+        limits=replace(config.limits, max_remediation_drafts_per_run=0),
+    )
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(runtime, "PreventionCodexAuthor", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "SandboxedTestRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "PreventionCoordinator", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "RemediationCoordinator",
+        lambda **_kwargs: pytest.fail(
+            "a zero publication cap must not construct remediation authority"
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "RemediationGitHubBroker",
+        lambda **_kwargs: pytest.fail(
+            "a zero publication cap must not construct a remediation broker"
+        ),
+    )
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+    )
+
+    assert controller["historical_snapshot_provider"] is not None
+    assert controller["current_base_provider"] is not None
+    assert controller["remediation_runner"] is None
+
+
+def test_closed_backfill_keeps_subscription_codex_authentication_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config_with_closed_backfill(remediation=False)
+    config = replace(
+        config,
+        runtime=replace(
+            config.runtime,
+            codex_auth_mode=CodexAuthMode.CHATGPT,
+            codex_api_key_command=(),
+        ),
+    )
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        runtime,
+        "resolve_model_api_key",
+        lambda _helper: pytest.fail("subscription mode must not resolve an API key"),
+    )
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+    )
+
+    assert controller["model_credential_provider"]() is None
+
+
+def test_runtime_keeps_remediation_dormant_without_write_capable_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(
+        _config_with_closed_backfill(remediation=True),
+        mode=GuardianMode.OBSERVE,
+    )
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+
+    monkeypatch.setattr(runtime, "RemediationGitHubBroker", lambda **_kwargs: pytest.fail("dormant config must not create a broker"))
+    monkeypatch.setattr(runtime, "RemediationCoordinator", lambda **_kwargs: pytest.fail("dormant config must not create a coordinator"))
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+    )
+
+    assert controller["remediation_runner"] is None
+
+
+def test_runtime_allows_remediation_in_apply_mode_without_prevention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config_with_closed_backfill(remediation=True)
+    policy = replace(config.repositories[0], prevention=None)
+    config = replace(
+        config,
+        mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+        repositories=(policy,),
+    )
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
+    monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
+    monkeypatch.setattr(runtime, "RemediationGitHubBroker", lambda **_kwargs: object())
+    monkeypatch.setattr(runtime, "RemediationCoordinator", lambda **_kwargs: object())
+
+    controller = runtime._build_controller(
+        config=config,
+        state=SimpleNamespace(),  # type: ignore[arg-type]
+        state_directory=tmp_path,
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        model_credential=None,
+        git_environment=lambda: {},
+    )
+
+    assert controller["prevention_runner"] is None
+    assert controller["remediation_runner"] is not None
+
+
+def test_typed_limits_reject_invalid_direct_remediation_limit() -> None:
+    config = _config()
+
+    with pytest.raises(ValueError, match="max_remediation_drafts_per_run"):
+        replace(
+            config.limits,
+            max_remediation_drafts_per_run=-1,
+        )
 
 
 def test_build_controller_wires_exact_ssh_snapshot_into_every_write_checkout(
@@ -539,9 +1240,7 @@ def test_build_controller_wires_exact_ssh_snapshot_into_every_write_checkout(
         config=config,
         state=SimpleNamespace(),  # type: ignore[arg-type]
         state_directory=tmp_path,
-        github_credential=SimpleNamespace(
-            argv=config.runtime.github_token_command
-        ),  # type: ignore[arg-type]
+        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
         model_credential=None,
         git_environment=lambda: {},
         ssh_signing_material=material,
@@ -583,7 +1282,9 @@ def test_write_broker_exists_only_for_write_modes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
-    monkeypatch.setattr(runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x"))
+    monkeypatch.setattr(
+        runtime, "CodexDriver", lambda **_kwargs: SimpleNamespace(model="x")
+    )
     monkeypatch.setattr(runtime, "GuardianController", lambda **kwargs: kwargs)
     monkeypatch.setattr(
         runtime,
@@ -596,11 +1297,12 @@ def test_write_broker_exists_only_for_write_modes(
         lambda **kwargs: captured.setdefault("broker", kwargs) or object(),
     )
     config = _config(mode)
+    github_credential = SimpleNamespace(argv=config.runtime.github_token_command)
     controller = runtime._build_controller(
         config=config,
         state=SimpleNamespace(),  # type: ignore[arg-type]
         state_directory=tmp_path,
-        github_credential=SimpleNamespace(argv=config.runtime.github_token_command),  # type: ignore[arg-type]
+        github_credential=github_credential,  # type: ignore[arg-type]
         model_credential=None,
         git_environment=lambda: {},
     )
@@ -611,10 +1313,9 @@ def test_write_broker_exists_only_for_write_modes(
         broker = factory(_policy())
         assert broker is captured["broker"]
         assert captured["broker"]["base_url"] == "https://api.github.com"
-        assert captured["broker"]["token_command"] == (
-            "/opt/bin/github-token",
-            "read",
-        )
+        assert captured["broker"]["credential"] is github_credential
+        assert captured["broker"]["expected_actor"] == _policy().publication_actor
+        assert "token_command" not in captured["broker"]
 
 
 def test_propose_mode_wires_credential_separated_prevention_coordinator(
@@ -662,13 +1363,12 @@ def test_propose_mode_wires_credential_separated_prevention_coordinator(
         lambda **kwargs: captured.setdefault("prevention_broker", kwargs) or object(),
     )
 
+    github_credential = SimpleNamespace(argv=config.runtime.github_token_command)
     controller = runtime._build_controller(
         config=config,
         state=state,  # type: ignore[arg-type]
         state_directory=tmp_path,
-        github_credential=SimpleNamespace(
-            argv=config.runtime.github_token_command
-        ),  # type: ignore[arg-type]
+        github_credential=github_credential,  # type: ignore[arg-type]
         model_credential=None,
         git_environment=git_environment,
     )
@@ -699,11 +1399,10 @@ def test_propose_mode_wires_credential_separated_prevention_coordinator(
     assert broker is captured["prevention_broker"]
     assert captured["prevention_broker"] == {
         "policy": prevention,
-        "token_command": ("/opt/bin/github-token", "read"),
+        "credential": github_credential,
         "github_host": "github.com",
         "base_url": "https://api.github.com",
         "timeout_seconds": 30.0,
-        "token_command_timeout": 30.0,
     }
 
 
@@ -716,7 +1415,9 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
     captured: dict[str, object] = {}
 
     @contextmanager
-    def fake_git_environment(command: object, *, temporary_root: Path) -> Iterator[object]:
+    def fake_git_environment(
+        command: object, *, temporary_root: Path
+    ) -> Iterator[object]:
         captured["github_command"] = command
         captured["temporary_root"] = temporary_root
         yield lambda: {"GIT_ASKPASS": "/private/helper"}
@@ -745,7 +1446,10 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
     assert result == 0
     assert captured["polled"] is True
     assert captured["temporary_root"] == state_directory
-    assert captured["github_command"].argv == ("gh", "auth", "token")
+    assert isinstance(captured["github_command"], runtime.CredentialSnapshot)
+    assert captured["controller_kwargs"]["github_credential"] is captured[
+        "github_command"
+    ]
     assert _mode(state_directory) == 0o700
     assert _mode(state_path) == 0o600
     assert _mode(state_directory / "poll.lock") == 0o600
@@ -753,6 +1457,43 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
         _mode(artifact) == 0o600 and artifact.stat().st_nlink == 1
         for artifact in state_directory.glob("state.sqlite3*")
     )
+
+
+def test_run_once_shares_one_rotating_github_credential_with_rest_and_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    issuances = iter(("publication-actor-token", "different-actor-token"))
+    helper_reads = 0
+    captured: dict[str, object] = {}
+
+    def read_secret(_command: object) -> str:
+        nonlocal helper_reads
+        helper_reads += 1
+        return next(issuances)
+
+    monkeypatch.setattr(runtime.SecretCommand, "read", read_secret)
+
+    class FakeController:
+        def poll_once(self) -> PollOutcome:
+            credential = captured["credential"]
+            rest_token = credential.read()
+            git_environment = captured["git_environment"]()
+            assert rest_token == "publication-actor-token"
+            assert git_environment["LOCALIZE_GUARDIAN_GIT_TOKEN"] == rest_token
+            return PollOutcome(lease_acquired=True, repositories_polled=1)
+
+    def build_controller(**kwargs: object) -> FakeController:
+        captured["credential"] = kwargs["github_credential"]
+        captured["git_environment"] = kwargs["git_environment"]
+        return FakeController()
+
+    monkeypatch.setattr(runtime, "_build_controller", build_controller)
+
+    assert runtime.run_once(config_path=config_path) == 0
+    assert helper_reads == 1
 
 
 def test_run_once_never_overlaps_a_poll_for_the_same_config(
@@ -929,9 +1670,7 @@ def test_first_poll_lock_creation_is_race_safe_across_processes(
     environment = os.environ.copy()
     existing_pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = os.pathsep.join(
-        value
-        for value in (str(project_root), existing_pythonpath)
-        if value
+        value for value in (str(project_root), existing_pythonpath) if value
     )
     script = """
 import os
@@ -1163,7 +1902,9 @@ def test_scheduled_run_skips_after_failed_attempt_on_same_day_but_manual_runs(
 
     monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
     monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
-    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+    monkeypatch.setattr(
+        runtime, "_build_controller", lambda **_kwargs: FakeController()
+    )
 
     assert runtime.run_once(config_path=config_path, scheduled=True) == 0
     assert calls == 0
@@ -1201,7 +1942,9 @@ def test_scheduled_run_catches_up_when_last_attempt_was_previous_local_day(
 
     monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
     monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
-    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+    monkeypatch.setattr(
+        runtime, "_build_controller", lambda **_kwargs: FakeController()
+    )
 
     assert runtime.run_once(config_path=config_path, scheduled=True) == 0
     assert calls == 1
@@ -1244,7 +1987,9 @@ def test_operator_pipeline_config_is_snapshotted_before_controller_poll(
         fake_snapshot,
     )
     monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
-    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FakeController())
+    monkeypatch.setattr(
+        runtime, "_build_controller", lambda **_kwargs: FakeController()
+    )
 
     assert runtime.run_once(config_path=config_path) == 0
     assert sequence == ["snapshot-enter", "github-model-poll", "snapshot-exit"]
@@ -1255,6 +2000,34 @@ def test_operator_pipeline_config_is_snapshotted_before_controller_poll(
         "repository": "acme/widgets",
         "bundle_digest": "d" * 64,
     }
+
+
+def test_setup_deadline_failure_is_recorded_before_runtime_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+
+    @contextmanager
+    def expired_signing_snapshot(**_kwargs: object) -> Iterator[None]:
+        raise PollDeadlineExceeded("Guardian poll deadline was exceeded.")
+        yield
+
+    monkeypatch.setattr(
+        runtime,
+        "_snapshot_poll_signing_material",
+        expired_signing_snapshot,
+    )
+
+    with pytest.raises(runtime.GuardianRuntimeError, match="failed safely"):
+        runtime.run_once(config_path=config_path)
+
+    with GuardianState(tmp_path / ".guardian/state.sqlite3") as state:
+        health = state.latest_health("guardian")
+    assert health is not None
+    assert health.status == "failed"
+    assert health.details == {"failure_types": ["PollDeadlineExceeded"]}
 
 
 def test_failed_scheduled_poll_is_not_retried_until_manual_request(
@@ -1281,7 +2054,9 @@ def test_failed_scheduled_poll_is_not_retried_until_manual_request(
 
     monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
     monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
-    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FailingController())
+    monkeypatch.setattr(
+        runtime, "_build_controller", lambda **_kwargs: FailingController()
+    )
 
     assert runtime.run_once(config_path=config_path, scheduled=True) == 1
     assert runtime.run_once(config_path=config_path, scheduled=True) == 0
@@ -1301,8 +2076,16 @@ def test_failed_scheduled_poll_is_not_retried_until_manual_request(
 
 
 def test_model_capacity_circuit_is_a_failed_runtime_outcome() -> None:
+    assert (
+        runtime._exit_code(PollOutcome(lease_acquired=True, model_circuit_open=True))
+        == 1
+    )
+
+
+@pytest.mark.parametrize("failure_field", ["prevention_failures", "remediation_failures"])
+def test_publication_failure_is_a_failed_runtime_outcome(failure_field: str) -> None:
     assert runtime._exit_code(
-        PollOutcome(lease_acquired=True, model_circuit_open=True)
+        PollOutcome(lease_acquired=True, **{failure_field: ("GitHubAPIError",)})
     ) == 1
 
 
@@ -1319,11 +2102,14 @@ def test_scheduled_due_uses_local_day_instead_of_utc_day() -> None:
         )
     )
 
-    assert runtime._scheduled_poll_is_due(
-        state,
-        now=now,
-        schedule=GuardianSchedule(),
-    ) is False
+    assert (
+        runtime._scheduled_poll_is_due(
+            state,
+            now=now,
+            schedule=GuardianSchedule(),
+        )
+        is False
+    )
 
 
 def test_scheduled_due_does_not_repeat_across_dst_fallback() -> None:
@@ -1341,11 +2127,14 @@ def test_scheduled_due_does_not_repeat_across_dst_fallback() -> None:
         )
     )
 
-    assert runtime._scheduled_poll_is_due(
-        state,
-        now=now,
-        schedule=GuardianSchedule(hour=0, minute=0),
-    ) is False
+    assert (
+        runtime._scheduled_poll_is_due(
+            state,
+            now=now,
+            schedule=GuardianSchedule(hour=0, minute=0),
+        )
+        is False
+    )
 
 
 def test_manual_poll_before_schedule_does_not_suppress_scheduled_poll() -> None:
@@ -1363,27 +2152,36 @@ def test_manual_poll_before_schedule_does_not_suppress_scheduled_poll() -> None:
         )
     )
 
-    assert runtime._scheduled_poll_is_due(
-        state,
-        now=now,
-        schedule=GuardianSchedule(hour=8, minute=7),
-    ) is True
+    assert (
+        runtime._scheduled_poll_is_due(
+            state,
+            now=now,
+            schedule=GuardianSchedule(hour=8, minute=7),
+        )
+        is True
+    )
 
 
 def test_scheduled_due_uses_configured_local_clock() -> None:
     now = datetime(2026, 8, 30, 5, 14, tzinfo=timezone(timedelta(hours=2)))
     state = SimpleNamespace(latest_health=lambda _component: None)
 
-    assert runtime._scheduled_poll_is_due(
-        state,
-        now=now,
-        schedule=GuardianSchedule(hour=5, minute=15),
-    ) is False
-    assert runtime._scheduled_poll_is_due(
-        state,
-        now=now + timedelta(minutes=1),
-        schedule=GuardianSchedule(hour=5, minute=15),
-    ) is True
+    assert (
+        runtime._scheduled_poll_is_due(
+            state,
+            now=now,
+            schedule=GuardianSchedule(hour=5, minute=15),
+        )
+        is False
+    )
+    assert (
+        runtime._scheduled_poll_is_due(
+            state,
+            now=now + timedelta(minutes=1),
+            schedule=GuardianSchedule(hour=5, minute=15),
+        )
+        is True
+    )
 
 
 def test_run_once_uses_configured_schedule_for_due_check(
@@ -1393,8 +2191,7 @@ def test_run_once_uses_configured_schedule_for_due_check(
     config_path = tmp_path / "guardian.yaml"
     _write_minimal_config(config_path)
     config_path.write_text(
-        "schedule: {hour: 13, minute: 0}\n"
-        + config_path.read_text(encoding="utf-8"),
+        "schedule: {hour: 13, minute: 0}\n" + config_path.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     monkeypatch.setattr(runtime, "_local_now", lambda: NOW)
@@ -1424,7 +2221,9 @@ def test_run_once_redacts_setup_and_poll_exception_messages(
             raise RuntimeError(secret)
 
     monkeypatch.setattr(runtime, "git_credential_environment", fake_credentials)
-    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FailingController())
+    monkeypatch.setattr(
+        runtime, "_build_controller", lambda **_kwargs: FailingController()
+    )
 
     with pytest.raises(runtime.GuardianRuntimeError) as error:
         runtime.run_once(config_path=config_path)

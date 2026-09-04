@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from localize.guardian import signing
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.signing import (
     _is_trusted_socket_ancestor,
     _private_agent_socket_proxy,
@@ -49,6 +51,25 @@ def _generate_key(root: Path, *, bits: int | None = None) -> tuple[Path, str]:
         text=True,
     ).stdout.split()[1]
     return public_key, fingerprint
+
+
+def test_signing_inspection_promotes_a_deadline_bound_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(signing, "run_bounded_process", timed_out)
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        signing._inspect_snapshot(
+            signing_program="/usr/bin/ssh-keygen",
+            public_key=tmp_path / "unused.pub",
+            expected_fingerprint="SHA256:" + "A" * 43,
+            key_type="ssh-ed25519",
+            deadline=PollDeadline(3, clock=lambda: 10.0),
+        )
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,7 @@ import shutil
 
 import pytest
 
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.prevention import (
     DraftPreventionPlan,
     DuplicatePreventionCandidateError,
@@ -19,6 +20,17 @@ from localize.guardian.prevention import (
 BASE_SHA = "a" * 40
 PATCHED_SHA = "b" * 40
 TEST_OVERLAY_HASH = "63fc72e23d93e0e514d89ef953479860fb4af3253abfa00294dbcf6764303440"
+
+
+class _TickingClock:
+    def __init__(self, step: float) -> None:
+        self.value = 0.0
+        self.step = step
+
+    def __call__(self) -> float:
+        current = self.value
+        self.value += self.step
+        return current
 
 
 def _workspaces(tmp_path: Path) -> tuple[Path, Path]:
@@ -119,6 +131,13 @@ def test_builds_deterministic_side_effect_free_draft_plan(tmp_path):
     assert "cannot merge or deploy" in plan.body
 
 
+def test_draft_plan_checks_deadline_during_recursive_inventory(tmp_path: Path) -> None:
+    deadline = PollDeadline(0.2, clock=_TickingClock(0.05))
+
+    with pytest.raises(PollDeadlineExceeded):
+        _plan(tmp_path, deadline=deadline)
+
+
 def test_hash_is_stable_across_whitespace_and_evidence_order(tmp_path):
     first = _plan(tmp_path / "first")
     second = _plan(
@@ -142,6 +161,44 @@ def test_untrusted_root_cause_cannot_inject_markdown_or_mentions(tmp_path):
     assert "@maintainers" not in plan.title
     assert "@maintainers" not in plan.body
     assert "[click](https://attacker.invalid)" not in plan.body
+
+
+def test_generated_draft_text_has_deterministic_utf8_byte_bounds(tmp_path):
+    large_argument = "界" * 1365
+    commands = tuple(
+        (f"/opt/localize-guardian/bin/check-{index}", large_argument)
+        for index in range(64)
+    )
+    results = tuple(
+        result
+        for argv in commands
+        for result in (
+            _result("base", TestOutcome.FAILED, argv=argv),
+            _result("patched", TestOutcome.PASSED, argv=argv),
+        )
+    )
+    feedback_ids = tuple(f"review_comment:{index}:" + "a" * 220 for index in range(100))
+
+    first = _plan(
+        tmp_path / "first",
+        root_cause="界" * 500,
+        evidence_feedback_ids=feedback_ids,
+        test_results=results,
+    )
+    second = _plan(
+        tmp_path / "second",
+        root_cause="界" * 500,
+        evidence_feedback_ids=feedback_ids,
+        test_results=results,
+    )
+
+    assert first.title == second.title
+    assert first.body == second.body
+    assert len(first.title) <= 120
+    assert len(first.title.encode("utf-8")) <= 256
+    assert len(first.body.encode("utf-8")) <= 60 * 1024
+    assert "full-list fingerprint" in first.body
+    assert "additional item" in first.body
 
 
 def test_rejects_a_previously_seen_root_cause_and_evidence_hash(tmp_path):

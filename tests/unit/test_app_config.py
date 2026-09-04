@@ -7,9 +7,11 @@ import yaml
 
 from localize.app_config import (
     AppConfig,
+    DEFAULT_TRANSLATION_MODEL,
     _non_empty_env,
     _scrub_blank_env,
     load_app_config,
+    resolve_semantic_review_model,
     validate_config,
 )
 from localize.localization_formats import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
@@ -150,7 +152,7 @@ class TestLoadAppConfig:
                         config = load_app_config()
 
         # Should use default values
-        assert config.model_name == "gpt-4"
+        assert config.model_name == DEFAULT_TRANSLATION_MODEL
         assert config.dry_run is True
         assert config.holistic_review_chunk_size == 30  # Updated from 75 to 30
         assert config.max_concurrent_api_calls == 1
@@ -607,6 +609,25 @@ class TestLoadAppConfig:
 
         assert config.review_reasoning_effort is None
 
+    @pytest.mark.parametrize("model", ["gpt-6-astra", "openai:gpt-6-astra"])
+    def test_load_rejects_unsupported_astra_review_reasoning_effort(self, model):
+        mock_config = {
+            "dry_run": True,
+            "review_model_name": model,
+            "review_reasoning_effort": "none",
+        }
+
+        with patch("localize.app_config._load_yaml_config", return_value=mock_config):
+            with patch("localize.app_config.setup_logger") as mock_logger:
+                mock_logger.return_value = MagicMock()
+                with patch.dict(os.environ, {}, clear=True):
+                    with pytest.raises(SystemExit):
+                        load_app_config()
+
+        assert "not supported" in str(
+            mock_logger.return_value.critical.call_args.args[1]
+        )
+
     def test_load_config_with_dotenv_file(self):
         """Test that .env file is loaded properly."""
         mock_config = {"model_name": "gpt-4", "dry_run": True}
@@ -838,6 +859,46 @@ class TestValidateConfig:
 
         assert any("translation_source" in error for error in errors)
 
+    @pytest.mark.parametrize("model", ["gpt-6-astra", "openai:gpt-6-astra"])
+    def test_astra_review_model_rejects_reasoning_none(self, model):
+        config = {
+            **self.GOOD,
+            "review_model_name": model,
+            "review_reasoning_effort": "none",
+        }
+
+        errors = self._errors(validate_config(config, path_exists=lambda p: True))
+
+        assert any("review_reasoning_effort 'none' is not supported" in e for e in errors)
+
+    def test_non_openai_aisuite_model_does_not_inherit_astra_constraints(self):
+        config = {
+            **self.GOOD,
+            "review_model_name": "anthropic:gpt-6-astra",
+            "review_reasoning_effort": "none",
+        }
+
+        errors = self._errors(validate_config(config, path_exists=lambda p: True))
+
+        assert not any("reasoning_effort" in error for error in errors)
+
+    def test_astra_semantic_model_rejects_reasoning_none(self):
+        config = {
+            **self.GOOD,
+            "semantic_review": {
+                "enabled": True,
+                "model": "openai:gpt-6-astra",
+                "reasoning_effort": "none",
+            },
+        }
+
+        errors = self._errors(validate_config(config, path_exists=lambda p: True))
+
+        assert any(
+            "semantic_review.reasoning_effort 'none' is not supported" in error
+            for error in errors
+        )
+
     def test_missing_required_paths_are_errors(self):
         issues = validate_config({"supported_locales": self.GOOD["supported_locales"]},
                                  path_exists=lambda p: True)
@@ -1028,7 +1089,10 @@ class TestProviderAbstraction:
         assert config.model_provider_name == "aisuite"
         _, kwargs = factory.call_args
         assert kwargs["provider_name"] == "aisuite"
-        assert kwargs["model_names"] == ("gpt-4", "gpt-4")
+        assert kwargs["model_names"] == (
+            DEFAULT_TRANSLATION_MODEL,
+            DEFAULT_TRANSLATION_MODEL,
+        )
         assert config.model_provider is provider
 
     def test_default_aisuite_missing_openai_key_exits_for_openai_models(self):
@@ -1198,4 +1262,62 @@ class TestProviderAbstraction:
         assert kwargs["aisuite_provider_configs"] == {
             "anthropic": {"api_key": "from-env-or-secret"}
         }
-        assert kwargs["model_names"] == ("gpt-4", "gpt-4")
+        assert kwargs["model_names"] == (
+            DEFAULT_TRANSLATION_MODEL,
+            DEFAULT_TRANSLATION_MODEL,
+        )
+
+
+class TestSemanticReviewModelResolution:
+    def test_enabled_empty_model_inherits_effective_review_model(self):
+        enabled, model = resolve_semantic_review_model(
+            {"semantic_review": {"enabled": True, "model": ""}},
+            review_model_name="gpt-5.6-terra",
+        )
+
+        assert enabled is True
+        assert model == "gpt-5.6-terra"
+
+    def test_enabled_null_model_uses_shared_translation_default(self):
+        enabled, model = resolve_semantic_review_model(
+            {"semantic_review": {"enabled": True, "model": None}}
+        )
+
+        assert enabled is True
+        assert model == DEFAULT_TRANSLATION_MODEL
+
+    @pytest.mark.parametrize("model", ["gpt-6-astra", "openai:gpt-6-astra"])
+    def test_enabled_astra_rejects_explicit_reasoning_none(self, model):
+        with pytest.raises(ValueError, match="reasoning_effort.*not supported"):
+            resolve_semantic_review_model(
+                {
+                    "semantic_review": {
+                        "enabled": True,
+                        "model": model,
+                        "reasoning_effort": "none",
+                    }
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("semantic_review", "message"),
+        [
+            ("enabled", "semantic_review must be a mapping"),
+            ({"enabled": 1}, "semantic_review.enabled must be a boolean"),
+            (
+                {"enabled": True, "model": ["gpt-4o-mini"]},
+                "semantic_review.model must be a string or null",
+            ),
+            (
+                {"enabled": True, "reasoning_effort": "extreme"},
+                "semantic_review.reasoning_effort must be one of",
+            ),
+        ],
+    )
+    def test_malformed_semantic_review_configuration_fails_closed(
+        self,
+        semantic_review,
+        message,
+    ):
+        with pytest.raises(ValueError, match=message):
+            resolve_semantic_review_model({"semantic_review": semantic_review})

@@ -58,7 +58,7 @@ translation_source: "git"
 model_provider: "aisuite"           # Default AISuite-backed provider abstraction.
 model_name: "gpt-4o-mini"          # fast initial translation
 review_model_name: "gpt-5.6-terra" # balanced holistic review pass
-review_reasoning_effort: "none"    # deterministic, low-latency review behavior
+review_reasoning_effort: "none"    # lowest-latency review without deliberative reasoning
 
 # Optional semantic sidecar. If auto_apply_error_suggestions is true, only
 # error-level findings with concrete suggested_value are applied, and only after
@@ -80,7 +80,7 @@ review_reasoning_effort: "none"    # deterministic, low-latency review behavior
 # only when you explicitly want the direct OpenAI SDK fallback path.
 # model_provider: "aisuite"
 # model_name: "openai:gpt-4o-mini"
-# review_model_name: "openai:gpt-4o"
+# review_model_name: "openai:gpt-5.6-terra"
 # aisuite:
 #   provider_configs:
 #     # Keep secrets in environment variables or your secret manager, not here.

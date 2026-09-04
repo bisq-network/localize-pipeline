@@ -207,6 +207,9 @@ def test_neutral_example_project_is_packaged():
     assert config["model_provider"] == "aisuite"
     assert config["translation_source"] == "git"
     assert config["localization_format"] == "java_properties"
+    assert config["model_name"] == "gpt-4o-mini"
+    assert config["review_model_name"] == "gpt-5.6-terra"
+    assert config["review_reasoning_effort"] == "none"
     target_text = (resources / "messages_de.properties").read_text(encoding="utf-8")
     assert "settings.save" not in target_text
     assert "account.name" not in target_text

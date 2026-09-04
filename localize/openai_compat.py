@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_COMPLETION_TOKEN_MODEL_PREFIXES = (
     "gpt-5",
+    "gpt-6",
     "o1",
     "o3",
     "o4",

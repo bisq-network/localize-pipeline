@@ -14,6 +14,7 @@ import jsonschema
 import yaml
 from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
 
+from localize.app_config import resolve_semantic_review_model
 from localize.json_response import (
     chat_json_mode_kwargs,
     chat_reasoning_effort_kwargs,
@@ -402,8 +403,23 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         logging.getLogger(__name__).error("Semantic review configuration failed: %s", exc)
         return 1
     set_placeholder_profile(placeholder_profile)
-    semantic_review_config = config.get("semantic_review", {}) or {}
-    if not bool(semantic_review_config.get("enabled", False)):
+    logger = logging.getLogger(__name__)
+    review_model_override = str(os.environ.get("REVIEW_MODEL_NAME") or "").strip()
+    effective_review_model = (
+        review_model_override
+        or str(config.get("review_model_name") or config.get("model_name") or "").strip()
+        or None
+    )
+    try:
+        semantic_review_enabled, model = resolve_semantic_review_model(
+            config,
+            review_model_name=effective_review_model,
+        )
+    except ValueError as exc:
+        logger.error("Semantic review configuration failed: %s", exc)
+        return 1
+    semantic_review_config = dict(config.get("semantic_review") or {})
+    if not semantic_review_enabled:
         return 0
     if bool(config.get("dry_run", False)):
         append_semantic_review_findings(args.validation_summary, [])
@@ -431,19 +447,13 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
 
     brand_glossary = [str(term) for term in config.get("brand_technical_glossary", [])]
     style_rules_by_locale = config.get("style_rules", {}) or {}
-    model = str(
-        semantic_review_config.get(
-            "model",
-            config.get("review_model_name", config.get("model_name", "gpt-4o")),
-        )
-    )
+    assert model is not None
     reasoning_effort = normalize_reasoning_effort(
         semantic_review_config.get("reasoning_effort")
     )
     provider_name = str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
     api_base_url = os.environ.get("OPENAI_BASE_URL") or config.get("api_base_url")
     aisuite_config = config.get("aisuite", {}) or {}
-    logger = logging.getLogger(__name__)
     try:
         provider = create_model_provider(
             provider_name=provider_name,

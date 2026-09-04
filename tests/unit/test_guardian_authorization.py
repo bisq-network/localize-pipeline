@@ -2,7 +2,11 @@ from dataclasses import replace
 
 import pytest
 
-from localize.guardian.authorization import IntakePolicyError, authorize_feedback
+from localize.guardian.authorization import (
+    IntakePolicyError,
+    authorize_feedback,
+    authorize_historical_feedback,
+)
 from localize.guardian.github import (
     CodeRabbitCoverage,
     CodeRabbitCoverageStatus,
@@ -258,4 +262,112 @@ def test_rejects_snapshot_identity_mismatch_before_inspecting_feedback():
             snapshot=snapshot,
             path_locales={"l10n/messages_ru.properties": "ru"},
             changed_locales=("ru",),
+        )
+
+
+def test_historical_authorization_accepts_only_closed_pull_requests():
+    accepted = authorize_historical_feedback(
+        policy=_policy(),
+        snapshot=_snapshot(_feedback(1), pull=_pull(state="closed")),
+        path_locales={"l10n/messages_ru.properties": "ru"},
+        changed_locales=("ru",),
+    )
+
+    assert [event.feedback_id for event in accepted.events] == ["review_comment:1"]
+
+    for state in ("open", "merged", "CLOSED"):
+        with pytest.raises(IntakePolicyError, match="policy"):
+            authorize_historical_feedback(
+                policy=_policy(),
+                snapshot=_snapshot(_feedback(1), pull=_pull(state=state)),
+                path_locales={"l10n/messages_ru.properties": "ru"},
+                changed_locales=("ru",),
+            )
+
+
+def test_historical_authorization_preserves_feedback_trust_path_and_locale_rules():
+    feedback = (
+        _feedback(1),
+        _feedback(2, author_id=999),
+        _feedback(3, path="src/Unrelated.java"),
+        _feedback(4, deleted=True),
+    )
+    path_locales = {"l10n/messages_ru.properties": "ru"}
+
+    live = authorize_feedback(
+        policy=_policy(),
+        snapshot=_snapshot(*feedback),
+        path_locales=path_locales,
+        changed_locales=("ru",),
+    )
+    historical = authorize_historical_feedback(
+        policy=_policy(),
+        snapshot=_snapshot(*feedback, pull=_pull(state="closed")),
+        path_locales=path_locales,
+        changed_locales=("ru",),
+    )
+
+    assert historical == live
+
+
+@pytest.mark.parametrize(
+    "pull",
+    [
+        _pull(state="closed", author_id=999),
+        _pull(state="closed", head_owner_id=999),
+        _pull(state="closed", head_repository_id=999),
+        _pull(state="closed", base_repository_id=999),
+        _pull(state="closed", head_sha="not-a-sha"),
+        _pull(state="closed", base_sha="not-a-sha"),
+        _pull(state="closed", head_sha="A" * 40),
+        _pull(state="closed", base_sha="b" * 41),
+    ],
+)
+def test_historical_authorization_preserves_numeric_and_revision_policy(pull):
+    with pytest.raises(IntakePolicyError, match="policy"):
+        authorize_historical_feedback(
+            policy=_policy(),
+            snapshot=_snapshot(_feedback(1), pull=pull),
+            path_locales={"l10n/messages_ru.properties": "ru"},
+            changed_locales=("ru",),
+        )
+
+
+@pytest.mark.parametrize(
+    "feedback",
+    [
+        _feedback(1, repository="attacker/widgets"),
+        _feedback(1, pull_number=13),
+    ],
+)
+def test_historical_authorization_binds_revisions_to_the_closed_pull(feedback):
+    with pytest.raises(IntakePolicyError, match="authorized pull request"):
+        authorize_historical_feedback(
+            policy=_policy(),
+            snapshot=_snapshot(feedback, pull=_pull(state="closed")),
+            path_locales={"l10n/messages_ru.properties": "ru"},
+            changed_locales=("ru",),
+        )
+
+
+def test_historical_authorization_rejects_duplicate_revisions_and_empty_locale_scope():
+    snapshot = _snapshot(
+        _feedback(1),
+        _feedback(1),
+        pull=_pull(state="closed"),
+    )
+    with pytest.raises(IntakePolicyError, match="repeats feedback object"):
+        authorize_historical_feedback(
+            policy=_policy(),
+            snapshot=snapshot,
+            path_locales={"l10n/messages_ru.properties": "ru"},
+            changed_locales=("ru",),
+        )
+
+    with pytest.raises(IntakePolicyError, match="no changed target locales"):
+        authorize_historical_feedback(
+            policy=_policy(),
+            snapshot=_snapshot(_feedback(1), pull=_pull(state="closed")),
+            path_locales={"l10n/messages_ru.properties": "ru"},
+            changed_locales=(),
         )

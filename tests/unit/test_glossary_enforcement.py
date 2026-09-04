@@ -109,6 +109,27 @@ def test_holistic_review_prompt_allows_grammatical_inflection():
     assert "must contain" not in prompt
 
 
+def test_holistic_review_prompt_aligns_related_ui_terminology():
+    prompt = _build_holistic_review_system_prompt(
+        target_language="Estonian",
+        keys_to_review=["registration.proposalTxId"],
+        source_content="registration.proposalTxId=Proposal transaction ID",
+        translated_content=(
+            "registration.how.info=Paste the proposal transaction ID below\n"
+            "registration.proposalTxId=Proposal transaction ID"
+        ),
+        style_rules_text="",
+    )
+
+    assert "Consistent UI Terminology" in prompt
+    assert "shared dotted prefix" in prompt
+    assert "related read-only context keys" in prompt
+    assert "Context keys outside the requested scope are read-only" in prompt
+    assert "never edit or return them" in prompt
+    assert "full source and translated files" not in prompt
+    assert "Bisq" not in prompt
+
+
 def test_prompt_only_glossary_is_not_exactly_enforced():
     glossary = {"entry": "запись"}
 

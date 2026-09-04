@@ -165,6 +165,66 @@ def test_cli_check_alias_runs_preflight_validation(tmp_path, capsys):
     assert "Preflight OK" in captured.out
 
 
+def test_cli_check_applies_valid_astra_model_and_effort_overrides(
+    tmp_path, monkeypatch, capsys
+):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "target_project_root": str(repo),
+                "input_folder": str(i18n),
+                "review_model_name": "gpt-5.6-terra",
+                "review_reasoning_effort": "none",
+                "dry_run": True,
+                "supported_locales": [{"code": "de", "name": "German"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "gpt-6-astra")
+    monkeypatch.setenv("REVIEW_REASONING_EFFORT", "low")
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Preflight OK" in captured.out
+    assert "not supported" not in captured.err
+
+
+def test_cli_check_rejects_invalid_astra_effort_override(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "target_project_root": str(repo),
+                "input_folder": str(i18n),
+                "review_model_name": "gpt-6-astra",
+                "review_reasoning_effort": "low",
+                "dry_run": True,
+                "supported_locales": [{"code": "de", "name": "German"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "gpt-6-astra")
+    monkeypatch.setenv("REVIEW_REASONING_EFFORT", "none")
+
+    exit_code = cli.main(["check", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "review_reasoning_effort 'none' is not supported" in captured.err
+    assert "Preflight OK" not in captured.out
+
+
 def test_cli_validate_loads_project_dotenv_before_checking_key(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     repo = tmp_path / "repo"
@@ -229,6 +289,59 @@ def test_cli_doctor_prints_redacted_effective_config(tmp_path, monkeypatch, caps
     assert "semantic_review: enabled" in captured.out
     assert "OPENAI_API_KEY: set" in captured.out
     assert "sk-secret-value" not in captured.out
+
+
+def test_cli_doctor_reports_shared_model_defaults(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "target_project_root": str(repo),
+                "input_folder": str(i18n),
+                "dry_run": True,
+                "supported_locales": [{"code": "de", "name": "German"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "model_name: gpt-4o-mini" in captured.out
+    assert "review_model_name: gpt-4o-mini" in captured.out
+
+
+def test_cli_doctor_reports_malformed_semantic_review_without_traceback(
+    tmp_path, capsys
+):
+    repo = tmp_path / "repo"
+    i18n = repo / "i18n"
+    i18n.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "target_project_root": str(repo),
+                "input_folder": str(i18n),
+                "dry_run": True,
+                "semantic_review": "enabled",
+                "supported_locales": [{"code": "de", "name": "German"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "semantic_review must be a mapping" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_cli_smoke_is_read_only_and_creates_missing_runtime_queue_dirs(tmp_path, capsys):

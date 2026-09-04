@@ -53,6 +53,24 @@ async def test_newer_openai_models_use_max_completion_tokens():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-6-astra", "openai:gpt-6-astra"])
+async def test_gpt6_models_use_newer_completion_contract(model):
+    client = _FakeClient()
+
+    await create_chat_completion(
+        client,
+        model=model,
+        messages=[],
+        completion_token_limit=4096,
+        temperature=0,
+    )
+
+    assert client.calls[0]["max_completion_tokens"] == 4096
+    assert "max_tokens" not in client.calls[0]
+    assert "temperature" not in client.calls[0]
+
+
+@pytest.mark.asyncio
 async def test_default_models_keep_max_tokens_for_provider_compatibility():
     client = _FakeClient()
 

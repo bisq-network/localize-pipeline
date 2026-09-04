@@ -14,20 +14,27 @@ import json
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from fnmatch import fnmatchcase
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
-from localize.guardian.credentials import CredentialError, SecretCommand
+from localize.guardian.deadline import PollDeadline
+from localize.guardian.credentials import (
+    CredentialError,
+    CredentialSnapshot,
+    SecretCommand,
+)
 from localize.guardian.models import AllowedHeadRepository, TrustedActor
 
 
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]*$")
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+_FULL_LOWER_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _MARKER_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 _CODERABBIT_LOGINS = frozenset({"coderabbitai[bot]"})
 _MAX_PAGINATION_PAGES = 100
@@ -37,7 +44,16 @@ _MAX_OPEN_PULL_REQUESTS = 200
 _MAX_FEEDBACK_ITEMS_PER_PULL = 500
 _MAX_FEEDBACK_BYTES_PER_PULL = 2 * 1024 * 1024
 _MAX_CHANGED_FILES_PER_PULL = 500
+_MAX_AFFECTED_PATHS_PER_OPEN_PULL = 2 * _MAX_CHANGED_FILES_PER_PULL
 _MAX_CHANGED_FILE_BYTES_PER_PULL = 4 * 1024 * 1024
+_MAX_REPOSITORY_PATH_BYTES = 4096
+_MAX_CLOSED_PULL_REQUESTS_PER_POLL = 100
+_MAX_CLOSED_PULL_LIST_PAGES_PER_POLL = 100
+_MAX_CLOSED_PULL_HYDRATION_ATTEMPTS = 3
+_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE = (
+    _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL * 100
+)
+_MAX_CLOSED_PULL_EXCLUSIONS = _MAX_PAGINATION_ITEMS
 
 _RATE_LIMIT_MARKERS = (
     "review limit reached",
@@ -132,7 +148,11 @@ class GitHubRepositoryPolicy:
     def __post_init__(self) -> None:
         if not _valid_repository_name(self.repository):
             raise ValueError("repository must use the exact 'owner/name' form")
-        if self.repository_id is not None and self.repository_id <= 0:
+        if self.repository_id is not None and (
+            isinstance(self.repository_id, bool)
+            or not isinstance(self.repository_id, int)
+            or self.repository_id <= 0
+        ):
             raise ValueError("repository_id must be a positive integer")
         _validate_base_branch(self.base_branch)
         if not self.allowed_pr_authors:
@@ -199,6 +219,15 @@ class GitHubRepositoryIdentity:
 
 
 @dataclass(frozen=True)
+class BaseRevisionSnapshot:
+    """Immutable current base revision captured from the configured repository."""
+
+    repository_identity: GitHubRepositoryIdentity
+    branch: str
+    sha: str
+
+
+@dataclass(frozen=True)
 class PullRequestSnapshot:
     repository: str
     base_repository_id: int
@@ -220,6 +249,7 @@ class PullRequestSnapshot:
     head_repository_id: int | None
     base_sha: str
     base_ref: str
+    base_repository: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,12 +316,125 @@ class ChangedFile:
 
 
 @dataclass(frozen=True)
+class OpenPullPathIdentity:
+    """Exact identity permitted to be excluded from an open-path fence."""
+
+    repository: str
+    repository_id: int
+    pull_id: int
+    number: int
+    head_repository: str
+    head_repository_id: int
+    head_ref: str
+    head_sha: str
+
+    def __post_init__(self) -> None:
+        if not _valid_repository_name(self.repository) or not _valid_repository_name(
+            self.head_repository
+        ):
+            raise ValueError("open pull repositories must use owner/name form")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (
+                self.repository_id,
+                self.pull_id,
+                self.number,
+                self.head_repository_id,
+            )
+        ):
+            raise ValueError("open pull numeric identities must be positive integers")
+        if (
+            not isinstance(self.head_ref, str)
+            or not _BRANCH_RE.fullmatch(self.head_ref)
+            or len(self.head_ref) > 255
+            or not isinstance(self.head_sha, str)
+            or not _FULL_LOWER_SHA_RE.fullmatch(self.head_sha)
+        ):
+            raise ValueError("open pull head identity is malformed")
+
+
+@dataclass(frozen=True)
+class OpenPullPathAuthority:
+    """Bounded current and previous paths for one exact open pull request."""
+
+    identity: OpenPullPathIdentity
+    changed_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, OpenPullPathIdentity):
+            raise ValueError("open pull path authority requires an exact identity")
+        if isinstance(self.changed_paths, (str, bytes)):
+            raise ValueError("open pull changed paths must be a bounded sequence")
+        paths = tuple(self.changed_paths)
+        invalid_path = any(
+            not isinstance(path, str)
+            or not path
+            or (
+                isinstance(path, str)
+                and (
+                    len(path.encode("utf-8")) > _MAX_REPOSITORY_PATH_BYTES
+                    or path.startswith("/")
+                    or "\\" in path
+                    or any(part in {"", ".", ".."} for part in path.split("/"))
+                    or any(character in path for character in "\r\n\x00")
+                )
+            )
+            for path in paths
+        )
+        if (
+            len(paths) > _MAX_AFFECTED_PATHS_PER_OPEN_PULL
+            or invalid_path
+            or len(set(paths)) != len(paths)
+        ):
+            raise ValueError("open pull changed paths are malformed or unbounded")
+        object.__setattr__(self, "changed_paths", tuple(sorted(paths)))
+
+
+@dataclass(frozen=True)
 class PullRequestFeedbackSnapshot:
     repository_identity: GitHubRepositoryIdentity
     pull_request: PullRequestSnapshot
     feedback: tuple[FeedbackRevision, ...]
     coderabbit: CodeRabbitCoverage
     changed_files: tuple[ChangedFile, ...] = ()
+
+
+@dataclass(frozen=True)
+class ClosedPullScanPosition:
+    """Observed GitHub list position for one closed pull."""
+
+    page: int
+    offset: int
+    cycle_complete: bool = False
+
+
+@dataclass(frozen=True)
+class ClosedPullScanItem:
+    """One bounded hydration outcome from the frozen historical window."""
+
+    position: ClosedPullScanPosition
+    snapshot: PullRequestFeedbackSnapshot | None = None
+    pull_id: int | None = None
+    pull_number: int | None = None
+    failure_type: str | None = None
+    hydration_attempted: bool = False
+
+
+@dataclass(frozen=True)
+class ClosedPullScanResult:
+    """One bounded restart-safe scan over the frozen historical window."""
+
+    items: tuple[ClosedPullScanItem, ...]
+    hydration_attempts: int
+    cycle_complete: bool = False
+
+    @property
+    def snapshots(self) -> tuple[PullRequestFeedbackSnapshot, ...]:
+        return tuple(item.snapshot for item in self.items if item.snapshot is not None)
+
+    @property
+    def failures(self) -> tuple[ClosedPullScanItem, ...]:
+        return tuple(item for item in self.items if item.failure_type is not None)
 
 
 @dataclass(frozen=True)
@@ -309,27 +452,47 @@ def _as_mapping(value: Any, *, label: str) -> Mapping[str, Any]:
 
 
 def _as_int(value: Any, *, label: str) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise GitHubAPIError(f"GitHub returned malformed {label} data")
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise GitHubAPIError(f"GitHub returned malformed {label} data") from exc
+    return value
 
 
-def _optional_int(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
+def _trusted_actor_from_payload(value: Any, *, label: str) -> TrustedActor:
+    payload = _as_mapping(value, label=label)
+    login = payload.get("login")
+    actor_id = _as_int(payload.get("id"), label=f"{label} id")
+    actor_type = payload.get("type")
+    if (
+        not isinstance(login, str)
+        or not login
+        or len(login.encode("utf-8")) > 256
+        or any(character in login for character in "\r\n\x00")
+        or actor_type not in {"User", "Bot"}
+    ):
+        raise GitHubAPIError(f"GitHub returned malformed {label} data")
+    return TrustedActor(login=login, id=actor_id, type=actor_type)
+
+
+def _optional_int(value: Any, *, label: str) -> int | None:
+    if value is None:
         return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise GitHubAPIError(f"GitHub returned malformed {label} data")
+    return value
 
 
 def _parse_pull_request(repository: str, payload: Mapping[str, Any]) -> PullRequestSnapshot:
     head = _as_mapping(payload.get("head"), label="pull-request head")
     base = _as_mapping(payload.get("base"), label="pull-request base")
-    head_repo = _as_mapping(head.get("repo"), label="pull-request head repository")
+    # GitHub returns ``head.repo: null`` after a contributor deletes a fork.
+    # That is a normal, permanently unauthorized historical shape rather than
+    # malformed API data; retain the pull metadata so policy can skip it.
+    raw_head_repo = head.get("repo")
+    head_repo = (
+        {}
+        if raw_head_repo is None
+        else _as_mapping(raw_head_repo, label="pull-request head repository")
+    )
     base_repo = _as_mapping(base.get("repo"), label="pull-request base repository")
     head_user = _as_mapping(head.get("user") or {}, label="pull-request head owner")
     author = _as_mapping(payload.get("user") or {}, label="pull-request author")
@@ -343,17 +506,52 @@ def _parse_pull_request(repository: str, payload: Mapping[str, Any]) -> PullRequ
         created_at=str(payload.get("created_at") or ""),
         updated_at=str(payload.get("updated_at") or ""),
         author_login=str(author.get("login") or ""),
-        author_id=_optional_int(author.get("id")),
+        author_id=_optional_int(author.get("id"), label="pull-request author id"),
         author_type=str(author.get("type") or ""),
         head_sha=str(head.get("sha") or ""),
         head_ref=str(head.get("ref") or ""),
         head_owner=str(head_user.get("login") or ""),
-        head_owner_id=_optional_int(head_user.get("id")),
+        head_owner_id=_optional_int(
+            head_user.get("id"),
+            label="pull-request head owner id",
+        ),
         head_owner_type=str(head_user.get("type") or ""),
         head_repository=str(head_repo.get("full_name") or ""),
-        head_repository_id=_optional_int(head_repo.get("id")),
+        head_repository_id=_optional_int(
+            head_repo.get("id"),
+            label="pull-request head repository id",
+        ),
         base_sha=str(base.get("sha") or ""),
         base_ref=str(base.get("ref") or ""),
+        base_repository=str(base_repo.get("full_name") or ""),
+    )
+
+
+def _pull_hydration_identity(pull: PullRequestSnapshot) -> tuple[object, ...]:
+    """Return metadata that must stay immutable throughout one hydration."""
+
+    return (
+        pull.repository,
+        pull.base_repository,
+        pull.base_repository_id,
+        pull.pull_id,
+        pull.number,
+        pull.state,
+        pull.html_url,
+        pull.created_at,
+        pull.updated_at,
+        pull.author_login,
+        pull.author_id,
+        pull.author_type,
+        pull.head_sha,
+        pull.head_ref,
+        pull.head_owner,
+        pull.head_owner_id,
+        pull.head_owner_type,
+        pull.head_repository,
+        pull.head_repository_id,
+        pull.base_sha,
+        pull.base_ref,
     )
 
 
@@ -372,7 +570,10 @@ def _parse_feedback(
         or payload.get("created_at")
         or ""
     )
-    line = _optional_int(payload.get("line") or payload.get("original_line"))
+    raw_line = payload.get("line")
+    if raw_line is None:
+        raw_line = payload.get("original_line")
+    line = _optional_int(raw_line, label="feedback line")
     return FeedbackRevision(
         repository=repository,
         pull_number=pull_number,
@@ -380,7 +581,7 @@ def _parse_feedback(
         source_id=source_id,
         node_id=str(payload.get("node_id")) if payload.get("node_id") is not None else None,
         author_login=str(user.get("login") or ""),
-        author_id=_optional_int(user.get("id")),
+        author_id=_optional_int(user.get("id"), label="feedback author id"),
         author_type=str(user.get("type") or ""),
         body=str(payload.get("body") or ""),
         created_at=created_at,
@@ -407,6 +608,20 @@ def _parse_changed_file(payload: Mapping[str, Any]) -> ChangedFile:
             str(payload.get("patch")) if payload.get("patch") is not None else None
         ),
     )
+
+
+def _parse_utc_timestamp(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise GitHubAPIError(f"GitHub returned malformed {label} data")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise GitHubAPIError(f"GitHub returned malformed {label} data") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise GitHubAPIError(f"GitHub returned malformed {label} data")
+    return parsed.astimezone(timezone.utc)
+
+
 def _latest_by_object(
     feedback: Iterable[FeedbackRevision],
 ) -> dict[tuple[str, int, FeedbackKind, str], FeedbackRevision]:
@@ -442,8 +657,30 @@ def _coderabbit_coverage(feedback: Iterable[FeedbackRevision]) -> CodeRabbitCove
 
 
 class _GitHubHTTP:
-    def __init__(self, client: httpx.Client) -> None:
+    def __init__(
+        self,
+        client: httpx.Client,
+        *,
+        deadline: PollDeadline | None = None,
+    ) -> None:
         self.client = client
+        self.deadline = deadline
+
+    def _request_timeout(self) -> httpx.Timeout:
+        if self.deadline is None:
+            return self.client.timeout
+        remaining = self.deadline.remaining()
+        configured = self.client.timeout
+
+        def clamp(value: float | None) -> float:
+            return remaining if value is None else min(float(value), remaining)
+
+        return httpx.Timeout(
+            connect=clamp(configured.connect),
+            read=clamp(configured.read),
+            write=clamp(configured.write),
+            pool=clamp(configured.pool),
+        )
 
     @staticmethod
     def _raise_for_status(response: httpx.Response, *, method: str) -> None:
@@ -467,16 +704,21 @@ class _GitHubHTTP:
             f"GitHub API {method} request failed with status {response.status_code}"
         )
 
-    @staticmethod
-    def _bounded_json(response: httpx.Response, *, label: str) -> Any:
+    def _bounded_json(self, response: httpx.Response, *, label: str) -> Any:
         content = bytearray()
         try:
             for chunk in response.iter_bytes():
+                if self.deadline is not None:
+                    self.deadline.require_remaining()
                 if len(content) + len(chunk) > _MAX_RESPONSE_BYTES:
                     raise GitHubAPIError(
                         f"GitHub API {label} response exceeded the byte limit"
                     )
                 content.extend(chunk)
+            if self.deadline is not None:
+                self.deadline.require_remaining()
+        except httpx.TimeoutException:
+            raise
         except httpx.HTTPError as exc:
             raise GitHubAPIError(f"GitHub API {label} response failed") from exc
         try:
@@ -494,17 +736,23 @@ class _GitHubHTTP:
         params: Mapping[str, Any] | None = None,
         payload: Mapping[str, Any] | None = None,
     ) -> Any:
+        request_timeout = self._request_timeout()
         try:
             with self.client.stream(
                 method,
                 url,
                 params=params,
                 json=payload,
+                timeout=request_timeout,
             ) as response:
                 self._raise_for_status(response, method=method)
                 return self._bounded_json(response, label=method)
         except GitHubAPIError:
             raise
+        except httpx.TimeoutException as exc:
+            if self.deadline is not None:
+                self.deadline.require_remaining()
+            raise GitHubAPIError(f"GitHub API {method} request failed") from exc
         except httpx.HTTPError as exc:
             raise GitHubAPIError(f"GitHub API {method} request failed") from exc
 
@@ -520,7 +768,7 @@ class _GitHubHTTP:
         effective_item_limit = min(max_items, _MAX_PAGINATION_ITEMS)
         items: list[Mapping[str, Any]] = []
         next_url: str | None = url
-        next_params = dict(params or {})
+        next_params: Mapping[str, Any] | None = dict(params or {})
         next_params.setdefault("per_page", 100)
         seen_urls: set[str] = set()
         pages = 0
@@ -545,17 +793,23 @@ class _GitHubHTTP:
             if canonical_url in seen_urls:
                 raise GitHubAPIError("GitHub API returned a repeated pagination link")
             seen_urls.add(canonical_url)
+            request_timeout = self._request_timeout()
             try:
                 with self.client.stream(
                     "GET",
                     resolved_url,
                     params=next_params,
+                    timeout=request_timeout,
                 ) as response:
                     self._raise_for_status(response, method="GET")
                     page = self._bounded_json(response, label="GET")
                     next_link = response.links.get("next")
             except GitHubAPIError:
                 raise
+            except httpx.TimeoutException as exc:
+                if self.deadline is not None:
+                    self.deadline.require_remaining()
+                raise GitHubAPIError("GitHub API GET request failed") from exc
             except httpx.HTTPError as exc:
                 raise GitHubAPIError("GitHub API GET request failed") from exc
             if not isinstance(page, list):
@@ -565,15 +819,23 @@ class _GitHubHTTP:
             for item in page:
                 items.append(_as_mapping(item, label="pagination item"))
             next_url = str(next_link["url"]) if next_link else None
-            next_params = {}
+            # Passing an empty mapping makes httpx 0.28 discard a query that
+            # is already embedded in GitHub's absolute Link URL.
+            next_params = None
         return items
 
 
 class GitHubReader:
-    """Collect every matching open PR and all current feedback revisions."""
+    """Collect policy-matching pull requests and read-only repository state."""
 
-    def __init__(self, client: httpx.Client, policy: GitHubRepositoryPolicy) -> None:
-        self._http = _GitHubHTTP(client)
+    def __init__(
+        self,
+        client: httpx.Client,
+        policy: GitHubRepositoryPolicy,
+        *,
+        deadline: PollDeadline | None = None,
+    ) -> None:
+        self._http = _GitHubHTTP(client, deadline=deadline)
         self.policy = policy
 
     def repository_identity(self) -> GitHubRepositoryIdentity:
@@ -597,10 +859,105 @@ class GitHubReader:
             private=private,
         )
 
+    def authenticated_actor(self) -> TrustedActor:
+        """Return the exact actor behind this read credential."""
+
+        return _trusted_actor_from_payload(
+            self._http.request_json("GET", "/user"),
+            label="authenticated actor",
+        )
+
+    def capture_base_revision(self) -> BaseRevisionSnapshot:
+        """Capture the configured branch head after exact repository validation."""
+        if self.policy.repository_id is None:
+            raise PolicyViolation(
+                "base revision capture requires a configured repository id"
+            )
+        repository_identity = self.repository_identity()
+        encoded_branch = quote(self.policy.base_branch, safe="")
+        payload = _as_mapping(
+            self._http.request_json(
+                "GET",
+                f"/repos/{self.policy.repository}/branches/{encoded_branch}",
+            ),
+            label="base branch",
+        )
+        branch = str(payload.get("name") or "")
+        if branch != self.policy.base_branch:
+            raise PolicyViolation("GitHub base branch no longer matches policy")
+        commit = _as_mapping(payload.get("commit"), label="base branch commit")
+        sha = commit.get("sha")
+        if not isinstance(sha, str) or not _FULL_LOWER_SHA_RE.fullmatch(sha):
+            raise GitHubAPIError("GitHub returned malformed base branch SHA data")
+        return BaseRevisionSnapshot(
+            repository_identity=repository_identity,
+            branch=branch,
+            sha=sha,
+        )
+
+    def _previous_feedback_by_pull(
+        self,
+        feedback: Iterable[FeedbackRevision],
+    ) -> dict[
+        int,
+        dict[tuple[str, int, FeedbackKind, str], FeedbackRevision],
+    ]:
+        """Group eager compatibility input once instead of scanning it per PR."""
+
+        grouped: dict[int, list[FeedbackRevision]] = {}
+        for revision in feedback:
+            if revision.repository != self.policy.repository:
+                raise ValueError("previous feedback escaped the repository policy")
+            grouped.setdefault(revision.pull_number, []).append(revision)
+        return {
+            pull_number: self._validated_previous_feedback(
+                pull_number,
+                revisions,
+            )
+            for pull_number, revisions in grouped.items()
+        }
+
+    def _load_previous_feedback_for_pull(
+        self,
+        pull_number: int,
+        provider: Callable[[int], Iterable[FeedbackRevision]],
+    ) -> dict[tuple[str, int, FeedbackKind, str], FeedbackRevision]:
+        """Load only one hydrated pull's bounded prior feedback."""
+
+        return self._validated_previous_feedback(
+            pull_number,
+            tuple(provider(pull_number)),
+        )
+
+    def _validated_previous_feedback(
+        self,
+        pull_number: int,
+        feedback: Iterable[FeedbackRevision],
+    ) -> dict[tuple[str, int, FeedbackKind, str], FeedbackRevision]:
+        revisions = tuple(feedback)
+        if len(revisions) > _MAX_FEEDBACK_ITEMS_PER_PULL:
+            raise GitHubAPIError(
+                "Stored pull-request feedback exceeded the intake bound"
+            )
+        if any(
+            not isinstance(revision, FeedbackRevision)
+            or revision.repository != self.policy.repository
+            or revision.pull_number != pull_number
+            for revision in revisions
+        ):
+            raise GitHubAPIError(
+                "Stored pull-request feedback escaped its exact pull identity"
+            )
+        return _latest_by_object(revisions)
+
     def collect_open_pull_requests(
         self,
         *,
         previous_feedback: Iterable[FeedbackRevision] = (),
+        previous_feedback_for_pull: Callable[
+            [int], Iterable[FeedbackRevision]
+        ]
+        | None = None,
     ) -> tuple[PullRequestFeedbackSnapshot, ...]:
         """Poll all open PRs; never gate discovery on PR creation time or head SHA."""
         repository_identity = self.repository_identity()
@@ -609,21 +966,895 @@ class GitHubReader:
             params={"state": "open"},
             max_items=_MAX_OPEN_PULL_REQUESTS,
         )
-        previous_by_object = _latest_by_object(previous_feedback)
+        previous_items = tuple(previous_feedback)
+        if previous_feedback_for_pull is not None and previous_items:
+            raise ValueError(
+                "previous feedback must use either eager or per-pull loading"
+            )
+        previous_by_pull = self._previous_feedback_by_pull(previous_items)
+        loaded_previous: dict[
+            int,
+            dict[tuple[str, int, FeedbackKind, str], FeedbackRevision],
+        ] = {}
+
+        def previous_for(pull_number: int) -> Mapping[
+            tuple[str, int, FeedbackKind, str], FeedbackRevision
+        ]:
+            if previous_feedback_for_pull is None:
+                return previous_by_pull.get(pull_number, {})
+            if pull_number not in loaded_previous:
+                loaded_previous[pull_number] = self._load_previous_feedback_for_pull(
+                    pull_number,
+                    previous_feedback_for_pull,
+                )
+            return loaded_previous[pull_number]
+
         snapshots: list[PullRequestFeedbackSnapshot] = []
         for raw_pull in pulls:
             pull = _parse_pull_request(self.policy.repository, raw_pull)
             if pull.state.casefold() != "open" or not self.policy.permits(pull):
                 continue
-            current: list[FeedbackRevision] = []
-            endpoints = (
-                (FeedbackKind.ISSUE_COMMENT, f"/repos/{self.policy.repository}/issues/{pull.number}/comments"),
-                (FeedbackKind.REVIEW, f"/repos/{self.policy.repository}/pulls/{pull.number}/reviews"),
-                (
-                    FeedbackKind.REVIEW_COMMENT,
-                    f"/repos/{self.policy.repository}/pulls/{pull.number}/comments",
+            snapshots.append(
+                self._hydrate_pull(
+                    repository_identity=repository_identity,
+                    pull=pull,
+                    previous_by_object=previous_for(pull.number),
+                )
+            )
+        snapshots.sort(key=lambda item: item.pull_request.number)
+        return tuple(snapshots)
+
+    def collect_open_changed_paths(self) -> tuple[OpenPullPathAuthority, ...]:
+        """Return a complete, stable, bounded view of every open-PR path.
+
+        This intentionally avoids fetching review bodies: historical remediation
+        only needs to know whether any open pull request now touches one of its
+        candidate files. The complete pull listing is read
+        again after every candidate has been hydrated, and each file list is
+        independently read twice with a final exact pull revalidation.  Any
+        pagination, size, identity, or stability failure raises instead of
+        returning a partial authority view.
+        """
+
+        repository_identity = self.repository_identity()
+
+        def all_open_pulls() -> tuple[PullRequestSnapshot, ...]:
+            raw_pulls = self._http.paginate(
+                f"/repos/{self.policy.repository}/pulls",
+                params={"state": "open"},
+                max_items=_MAX_OPEN_PULL_REQUESTS,
+            )
+            pulls: list[PullRequestSnapshot] = []
+            identities: set[tuple[int, int]] = set()
+            pull_ids: set[int] = set()
+            pull_numbers: set[int] = set()
+            for raw_pull in raw_pulls:
+                pull = _parse_pull_request(self.policy.repository, raw_pull)
+                if pull.state.casefold() != "open":
+                    raise GitHubAPIError(
+                        "GitHub open-pull listing returned a non-open pull request"
+                    )
+                identity = (pull.pull_id, pull.number)
+                if (
+                    identity in identities
+                    or pull.pull_id in pull_ids
+                    or pull.number in pull_numbers
+                ):
+                    raise GitHubAPIError(
+                        "GitHub open pulls repeated a pull-request identity"
+                    )
+                identities.add(identity)
+                pull_ids.add(pull.pull_id)
+                pull_numbers.add(pull.number)
+                pulls.append(pull)
+            return tuple(
+                sorted(pulls, key=lambda item: (item.number, item.pull_id))
+            )
+
+        def changed_files(pull: PullRequestSnapshot) -> tuple[ChangedFile, ...]:
+            changed = tuple(
+                sorted(
+                    (
+                        _parse_changed_file(raw_file)
+                        for raw_file in self._http.paginate(
+                            f"/repos/{self.policy.repository}/pulls/"
+                            f"{pull.number}/files",
+                            max_items=_MAX_CHANGED_FILES_PER_PULL,
+                        )
+                    ),
+                    key=lambda item: (
+                        item.path,
+                        item.status,
+                        item.sha,
+                        item.previous_path or "",
+                        item.patch or "",
+                    ),
+                )
+            )
+            if len({item.path for item in changed}) != len(changed):
+                raise GitHubAPIError(
+                    "GitHub pull-request files repeated a changed path"
+                )
+            if any(
+                item.status == "renamed" and item.previous_path is None
+                for item in changed
+            ):
+                raise GitHubAPIError(
+                    "GitHub returned a malformed pull-request rename source path"
+                )
+            changed_file_bytes = sum(
+                len((item.patch or "").encode("utf-8"))
+                + len(item.path.encode("utf-8"))
+                + (
+                    len(item.previous_path.encode("utf-8"))
+                    if item.previous_path is not None
+                    else 0
+                )
+                for item in changed
+            )
+            if changed_file_bytes > _MAX_CHANGED_FILE_BYTES_PER_PULL:
+                raise GitHubAPIError(
+                    "GitHub pull-request changed-file metadata exceeded the "
+                    "intake bound"
+                )
+            if any(
+                not item.path
+                or "\x00" in item.path
+                or (
+                    item.previous_path is not None
+                    and (not item.previous_path or "\x00" in item.previous_path)
+                )
+                for item in changed
+            ):
+                raise GitHubAPIError(
+                    "GitHub returned a malformed pull-request changed path"
+                )
+            return changed
+
+        initial_pulls = all_open_pulls()
+        authorities: list[OpenPullPathAuthority] = []
+        for pull in initial_pulls:
+            current = changed_files(pull)
+            confirmed = changed_files(pull)
+            if confirmed != current:
+                raise GitHubAPIError(
+                    "GitHub pull-request changed files moved during hydration"
+                )
+            final_pull = _parse_pull_request(
+                self.policy.repository,
+                _as_mapping(
+                    self._http.request_json(
+                        "GET",
+                        f"/repos/{self.policy.repository}/pulls/{pull.number}",
+                    ),
+                    label="open pull path-authority revalidation",
                 ),
             )
+            if (
+                final_pull.state.casefold() != "open"
+                or _pull_hydration_identity(final_pull)
+                != _pull_hydration_identity(pull)
+            ):
+                raise GitHubAPIError(
+                    "GitHub open pull changed during path-authority hydration"
+                )
+            try:
+                authority = OpenPullPathAuthority(
+                    identity=OpenPullPathIdentity(
+                        repository=pull.repository,
+                        repository_id=pull.base_repository_id,
+                        pull_id=pull.pull_id,
+                        number=pull.number,
+                        head_repository=pull.head_repository,
+                        head_repository_id=(
+                            pull.head_repository_id
+                            if pull.head_repository_id is not None
+                            else 0
+                        ),
+                        head_ref=pull.head_ref,
+                        head_sha=pull.head_sha,
+                    ),
+                    changed_paths=tuple(
+                        sorted(
+                            {
+                                path
+                                for item in current
+                                for path in (item.path, item.previous_path)
+                                if path is not None
+                            }
+                        )
+                    ),
+                )
+            except ValueError as exc:
+                raise GitHubAPIError(
+                    "GitHub open pull returned malformed path-authority identity"
+                ) from exc
+            authorities.append(authority)
+
+        if all_open_pulls() != initial_pulls:
+            raise GitHubAPIError(
+                "GitHub open-pull listing changed during path hydration"
+            )
+        # Each of the at most 500 changed files can affect its current path and,
+        # for a rename, its previous path across at most 200 open pulls.
+        if sum(len(item.changed_paths) for item in authorities) > (
+            _MAX_OPEN_PULL_REQUESTS * _MAX_AFFECTED_PATHS_PER_OPEN_PULL
+        ):
+            raise GitHubAPIError("GitHub open-pull path authority exceeded its bound")
+        # Re-read identity after the potentially long multi-PR hydration so a
+        # repository replacement cannot inherit the prior view.
+        if self.repository_identity() != repository_identity:
+            raise GitHubAPIError(
+                "GitHub repository identity changed during path hydration"
+            )
+        return tuple(authorities)
+
+    def collect_exact_open_pull(
+        self,
+        expected_pull: tuple[int, int],
+    ) -> PullRequestFeedbackSnapshot:
+        """Rehydrate one exact open pull without relying on list discovery."""
+
+        if (
+            not isinstance(expected_pull, tuple)
+            or len(expected_pull) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+                for value in expected_pull
+            )
+        ):
+            raise ValueError(
+                "exact open pull identity must contain a positive pull ID and number"
+            )
+        pull_id, pull_number = expected_pull
+        repository_identity = self.repository_identity()
+        pull = _parse_pull_request(
+            self.policy.repository,
+            _as_mapping(
+                self._http.request_json(
+                    "GET",
+                    f"/repos/{self.policy.repository}/pulls/{pull_number}",
+                ),
+                label="exact open pull request",
+            ),
+        )
+        if (
+            (pull.pull_id, pull.number) != (pull_id, pull_number)
+            or pull.state != "open"
+            or not self.policy.permits(pull)
+        ):
+            raise PolicyViolation("GitHub exact open pull no longer matches policy")
+        return self._hydrate_pull(
+            repository_identity=repository_identity,
+            pull=pull,
+            previous_by_object={},
+        )
+
+    def collect_exact_closed_pulls(
+        self,
+        expected_pulls: Iterable[tuple[int, int]],
+    ) -> tuple[PullRequestFeedbackSnapshot, ...]:
+        """Rehydrate exact closed pull identities without scanning history."""
+
+        identities = tuple(expected_pulls)
+        pull_numbers_by_id: dict[int, int] = {}
+        pull_ids_by_number: dict[int, int] = {}
+        if not identities or len(identities) > _MAX_CLOSED_PULL_REQUESTS_PER_POLL:
+            raise ValueError(
+                "exact closed pull identities must contain 1 through "
+                f"{_MAX_CLOSED_PULL_REQUESTS_PER_POLL} entries"
+            )
+        for identity in identities:
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value <= 0
+                    for value in identity
+                )
+            ):
+                raise ValueError(
+                    "exact closed pull identities must contain positive integer pairs"
+                )
+            pull_id, pull_number = identity
+            if (
+                pull_id in pull_numbers_by_id
+                or pull_number in pull_ids_by_number
+            ):
+                raise ValueError(
+                    "exact closed pull identities must be unique by id and number"
+                )
+            pull_numbers_by_id[pull_id] = pull_number
+            pull_ids_by_number[pull_number] = pull_id
+
+        repository_identity = self.repository_identity()
+        snapshots: list[PullRequestFeedbackSnapshot] = []
+        for pull_id, pull_number in sorted(identities, key=lambda item: item[1]):
+            pull = _parse_pull_request(
+                self.policy.repository,
+                _as_mapping(
+                    self._http.request_json(
+                        "GET",
+                        f"/repos/{self.policy.repository}/pulls/{pull_number}",
+                    ),
+                    label="exact closed pull request",
+                ),
+            )
+            if (
+                (pull.pull_id, pull.number) != (pull_id, pull_number)
+                or pull.state != "closed"
+                or not self.policy.permits(pull)
+            ):
+                raise PolicyViolation(
+                    "GitHub exact closed pull no longer matches policy"
+                )
+            snapshots.append(
+                self._hydrate_pull(
+                    repository_identity=repository_identity,
+                    pull=pull,
+                    previous_by_object={},
+                )
+            )
+        return tuple(snapshots)
+
+    def collect_closed_pull_requests(
+        self,
+        *,
+        cutoff: datetime,
+        upper_bound: datetime,
+        max_prs_per_poll: int,
+        seen_pulls: Iterable[tuple[int, int]] = (),
+        excluded_pulls: Iterable[tuple[int, int]] = (),
+        priority_pull_groups: Iterable[Iterable[tuple[int, int]]] = (),
+        previous_feedback: Iterable[FeedbackRevision] = (),
+        previous_feedback_for_pull: Callable[
+            [int], Iterable[FeedbackRevision]
+        ]
+        | None = None,
+    ) -> ClosedPullScanResult:
+        """Restart at page one and hydrate bounded unseen pulls in one window."""
+
+        for value, label in ((cutoff, "cutoff"), (upper_bound, "upper_bound")):
+            if (
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() != timedelta(0)
+            ):
+                raise ValueError(f"{label} must be a timezone-aware UTC datetime")
+        if upper_bound < cutoff:
+            raise ValueError("upper_bound must not precede cutoff")
+        if (
+            isinstance(max_prs_per_poll, bool)
+            or not isinstance(max_prs_per_poll, int)
+            or not 1
+            <= max_prs_per_poll
+            <= _MAX_CLOSED_PULL_REQUESTS_PER_POLL
+        ):
+            raise ValueError(
+                "max_prs_per_poll must be between 1 and "
+                f"{_MAX_CLOSED_PULL_REQUESTS_PER_POLL}"
+            )
+
+        def normalized_identities(
+            values: Iterable[tuple[int, int]],
+            *,
+            label: str,
+            maximum: int,
+        ) -> tuple[tuple[int, int], ...]:
+            identities = tuple(values)
+            if len(identities) > maximum:
+                raise ValueError(f"{label} exceeded its identity bound")
+            pull_numbers_by_id: dict[int, int] = {}
+            pull_ids_by_number: dict[int, int] = {}
+            for identity in identities:
+                if (
+                    not isinstance(identity, tuple)
+                    or len(identity) != 2
+                    or any(
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value <= 0
+                        for value in identity
+                    )
+                ):
+                    raise ValueError(
+                        f"{label} must contain positive integer identity pairs"
+                    )
+                pull_id, pull_number = identity
+                if (
+                    pull_id in pull_numbers_by_id
+                    and pull_numbers_by_id[pull_id] != pull_number
+                ) or (
+                    pull_number in pull_ids_by_number
+                    and pull_ids_by_number[pull_number] != pull_id
+                ):
+                    raise ValueError(f"{label} contains an identity collision")
+                pull_numbers_by_id[pull_id] = pull_number
+                pull_ids_by_number[pull_number] = pull_id
+            if len(set(identities)) != len(identities):
+                raise ValueError(f"{label} contains a duplicate identity")
+            return tuple(sorted(identities, key=lambda item: (item[1], item[0])))
+
+        seen = frozenset(
+            normalized_identities(
+                seen_pulls,
+                label="seen_pulls",
+                maximum=_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE,
+            )
+        )
+        excluded = frozenset(
+            normalized_identities(
+                excluded_pulls,
+                label="excluded_pulls",
+                maximum=_MAX_CLOSED_PULL_EXCLUSIONS,
+            )
+        )
+        raw_priority_groups = tuple(priority_pull_groups)
+        if len(raw_priority_groups) > 1:
+            raise ValueError("priority_pull_groups exceeded its group bound")
+        priority_groups = tuple(
+            normalized_identities(
+                group,
+                label=f"priority_pull_groups[{index}]",
+                maximum=_MAX_CLOSED_PULL_REQUESTS_PER_POLL,
+            )
+            for index, group in enumerate(raw_priority_groups)
+        )
+        if any(not group for group in priority_groups):
+            raise ValueError("priority_pull_groups must not contain empty groups")
+        priorities = tuple(identity for group in priority_groups for identity in group)
+        if len(priorities) > max_prs_per_poll:
+            raise ValueError(
+                "priority_pull_groups must fit within max_prs_per_poll"
+            )
+        normalized_identities(
+            priorities,
+            label="priority pull identities",
+            maximum=_MAX_CLOSED_PULL_REQUESTS_PER_POLL,
+        )
+        priority_set = frozenset(priorities)
+        if priority_set & excluded:
+            raise ValueError(
+                "priority_pull_groups must not overlap excluded_pulls"
+            )
+        normalized_identities(
+            tuple(dict.fromkeys((*seen, *priorities))),
+            label="closed pull identities",
+            maximum=_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE,
+        )
+
+        repository_identity = self.repository_identity()
+        previous_items = tuple(previous_feedback)
+        if previous_feedback_for_pull is not None and previous_items:
+            raise ValueError(
+                "previous feedback must use either eager or per-pull loading"
+            )
+        previous_by_pull = self._previous_feedback_by_pull(previous_items)
+        loaded_previous: dict[
+            int,
+            dict[tuple[str, int, FeedbackKind, str], FeedbackRevision],
+        ] = {}
+
+        def previous_for(pull_number: int) -> Mapping[
+            tuple[str, int, FeedbackKind, str], FeedbackRevision
+        ]:
+            if previous_feedback_for_pull is None:
+                return previous_by_pull.get(pull_number, {})
+            if pull_number not in loaded_previous:
+                loaded_previous[pull_number] = self._load_previous_feedback_for_pull(
+                    pull_number,
+                    previous_feedback_for_pull,
+                )
+            return loaded_previous[pull_number]
+
+        items: list[ClosedPullScanItem] = []
+        hydration_attempts = 0
+        covered_identities = set(seen)
+
+        def hydrate(
+            pull: PullRequestSnapshot,
+            *,
+            position: ClosedPullScanPosition,
+        ) -> None:
+            nonlocal hydration_attempts
+            hydration_attempts += 1
+            covered_identities.add((pull.pull_id, pull.number))
+            for attempt in range(1, _MAX_CLOSED_PULL_HYDRATION_ATTEMPTS + 1):
+                try:
+                    snapshot = self._hydrate_pull(
+                        repository_identity=repository_identity,
+                        pull=pull,
+                        previous_by_object=previous_for(pull.number),
+                    )
+                except GitHubAuthenticationError:
+                    raise
+                except GitHubAPIError as exc:
+                    if attempt < _MAX_CLOSED_PULL_HYDRATION_ATTEMPTS:
+                        continue
+                    items.append(
+                        ClosedPullScanItem(
+                            position=position,
+                            pull_id=pull.pull_id,
+                            pull_number=pull.number,
+                            failure_type=type(exc).__name__,
+                            hydration_attempted=True,
+                        )
+                    )
+                else:
+                    items.append(
+                        ClosedPullScanItem(
+                            position=position,
+                            snapshot=snapshot,
+                            pull_id=pull.pull_id,
+                            pull_number=pull.number,
+                            hydration_attempted=True,
+                        )
+                    )
+                break
+
+        def record_priority_group_failure(
+            group: tuple[tuple[int, int], ...],
+            *,
+            failure_type: str = "GitHubAPIError",
+        ) -> None:
+            """Consume an atomic priority group as exact retryable failures."""
+
+            nonlocal hydration_attempts
+            for group_offset, (pull_id, pull_number) in enumerate(group):
+                hydration_attempts += 1
+                covered_identities.add((pull_id, pull_number))
+                items.append(
+                    ClosedPullScanItem(
+                        position=ClosedPullScanPosition(
+                            page=1,
+                            offset=group_offset,
+                        ),
+                        pull_id=pull_id,
+                        pull_number=pull_number,
+                        failure_type=failure_type,
+                        hydration_attempted=True,
+                    )
+                )
+
+        def listing_is_confirmed_complete() -> bool:
+            """Re-scan identities before declaring a mutable listing complete."""
+
+            previous_updated_at: datetime | None = None
+            pull_numbers_by_id: dict[int, int] = {}
+            pull_ids_by_number: dict[int, int] = {}
+            observed: set[tuple[int, int]] = set()
+            for page in range(1, _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL + 1):
+                raw_page = self._http.request_json(
+                    "GET",
+                    f"/repos/{self.policy.repository}/pulls",
+                    params={
+                        "state": "closed",
+                        "sort": "updated",
+                        "direction": "desc",
+                        "per_page": 100,
+                        "page": page,
+                    },
+                )
+                if not isinstance(raw_page, list) or len(raw_page) > 100:
+                    raise GitHubAPIError(
+                        "GitHub returned a malformed closed-pull page"
+                    )
+                if not raw_page:
+                    return True
+                for raw in raw_page:
+                    pull = _parse_pull_request(
+                        self.policy.repository,
+                        _as_mapping(raw, label="closed pull"),
+                    )
+                    if pull.state != "closed":
+                        raise GitHubAPIError(
+                            "GitHub returned a non-closed pull request in the "
+                            "closed listing"
+                        )
+                    updated_at = _parse_utc_timestamp(
+                        pull.updated_at,
+                        label="pull-request updated_at",
+                    )
+                    identity = (pull.pull_id, pull.number)
+                    if identity in observed:
+                        raise GitHubAPIError(
+                            "GitHub closed pulls repeated a pull-request identity"
+                        )
+                    if (
+                        pull.pull_id in pull_numbers_by_id
+                        and pull_numbers_by_id[pull.pull_id] != pull.number
+                    ) or (
+                        pull.number in pull_ids_by_number
+                        and pull_ids_by_number[pull.number] != pull.pull_id
+                    ):
+                        raise GitHubAPIError(
+                            "GitHub closed pulls contained an identity collision"
+                        )
+                    if (
+                        previous_updated_at is not None
+                        and updated_at > previous_updated_at
+                    ):
+                        raise GitHubAPIError(
+                            "GitHub closed pulls were not in descending "
+                            "updated_at order"
+                        )
+                    observed.add(identity)
+                    pull_numbers_by_id[pull.pull_id] = pull.number
+                    pull_ids_by_number[pull.number] = pull.pull_id
+                    previous_updated_at = updated_at
+                    if updated_at > upper_bound:
+                        continue
+                    if updated_at < cutoff:
+                        return True
+                    if (
+                        self.policy.permits(pull)
+                        and identity not in covered_identities
+                        and identity not in excluded
+                    ):
+                        return False
+                if len(raw_page) < 100:
+                    return True
+            safety_bound = _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL * 100
+            raise GitHubAPIError(
+                "GitHub closed-pull confirmation exceeded the "
+                f"{safety_bound:,}-item safety bound"
+            )
+
+        # A pending branch-only recovery is re-read directly before ordinary
+        # discovery. An identity already durably marked seen is suppressed;
+        # the controller decides when a recovery attempt becomes advanceable.
+        for priority_group in priority_groups:
+            if all(identity in seen for identity in priority_group):
+                continue
+            group_pulls: list[PullRequestSnapshot] = []
+            group_is_eligible = True
+            try:
+                for pull_id, pull_number in priority_group:
+                    raw_priority = self._http.request_json(
+                        "GET",
+                        f"/repos/{self.policy.repository}/pulls/{pull_number}",
+                    )
+                    pull = _parse_pull_request(
+                        self.policy.repository,
+                        _as_mapping(raw_priority, label="priority closed pull"),
+                    )
+                    if (pull.pull_id, pull.number) != (pull_id, pull_number):
+                        raise GitHubAPIError(
+                            "GitHub priority pull no longer matches its durable identity"
+                        )
+                    _parse_utc_timestamp(
+                        pull.updated_at,
+                        label="pull-request updated_at",
+                    )
+                    # The discovery window admits new evidence. It must not evict a
+                    # durable, already-authorized recovery group: a published branch
+                    # can still need reconciliation after its source PR ages out (or
+                    # moves beyond the cycle's frozen upper bound).
+                    if (
+                        pull.state != "closed"
+                        or not self.policy.permits(pull)
+                    ):
+                        group_is_eligible = False
+                    group_pulls.append(pull)
+            except GitHubAuthenticationError:
+                raise
+            except GitHubAPIError as exc:
+                record_priority_group_failure(
+                    priority_group,
+                    failure_type=type(exc).__name__,
+                )
+                if (
+                    hydration_attempts >= max_prs_per_poll
+                    or len(covered_identities)
+                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                ):
+                    return ClosedPullScanResult(
+                        items=tuple(items),
+                        hydration_attempts=hydration_attempts,
+                        cycle_complete=False,
+                    )
+                continue
+            if not group_is_eligible:
+                record_priority_group_failure(priority_group)
+                if (
+                    hydration_attempts >= max_prs_per_poll
+                    or len(covered_identities)
+                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                ):
+                    return ClosedPullScanResult(
+                        items=tuple(items),
+                        hydration_attempts=hydration_attempts,
+                        cycle_complete=False,
+                    )
+                continue
+            first_group_item = len(items)
+            for group_offset, pull in enumerate(group_pulls):
+                hydrate(
+                    pull,
+                    position=ClosedPullScanPosition(
+                        page=1,
+                        offset=group_offset,
+                    ),
+                )
+            if any(item.failure_type is not None for item in items[first_group_item:]):
+                items[first_group_item:] = [
+                    ClosedPullScanItem(
+                        position=item.position,
+                        pull_id=item.pull_id,
+                        pull_number=item.pull_number,
+                        failure_type="GitHubAPIError",
+                        hydration_attempted=True,
+                    )
+                    for item in items[first_group_item:]
+                ]
+            if (
+                hydration_attempts >= max_prs_per_poll
+                or len(covered_identities)
+                >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+            ):
+                return ClosedPullScanResult(
+                    items=tuple(items),
+                    hydration_attempts=hydration_attempts,
+                    cycle_complete=False,
+                )
+
+        previous_updated_at: datetime | None = None
+        pull_numbers_by_id: dict[int, int] = {}
+        pull_ids_by_number: dict[int, int] = {}
+        seen_pull_identities: set[tuple[int, int]] = set()
+        for page in range(1, _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL + 1):
+            raw_page = self._http.request_json(
+                "GET",
+                f"/repos/{self.policy.repository}/pulls",
+                params={
+                    "state": "closed",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            if not isinstance(raw_page, list) or len(raw_page) > 100:
+                raise GitHubAPIError("GitHub returned a malformed closed-pull page")
+            if not raw_page:
+                return ClosedPullScanResult(
+                    items=tuple(items),
+                    hydration_attempts=hydration_attempts,
+                    cycle_complete=listing_is_confirmed_complete(),
+                )
+            parsed_page: list[tuple[int, PullRequestSnapshot, datetime]] = []
+            for offset, raw in enumerate(raw_page):
+                pull = _parse_pull_request(
+                    self.policy.repository,
+                    _as_mapping(raw, label="closed pull"),
+                )
+                if pull.state != "closed":
+                    raise GitHubAPIError(
+                        "GitHub returned a non-closed pull request in the closed listing"
+                    )
+                updated_at = _parse_utc_timestamp(
+                    pull.updated_at,
+                    label="pull-request updated_at",
+                )
+                identity = (pull.pull_id, pull.number)
+                if identity in seen_pull_identities:
+                    raise GitHubAPIError(
+                        "GitHub closed pulls repeated a pull-request identity"
+                    )
+                if (
+                    pull.pull_id in pull_numbers_by_id
+                    and pull_numbers_by_id[pull.pull_id] != pull.number
+                ) or (
+                    pull.number in pull_ids_by_number
+                    and pull_ids_by_number[pull.number] != pull.pull_id
+                ):
+                    raise GitHubAPIError(
+                        "GitHub closed pulls contained an identity collision"
+                    )
+                seen_pull_identities.add(identity)
+                pull_numbers_by_id[pull.pull_id] = pull.number
+                pull_ids_by_number[pull.number] = pull.pull_id
+                if (
+                    previous_updated_at is not None
+                    and updated_at > previous_updated_at
+                ):
+                    raise GitHubAPIError(
+                        "GitHub closed pulls were not in descending updated_at order"
+                    )
+                previous_updated_at = updated_at
+                parsed_page.append((offset, pull, updated_at))
+
+            for offset, pull, updated_at in parsed_page:
+                identity = (pull.pull_id, pull.number)
+                if updated_at > upper_bound:
+                    continue
+                if updated_at < cutoff:
+                    return ClosedPullScanResult(
+                        items=tuple(items),
+                        hydration_attempts=hydration_attempts,
+                        cycle_complete=listing_is_confirmed_complete(),
+                    )
+                if (
+                    identity in priority_set
+                    or identity in seen
+                    or identity in excluded
+                    or not self.policy.permits(pull)
+                ):
+                    continue
+                if (
+                    len(covered_identities)
+                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                ):
+                    raise GitHubAPIError(
+                        "GitHub closed-pull hydration would exceed the "
+                        f"{_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE:,}-identity "
+                        "safety bound"
+                    )
+                hydrate(
+                    pull,
+                    position=ClosedPullScanPosition(page=page, offset=offset),
+                )
+                if (
+                    hydration_attempts >= max_prs_per_poll
+                    or len(covered_identities)
+                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                ):
+                    at_known_end = len(raw_page) < 100 and offset == len(raw_page) - 1
+                    return ClosedPullScanResult(
+                        items=tuple(items),
+                        hydration_attempts=hydration_attempts,
+                        cycle_complete=(
+                            at_known_end and listing_is_confirmed_complete()
+                        ),
+                    )
+            if len(raw_page) < 100:
+                return ClosedPullScanResult(
+                    items=tuple(items),
+                    hydration_attempts=hydration_attempts,
+                    cycle_complete=listing_is_confirmed_complete(),
+                )
+        safety_bound = _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL * 100
+        raise GitHubAPIError(
+            "GitHub closed-pull listing exceeded the "
+            f"{safety_bound:,}-item safety bound"
+        )
+
+    def _hydrate_pull(
+        self,
+        *,
+        repository_identity: GitHubRepositoryIdentity,
+        pull: PullRequestSnapshot,
+        previous_by_object: Mapping[
+            tuple[str, int, FeedbackKind, str], FeedbackRevision
+        ],
+    ) -> PullRequestFeedbackSnapshot:
+        _parse_utc_timestamp(
+            pull.updated_at,
+            label="pull-request updated_at",
+        )
+        endpoints = (
+            (
+                FeedbackKind.ISSUE_COMMENT,
+                f"/repos/{self.policy.repository}/issues/{pull.number}/comments",
+            ),
+            (
+                FeedbackKind.REVIEW,
+                f"/repos/{self.policy.repository}/pulls/{pull.number}/reviews",
+            ),
+            (
+                FeedbackKind.REVIEW_COMMENT,
+                f"/repos/{self.policy.repository}/pulls/{pull.number}/comments",
+            ),
+        )
+        def collect_material() -> tuple[
+            tuple[FeedbackRevision, ...],
+            tuple[ChangedFile, ...],
+        ]:
+            feedback: list[FeedbackRevision] = []
             feedback_bytes = 0
             for kind, endpoint in endpoints:
                 for raw_feedback in self._http.paginate(
@@ -638,51 +1869,119 @@ class GitHubReader:
                     )
                     feedback_bytes += len(revision.body.encode("utf-8"))
                     if (
-                        len(current) >= _MAX_FEEDBACK_ITEMS_PER_PULL
+                        len(feedback) >= _MAX_FEEDBACK_ITEMS_PER_PULL
                         or feedback_bytes > _MAX_FEEDBACK_BYTES_PER_PULL
                     ):
                         raise GitHubAPIError(
                             "GitHub pull-request feedback exceeded the intake bound"
                         )
-                    current.append(revision)
-
-            changed_files = tuple(
-                _parse_changed_file(raw_file)
-                for raw_file in self._http.paginate(
-                    f"/repos/{self.policy.repository}/pulls/{pull.number}/files",
-                    max_items=_MAX_CHANGED_FILES_PER_PULL,
+                    feedback.append(revision)
+            feedback.sort(
+                key=lambda item: (
+                    item.kind.value,
+                    int(item.source_id),
+                    item.revision_id,
                 )
             )
+            if len({item.object_key for item in feedback}) != len(feedback):
+                raise GitHubAPIError(
+                    "GitHub pull-request feedback repeated an object identity"
+                )
+
+            changed = tuple(
+                sorted(
+                    (
+                        _parse_changed_file(raw_file)
+                        for raw_file in self._http.paginate(
+                            f"/repos/{self.policy.repository}/pulls/"
+                            f"{pull.number}/files",
+                            max_items=_MAX_CHANGED_FILES_PER_PULL,
+                        )
+                    ),
+                    key=lambda item: (
+                        item.path,
+                        item.status,
+                        item.sha,
+                        item.previous_path or "",
+                        item.patch or "",
+                    ),
+                )
+            )
+            if len({item.path for item in changed}) != len(changed):
+                raise GitHubAPIError(
+                    "GitHub pull-request files repeated a changed path"
+                )
             changed_file_bytes = sum(
                 len((changed_file.patch or "").encode("utf-8"))
                 + len(changed_file.path.encode("utf-8"))
-                for changed_file in changed_files
+                for changed_file in changed
             )
             if changed_file_bytes > _MAX_CHANGED_FILE_BYTES_PER_PULL:
                 raise GitHubAPIError(
                     "GitHub pull-request changed-file metadata exceeded the intake bound"
                 )
+            return tuple(feedback), changed
 
-            visible_keys = {revision.object_key for revision in current}
-            for object_key, old_revision in previous_by_object.items():
-                if object_key[0] != self.policy.repository or object_key[1] != pull.number:
-                    continue
-                if object_key not in visible_keys and not old_revision.deleted:
-                    current.append(replace(old_revision, body="", deleted=True))
+        current, changed_files = collect_material()
+        confirmed_feedback, confirmed_changed_files = collect_material()
+        if (
+            confirmed_feedback != current
+            or confirmed_changed_files != changed_files
+        ):
+            raise GitHubAPIError("GitHub pull request changed during hydration")
 
-            current.sort(key=lambda item: (item.kind.value, int(item.source_id), item.revision_id))
-            visible = tuple(item for item in current if not item.deleted)
-            snapshots.append(
-                PullRequestFeedbackSnapshot(
-                    repository_identity=repository_identity,
-                    pull_request=pull,
-                    feedback=tuple(current),
-                    coderabbit=_coderabbit_coverage(visible),
-                    changed_files=changed_files,
+        final_pull = _parse_pull_request(
+            self.policy.repository,
+            _as_mapping(
+                self._http.request_json(
+                    "GET",
+                    f"/repos/{self.policy.repository}/pulls/{pull.number}",
+                ),
+                label="pull request revalidation",
+            ),
+        )
+        _parse_utc_timestamp(
+            final_pull.updated_at,
+            label="pull-request updated_at",
+        )
+        if _pull_hydration_identity(final_pull) != _pull_hydration_identity(pull):
+            raise GitHubAPIError("GitHub pull request changed during hydration")
+
+        current_by_object = {revision.object_key: revision for revision in current}
+        for object_key, old_revision in previous_by_object.items():
+            if (
+                object_key[0] != self.policy.repository
+                or object_key[1] != pull.number
+            ):
+                continue
+            if object_key not in current_by_object and not old_revision.deleted:
+                current_by_object[object_key] = replace(
+                    old_revision,
+                    body="",
+                    deleted=True,
                 )
+
+        if len(current_by_object) > _MAX_FEEDBACK_ITEMS_PER_PULL:
+            raise GitHubAPIError(
+                "GitHub pull-request feedback authority exceeded the intake bound"
             )
-        snapshots.sort(key=lambda item: item.pull_request.number)
-        return tuple(snapshots)
+
+        current = tuple(sorted(
+            current_by_object.values(),
+            key=lambda item: (
+                item.kind.value,
+                int(item.source_id),
+                item.revision_id,
+            ),
+        ))
+        visible = tuple(item for item in current if not item.deleted)
+        return PullRequestFeedbackSnapshot(
+            repository_identity=repository_identity,
+            pull_request=pull,
+            feedback=tuple(current),
+            coderabbit=_coderabbit_coverage(visible),
+            changed_files=changed_files,
+        )
 
 
 class GitHubWriteBroker:
@@ -692,31 +1991,60 @@ class GitHubWriteBroker:
         self,
         *,
         policy: GitHubRepositoryPolicy,
-        token_command: Sequence[str],
+        expected_actor: TrustedActor,
+        token_command: Sequence[str] | None = None,
+        credential: SecretCommand | CredentialSnapshot | None = None,
         base_url: str = "https://api.github.com",
         transport: httpx.BaseTransport | None = None,
         timeout: float = 30.0,
         token_command_timeout: float = 30.0,
         token_command_env: Mapping[str, str] | None = None,
+        deadline: PollDeadline | None = None,
     ) -> None:
-        if not token_command or any(not isinstance(item, str) or not item for item in token_command):
+        if (token_command is None) == (credential is None):
+            raise ValueError("exactly one GitHub credential source is required")
+        if token_command is not None and (
+            not token_command
+            or any(not isinstance(item, str) or not item for item in token_command)
+        ):
             raise ValueError("token_command must be a non-empty argv sequence")
+        if credential is not None and not isinstance(
+            credential, (SecretCommand, CredentialSnapshot)
+        ):
+            raise TypeError("credential must be a trusted credential reader")
+        self._validate_expected_actor(expected_actor)
         self.policy = policy
-        self.token_command = tuple(token_command)
+        self.expected_actor = expected_actor
+        self.token_command = tuple(token_command or ())
         self.base_url = base_url
         self.web_base_url = _github_web_base_url(base_url)
         self.transport = transport
         self.timeout = timeout
-        self._token_helper = SecretCommand(
-            tuple(token_command),
-            timeout_seconds=token_command_timeout,
-            environment=token_command_env,
+        self.deadline = deadline
+        self._token_helper = (
+            credential
+            if credential is not None
+            else SecretCommand(
+                tuple(token_command or ()),
+                timeout_seconds=token_command_timeout,
+                environment=token_command_env,
+            )
         )
 
     def _mint_token(self) -> str:
+        helper = self._token_helper
+        if self.deadline is not None and isinstance(helper, SecretCommand):
+            helper = replace(
+                helper,
+                timeout_seconds=self.deadline.remaining(helper.timeout_seconds),
+            )
+        elif self.deadline is not None:
+            self.deadline.require_remaining()
         try:
-            return self._token_helper.read()
+            return helper.read()
         except CredentialError:
+            if self.deadline is not None:
+                self.deadline.require_remaining()
             raise GitHubAuthenticationError("GitHub token helper failed") from None
 
     def _client(self, token: str) -> httpx.Client:
@@ -738,6 +2066,10 @@ class GitHubWriteBroker:
 
         token = self._mint_token()
         with self._client(token) as client:
+            self._require_expected_actor(
+                _GitHubHTTP(client, deadline=self.deadline),
+                expected_actor=self.expected_actor,
+            )
             yield client
 
     def _assert_repository_identity(self, http: _GitHubHTTP) -> None:
@@ -791,15 +2123,19 @@ class GitHubWriteBroker:
         pull_number: int,
         expected_head_sha: str,
         expected_base_sha: str,
+        expected_actor: TrustedActor,
     ) -> PullRequestSnapshot:
         """Revalidate all ownership and revision constraints without writing."""
 
         self._validate_sha(expected_head_sha, label="expected_head_sha")
         self._validate_sha(expected_base_sha, label="expected_base_sha")
+        self._validate_expected_actor(expected_actor)
         token = self._mint_token()
         with self._client(token) as client:
+            http = _GitHubHTTP(client, deadline=self.deadline)
+            self._require_expected_actor(http, expected_actor=expected_actor)
             return self._fresh_pull(
-                _GitHubHTTP(client),
+                http,
                 pull_number=pull_number,
                 expected_head_sha=expected_head_sha,
                 expected_base_sha=expected_base_sha,
@@ -817,6 +2153,94 @@ class GitHubWriteBroker:
             f"action={action_id} event={event_revision_id} -->"
         )
 
+    def _authenticated_actor(self, http: _GitHubHTTP) -> TrustedActor:
+        return _trusted_actor_from_payload(
+            http.request_json("GET", "/user"),
+            label="authenticated actor",
+        )
+
+    @staticmethod
+    def _validate_expected_actor(expected_actor: TrustedActor) -> None:
+        if not isinstance(expected_actor, TrustedActor):
+            raise TypeError("expected_actor must be a TrustedActor")
+        if expected_actor.type != "User":
+            raise ValueError("expected_actor must be a User identity")
+
+    def _require_expected_actor(
+        self,
+        http: _GitHubHTTP,
+        *,
+        expected_actor: TrustedActor,
+    ) -> TrustedActor:
+        """Authenticate the exact configured writer by immutable identity."""
+
+        self._validate_expected_actor(expected_actor)
+        if (expected_actor.id, expected_actor.type) != (
+            self.expected_actor.id,
+            self.expected_actor.type,
+        ):
+            raise PolicyViolation(
+                "GitHub write actor does not match the broker's configured authority."
+            )
+        actual = self._authenticated_actor(http)
+        if (actual.id, actual.type) != (expected_actor.id, expected_actor.type):
+            raise GitHubAuthenticationError(
+                "GitHub publication actor does not match configured authority."
+            )
+        return actual
+
+    def _reply_body(
+        self,
+        *,
+        marker: str,
+        head_repository: str,
+        commit_sha: str,
+    ) -> str:
+        short_sha = commit_sha[:12]
+        commit_url = f"{self.web_base_url}/{head_repository}/commit/{commit_sha}"
+        return (
+            f"{marker}\n"
+            "🤖 **Localize Guardian:** Applied a validated translation-only "
+            f"correction in [`{short_sha}`]({commit_url}). The review thread "
+            "remains open for reviewer confirmation."
+        )
+
+    def _validated_reply_comment(
+        self,
+        value: Any,
+        *,
+        expected_actor: TrustedActor,
+        expected_body: str,
+        pull_number: int,
+        created: bool,
+    ) -> ReplyResult:
+        comment = _as_mapping(value, label="status comment")
+        comment_id = _as_int(comment.get("id"), label="comment id")
+        author = _trusted_actor_from_payload(
+            comment.get("user"),
+            label="status comment author",
+        )
+        body = comment.get("body")
+        html_url = comment.get("html_url")
+        expected_url = (
+            f"{self.web_base_url}/{self.policy.repository}/pull/{pull_number}"
+            f"#issuecomment-{comment_id}"
+        )
+        if (
+            (author.id, author.type) != (expected_actor.id, expected_actor.type)
+            or body != expected_body
+            or html_url != expected_url
+        ):
+            raise PolicyViolation(
+                "Guardian status marker conflicts with its exact actor or content."
+            )
+        return ReplyResult(
+            comment_id=comment_id,
+            html_url=html_url,
+            body=body,
+            created=created,
+        )
+
     def post_commit_reply(
         self,
         *,
@@ -826,12 +2250,14 @@ class GitHubWriteBroker:
         commit_sha: str,
         action_id: str,
         event_revision_id: str,
+        expected_actor: TrustedActor,
         before_create: Callable[[], None] | None = None,
     ) -> ReplyResult:
         """Post an idempotent status comment after a confirmed owned-branch update."""
         self._validate_sha(expected_head_sha, label="expected_head_sha")
         self._validate_sha(expected_base_sha, label="expected_base_sha")
         self._validate_sha(commit_sha, label="commit_sha")
+        self._validate_expected_actor(expected_actor)
         if commit_sha != expected_head_sha:
             raise PolicyViolation("status reply commit is not the current reviewed head")
         self._validate_marker_id(action_id, label="action_id")
@@ -840,7 +2266,8 @@ class GitHubWriteBroker:
 
         token = self._mint_token()
         with self._client(token) as client:
-            http = _GitHubHTTP(client)
+            http = _GitHubHTTP(client, deadline=self.deadline)
+            self._require_expected_actor(http, expected_actor=expected_actor)
             pull = self._fresh_pull(
                 http,
                 pull_number=pull_number,
@@ -848,41 +2275,56 @@ class GitHubWriteBroker:
                 expected_base_sha=expected_base_sha,
             )
             comments_url = f"/repos/{self.policy.repository}/issues/{pull_number}/comments"
+            body = self._reply_body(
+                marker=marker,
+                head_repository=pull.head_repository,
+                commit_sha=commit_sha,
+            )
+            matching: list[ReplyResult] = []
             for raw_comment in http.paginate(comments_url):
-                body = str(raw_comment.get("body") or "")
-                if marker in body:
-                    return ReplyResult(
-                        comment_id=_as_int(raw_comment.get("id"), label="comment id"),
-                        html_url=str(raw_comment.get("html_url") or ""),
-                        body=body,
-                        created=False,
+                raw_body = str(raw_comment.get("body") or "")
+                if marker in raw_body:
+                    matching.append(
+                        self._validated_reply_comment(
+                            raw_comment,
+                            expected_actor=expected_actor,
+                            expected_body=body,
+                            pull_number=pull_number,
+                            created=False,
+                        )
                     )
+            if len(matching) > 1:
+                raise PolicyViolation(
+                    "Multiple exact Guardian status comments share one marker."
+                )
+            if matching:
+                return matching[0]
 
             if before_create is not None:
                 before_create()
+            self._require_expected_actor(http, expected_actor=expected_actor)
             pull = self._fresh_pull(
                 http,
                 pull_number=pull_number,
                 expected_head_sha=expected_head_sha,
                 expected_base_sha=expected_base_sha,
             )
-            short_sha = commit_sha[:12]
-            commit_url = (
-                f"{self.web_base_url}/{pull.head_repository}/commit/{commit_sha}"
+            fresh_body = self._reply_body(
+                marker=marker,
+                head_repository=pull.head_repository,
+                commit_sha=commit_sha,
             )
-            body = (
-                f"{marker}\n"
-                "🤖 **Localize Guardian:** Applied a validated translation-only "
-                f"correction in [`{short_sha}`]({commit_url}). The review thread "
-                "remains open for reviewer confirmation."
-            )
+            if before_create is not None:
+                before_create()
+            self._require_expected_actor(http, expected_actor=expected_actor)
             created = _as_mapping(
-                http.request_json("POST", comments_url, payload={"body": body}),
+                http.request_json("POST", comments_url, payload={"body": fresh_body}),
                 label="created comment",
             )
-            return ReplyResult(
-                comment_id=_as_int(created.get("id"), label="comment id"),
-                html_url=str(created.get("html_url") or ""),
-                body=body,
+            return self._validated_reply_comment(
+                created,
+                expected_actor=expected_actor,
+                expected_body=fresh_body,
+                pull_number=pull_number,
                 created=True,
             )

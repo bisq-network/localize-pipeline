@@ -8,6 +8,7 @@ import pytest
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from localize.semantic_quality import TranslationChange
+from localize.app_config import resolve_semantic_review_model
 from localize.model_provider import ModelProviderConfigurationError
 from localize.translation_semantic_reviewer import (
     _run,
@@ -193,10 +194,11 @@ def test_append_semantic_review_findings_preserves_existing_summary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_semantic_reviewer_is_opt_in(tmp_path):
+async def test_semantic_reviewer_is_opt_in(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"
     config_path.write_text("dry_run: false\n", encoding="utf-8")
+    monkeypatch.delenv("REVIEW_MODEL_NAME", raising=False)
 
     exit_code = await _run(
         [
@@ -215,6 +217,78 @@ async def test_semantic_reviewer_is_opt_in(tmp_path):
 
     assert exit_code == 0
     assert not validation_summary_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_rejects_malformed_config_without_traceback(
+    tmp_path, caplog
+):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text("semantic_review: enabled\n", encoding="utf-8")
+
+    exit_code = await _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--input-folder",
+            str(tmp_path),
+            "--config",
+            str(config_path),
+            "--validation-summary",
+            str(validation_summary_path),
+            "--changed-files",
+            "mobile_es.properties",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "semantic_review must be a mapping" in caplog.text
+    assert not validation_summary_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_inherits_effective_review_model_override(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: true",
+                "model_name: gpt-4o-mini",
+                "review_model_name: gpt-5.6-terra",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: null",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REVIEW_MODEL_NAME", "gpt-5.6-sol")
+
+    with patch(
+        "localize.translation_semantic_reviewer.resolve_semantic_review_model",
+        wraps=resolve_semantic_review_model,
+    ) as resolver:
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                str(tmp_path),
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "mobile_es.properties",
+            ]
+        )
+
+    assert exit_code == 0
+    assert resolver.call_args.kwargs["review_model_name"] == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio
