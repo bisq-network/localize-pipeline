@@ -18,6 +18,7 @@ from localize.translate_localization_files import (
     build_context,
     apply_ignored_source_values,
     normalize_value,
+    prefer_existing_translation_on_failure,
     compute_ledger_hash,
     extract_texts_to_translate,
     filter_git_changed_keys_by_source,
@@ -1602,6 +1603,53 @@ class TestFilterGitChangedKeys(unittest.TestCase):
         )
 
         self.assertIn("key.orphan", result)
+
+
+class TestPreferExistingTranslationOnFailure(unittest.TestCase):
+    """On model failure, keep a prior localized value instead of the source."""
+
+    def test_keeps_existing_translation_for_failed_key(self):
+        results = [(0, "This trade view is out of sync", False)]
+        keys = ["mobile.bisqEasy.openTrades.outOfSync.headline"]
+        source = {keys[0]: "This trade view is out of sync"}
+        existing = {keys[0]: "Этот экран сделки не синхронизирован"}
+
+        repaired = prefer_existing_translation_on_failure(results, keys, source, existing)
+
+        self.assertEqual(repaired[0][1], "Этот экран сделки не синхронизирован")
+        # The key stays marked as failed so it is retried next run.
+        self.assertFalse(repaired[0][2])
+
+    def test_falls_back_to_source_when_no_existing_translation(self):
+        results = [(0, "Needs translation", False)]
+        keys = ["key.fail"]
+        source = {"key.fail": "Needs translation"}
+
+        for existing in ({}, {"key.fail": ""}, {"key.fail": "   "}):
+            repaired = prefer_existing_translation_on_failure(results, keys, source, existing)
+            self.assertEqual(repaired[0][1], "Needs translation")
+            self.assertFalse(repaired[0][2])
+
+    def test_ignores_existing_value_identical_to_source(self):
+        results = [(0, "Open trade chat", False)]
+        keys = ["key.echo"]
+        source = {"key.echo": "Open trade chat"}
+        existing = {"key.echo": "Open trade chat"}
+
+        repaired = prefer_existing_translation_on_failure(results, keys, source, existing)
+
+        self.assertEqual(repaired[0][1], "Open trade chat")
+
+    def test_does_not_touch_successful_translations(self):
+        results = [(0, "Otevřít obchodní chat", True)]
+        keys = ["key.ok"]
+        source = {"key.ok": "Open trade chat"}
+        existing = {"key.ok": "stale value"}
+
+        repaired = prefer_existing_translation_on_failure(results, keys, source, existing)
+
+        self.assertEqual(repaired[0][1], "Otevřít obchodní chat")
+        self.assertTrue(repaired[0][2])
 
 
 if __name__ == '__main__':

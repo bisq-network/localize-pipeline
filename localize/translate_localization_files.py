@@ -210,6 +210,42 @@ def normalize_value(value: Optional[str]) -> str:
     return value
 
 
+def prefer_existing_translation_on_failure(
+    results: List[Tuple[int, str, bool]],
+    keys_to_translate: List[str],
+    source_translations: Dict[str, str],
+    existing_translations: Dict[str, str],
+) -> List[Tuple[int, str, bool]]:
+    """Keep a prior localized value for keys the model failed to translate.
+
+    When a model translation fails, the pipeline otherwise falls back to the
+    source (English) value. For a key that already had a usable translation in
+    the target file, that fallback ships mixed-language UI (e.g. English text
+    on a Russian or Turkish screen). Prefer the existing translation instead;
+    the ``succeeded`` flag is left untouched so the key is still recorded as
+    ``failed`` in the ledger and retried on the next run.
+
+    Keys with no usable prior translation (new or empty targets, or values that
+    merely echoed the source) still fall back to the source value.
+    """
+    if not existing_translations:
+        return results
+    repaired: List[Tuple[int, str, bool]] = []
+    for position, value, succeeded in results:
+        if not succeeded and 0 <= position < len(keys_to_translate):
+            key = keys_to_translate[position]
+            existing_value = existing_translations.get(key)
+            source_value = source_translations.get(key, "")
+            if (
+                isinstance(existing_value, str)
+                and existing_value.strip()
+                and normalize_value(existing_value) != normalize_value(source_value)
+            ):
+                value = existing_value
+        repaired.append((position, value, succeeded))
+    return repaired
+
+
 def compute_ledger_hash(value: Optional[str]) -> str:
     """Compute a stable hash for ledger comparisons."""
     normalized = normalize_value(value)
@@ -2632,6 +2668,14 @@ async def process_translation_queue(
                     texts_to_translate[position] if position < len(texts_to_translate) else "",
                 )
                 results.append((position, fallback_text, False))
+            # Keep prior localized values for model failures instead of shipping
+            # the English source into a translated file (mixed-language UI).
+            results = prefer_existing_translation_on_failure(
+                results,
+                keys_to_translate,
+                source_translations,
+                original_target_translations,
+            )
             results.sort(key=lambda x: x[0])
             translations = [result for _, result, _ in results]
             model_failed_keys = {
