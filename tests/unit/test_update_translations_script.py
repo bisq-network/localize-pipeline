@@ -269,7 +269,13 @@ def test_each_batch_resets_and_verifies_its_exact_staged_paths():
     )
     commit_index = stage.index('commit_staged_changes "$commit_msg"')
     assert checkout_index < reset_index < first_stage_index < exact_index < commit_index
-    assert '["git", "diff", "--cached", "--name-only"' in stage
+    verification = " ".join(
+        stage[
+            stage.index("result = subprocess.run(") : stage.index("actual = [")
+        ].split()
+    )
+    assert '"git", "diff", "--cached", "--name-only"' in verification
+    assert '"--diff-filter=ACMRTD", "--no-renames", "-z", "--"' in verification
 
 
 def test_fork_repo_name_short_strips_git_suffix_before_status_api():

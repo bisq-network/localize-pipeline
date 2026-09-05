@@ -10900,6 +10900,9 @@ class GuardianState:
             repository_where = "p.repository = ?"
             repository_parameters: tuple[object, ...] = (repository,)
         else:
+            # A legacy NULL-ID reply may belong to this repository under an old
+            # route, so no mutable-name filter can exclude it safely. Check all
+            # exact head/actor matches before trusting the immutable-ID lookup.
             ambiguous_legacy = self._connection.execute(
                 """
                 SELECT 1 FROM publication_events AS p

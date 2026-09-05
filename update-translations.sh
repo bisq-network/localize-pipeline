@@ -911,7 +911,16 @@ import sys
 
 expected = sys.argv[1:]
 result = subprocess.run(
-    ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTD", "-z", "--"],
+    [
+        "git",
+        "diff",
+        "--cached",
+        "--name-only",
+        "--diff-filter=ACMRTD",
+        "--no-renames",
+        "-z",
+        "--",
+    ],
     check=True,
     stdout=subprocess.PIPE,
 )

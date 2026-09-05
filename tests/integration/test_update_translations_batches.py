@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from shlex import quote
 import subprocess
 import sys
 
@@ -19,11 +20,14 @@ def _run(command, *, cwd, env=None, check=True):
     )
 
 
-def test_failed_batch_cannot_leak_staged_files_into_next_batch(tmp_path):
-    """A failed review must not contaminate a later successful batch commit."""
-    remote = tmp_path / "remote.git"
-    repo = tmp_path / "target"
-    logs = tmp_path / "app" / "logs"
+def test_failed_batch_cannot_leak_into_renamed_translation_batch(tmp_path):
+    """A failed review must not contaminate a later renamed-file commit."""
+    case_root = tmp_path / "shell $HOME ' workspace"
+    case_root.mkdir()
+    remote = case_root / "remote.git"
+    repo = case_root / "target"
+    logs = case_root / "app" / "logs"
+    config = case_root / "config.yaml"
     logs.mkdir(parents=True)
 
     _run(["git", "init", "-q", "--bare", str(remote)], cwd=tmp_path)
@@ -44,7 +48,8 @@ def test_failed_batch_cannot_leak_staged_files_into_next_batch(tmp_path):
     _run(["git", "push", "-q", "-u", "origin", "main"], cwd=repo)
 
     first.write_text("key=translated first\n", encoding="utf-8")
-    second.write_text("key=translated second\n", encoding="utf-8")
+    renamed = input_folder / "second-renamed.properties"
+    second.rename(renamed)
 
     script = (PROJECT_ROOT / "update-translations.sh").read_text(encoding="utf-8")
     functions = script[
@@ -85,11 +90,11 @@ python3() {{
     command "$PYTHON_BIN" "$@"
 }}
 {functions}
-cd {str(repo)!r}
-APP_ROOT={str(logs.parent)!r}
-TARGET_PROJECT_ROOT={str(repo)!r}
-ABSOLUTE_INPUT_FOLDER={str(input_folder)!r}
-CONFIG_FILE={str(tmp_path / "config.yaml")!r}
+cd {quote(str(repo))}
+APP_ROOT={quote(str(logs.parent))}
+TARGET_PROJECT_ROOT={quote(str(repo))}
+ABSOLUTE_INPUT_FOLDER={quote(str(input_folder))}
+CONFIG_FILE={quote(str(config))}
 REMOTE=origin
 DEFAULT_BRANCH=main
 FORK_OWNER=test-owner
@@ -106,9 +111,11 @@ if stage_and_submit_batch batch-1 'First batch' 'First batch'; then
 fi
 test "$(git diff --cached --name-only)" = 'l10n/first.properties'
 
-BATCH_FILES=(l10n/second.properties)
+BATCH_FILES=(l10n/second.properties l10n/second-renamed.properties)
 stage_and_submit_batch batch-2 'Second batch' 'Second batch'
-test "$(git diff --name-only origin/main...HEAD)" = 'l10n/second.properties'
+actual_paths="$(git diff --name-only --no-renames origin/main...HEAD | sort)"
+expected_paths="$(printf '%s\n' l10n/second.properties l10n/second-renamed.properties | sort)"
+test "$actual_paths" = "$expected_paths"
 test "$(git diff --cached --name-only)" = ''
 test "$(git diff --name-only)" = 'l10n/first.properties'
 """
