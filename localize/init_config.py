@@ -32,6 +32,7 @@ from localize.localization_layouts import (
     LocalizationLayout,
     load_localization_layout,
 )
+from localize.model_provider import DEFAULT_TRANSLATION_MODEL
 
 # Human-readable names for common locale codes; unknown codes fall back to the code.
 _LOCALE_NAMES: Dict[str, str] = {
@@ -387,7 +388,7 @@ def build_config(
     target_project_root: str,
     input_folder: str,
     locales: List[Dict[str, str]],
-    model_name: str = "gpt-4o-mini",
+    model_name: str = DEFAULT_TRANSLATION_MODEL,
     review_model_name: str = "gpt-5.6-terra",
     api_base_url: Optional[str] = None,
     localization_format: object = JAVA_PROPERTIES_FORMAT.id,

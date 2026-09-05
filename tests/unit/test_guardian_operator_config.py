@@ -10,6 +10,8 @@ import stat
 import pytest
 import yaml
 
+from localize.guardian import runtime
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.models import (
     AllowedHeadRepository,
     GuardianConfig,
@@ -135,6 +137,39 @@ def test_snapshots_operator_config_and_glossary_before_the_poll(tmp_path: Path) 
         state_directory=state_dir,
     ) as snapshots:
         assert snapshots["acme/widgets"].bundle_digest == first_digest
+
+
+def test_operator_snapshot_stops_before_the_next_read_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guardian_config, _pipeline_config, _glossary, config = _operator_tree(tmp_path)
+    state_dir = guardian_config.parent / ".guardian"
+    now = [10.0]
+    reads = 0
+
+    original_read = runtime._read_private_operator_file
+
+    def expiring_read(*args: object, **kwargs: object) -> bytes | None:
+        nonlocal reads
+        reads += 1
+        content = original_read(*args, **kwargs)
+        now[0] = 13.0
+        return content
+
+    monkeypatch.setattr(runtime, "_read_private_operator_file", expiring_read)
+    deadline = PollDeadline(3, clock=lambda: now[0])
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        with _snapshot_operator_pipeline_configs(
+            config=config,
+            guardian_config_path=guardian_config,
+            state_directory=state_dir,
+            deadline=deadline,
+        ):
+            pytest.fail("expired operator snapshot must not be yielded")
+
+    assert reads == 1
 
 
 def test_base_config_mode_does_not_require_private_operator_directory(

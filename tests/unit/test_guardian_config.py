@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from localize.guardian import (
     AllowedHeadRepository,
@@ -18,7 +20,19 @@ from localize.guardian import (
     SigningFormat,
     TrustedActor,
 )
-from localize.guardian.config import GuardianConfigError, load_guardian_config
+from localize.guardian.config import (
+    GuardianConfigError,
+    load_guardian_config,
+    parse_guardian_config,
+)
+from localize.guardian.models import (
+    ClosedPrBackfillPolicy,
+    GuardianConfig,
+    GuardianLimits,
+    GuardianRuntime,
+    HistoricalRemediationPolicy,
+    pipeline_config_bundle_digest,
+)
 
 
 def _write_config(tmp_path: Path, yaml_text: str) -> Path:
@@ -33,8 +47,9 @@ repositories:
   - base_repo: acme/widgets
     base_repo_id: 42
     base_branch: main
+    publication_actor: {login: localize-bot, id: 11, type: User}
     allowed_pr_authors:
-      - {login: localize-bot, id: 11, type: Bot}
+      - {login: localize-bot, id: 11, type: User}
     allowed_head_owners:
       - {login: acme, id: 12, type: Organization}
     allowed_head_repositories:
@@ -62,6 +77,10 @@ def _prevention_policy_yaml() -> str:
         full_name: localize-bot/localization-pipeline
         id: 502
         branch_prefix: guardian/prevention-
+      publication_actor:
+        login: localize-bot
+        id: 11
+        type: User
       allowed_code_path_globs:
         - "localize/**/*.py"
       allowed_test_path_globs:
@@ -70,10 +89,7 @@ def _prevention_policy_yaml() -> str:
         - [/opt/localize-guardian/bin/pytest, tests/unit/test_rules.py, -q]
         - [/opt/localize-guardian/bin/ruff, check, localize, tests]
       sandbox_argv_prefix:
-        - /usr/bin/sandbox-exec
-        - -f
-        - /Users/operator/.config/localize-guardian/test.sb
-        - --
+        - /opt/localize-guardian/bin/sandbox-wrapper
       max_changed_files: 4
       max_changed_bytes: 262144
       private_target_model_opt_in: false
@@ -88,6 +104,21 @@ def _config_with_prevention() -> str:
     )
 
 
+def _raw_config_with_prevention() -> dict:
+    raw = yaml.safe_load(_config_with_prevention())
+    assert isinstance(raw, dict)
+    return raw
+
+
+def _allow_remediation_namespace(config_text: str) -> str:
+    return config_text.replace(
+        '    allowed_branch_globs: ["localization/**"]\n',
+        '    allowed_branch_globs: ["localization/**", '
+        '"localization/guardian-remediation-*"]\n',
+        1,
+    )
+
+
 def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     config = load_guardian_config(_write_config(tmp_path, _minimal_config()))
 
@@ -97,6 +128,7 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     assert config.limits.max_attempts == 2
     assert config.limits.max_value_edits_per_run == 20
     assert config.limits.max_prevention_drafts_per_run == 1
+    assert config.limits.max_remediation_drafts_per_run == 0
     assert config.limits.max_model_calls_per_day == 2
     assert config.limits.daily_cost_limit_usd is None
     assert config.limits.model_call_reservation_usd is None
@@ -121,8 +153,11 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     assert policy.base_repo == "acme/widgets"
     assert policy.base_repo_id == 42
     assert policy.base_branch == "main"
+    assert policy.publication_actor == TrustedActor(
+        login="localize-bot", id=11, type="User"
+    )
     assert policy.allowed_pr_author_by_id(11) == TrustedActor(
-        login="localize-bot", id=11, type="Bot"
+        login="localize-bot", id=11, type="User"
     )
     assert policy.allowed_head_owner_by_id(12) == TrustedActor(
         login="acme", id=12, type="Organization"
@@ -131,6 +166,7 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     assert policy.private_repo_model_opt_in is False
     assert policy.pipeline_config_source is PipelineConfigSource.BASE
     assert policy.prevention is None
+    assert policy.closed_pr_backfill is None
     assert policy.trusted_reviewers_for("ru") == (
         TrustedActor(login="locale-maintainer", id=101, type="User"),
     )
@@ -141,16 +177,113 @@ def test_minimal_config_is_report_only_with_safe_limits(tmp_path: Path) -> None:
     assert policy.trusted_bots_for("de") == ()
 
 
+def test_observe_and_prepare_allow_omitting_publication_actor(tmp_path: Path) -> None:
+    without_actor = _minimal_config().replace(
+        "    publication_actor: {login: localize-bot, id: 11, type: User}\n",
+        "",
+        1,
+    )
+
+    for mode in ("observe", "prepare"):
+        config = load_guardian_config(
+            _write_config(tmp_path, f"mode: {mode}\n{without_actor}")
+        )
+        assert config.repositories[0].publication_actor is None
+        assert config.enabled_publication_actors == ()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("apply-owned-translations", "propose-prevention"),
+)
+def test_write_modes_require_repository_publication_actor(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    config_text = (
+        _config_with_prevention()
+        if mode == "propose-prevention"
+        else _minimal_config()
+    ).replace(
+        "    publication_actor: {login: localize-bot, id: 11, type: User}\n",
+        "",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match="publication_actor"):
+        load_guardian_config(
+            _write_config(
+                tmp_path,
+                f"mode: {mode}\nlimits:\n  max_model_calls_per_day: 4\n"
+                f"{config_text}",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ("id: 11", "id: true"),
+        ("type: User", "type: Bot"),
+        ("login: localize-bot", 'login: "localize-bot\\nforged"'),
+    ),
+)
+def test_repository_publication_actor_is_one_typed_bounded_identity(
+    tmp_path: Path,
+    original: str,
+    replacement: str,
+) -> None:
+    malformed = _minimal_config().replace(original, replacement, 1)
+
+    with pytest.raises(GuardianConfigError, match="publication_actor"):
+        load_guardian_config(_write_config(tmp_path, malformed))
+
+
+def test_publication_actor_does_not_broaden_allowed_pr_authors(
+    tmp_path: Path,
+) -> None:
+    config_text = _minimal_config().replace(
+        "publication_actor: {login: localize-bot, id: 11, type: User}",
+        "publication_actor: {login: maintainer, id: 99, type: User}",
+        1,
+    )
+
+    config = load_guardian_config(
+        _write_config(tmp_path, f"mode: apply-owned-translations\n{config_text}")
+    )
+
+    policy = config.repositories[0]
+    assert policy.publication_actor == TrustedActor("maintainer", 99, "User")
+    assert policy.allowed_pr_author_by_id(99) is None
+
+
+@pytest.mark.parametrize("actor_type", ["Bot", "Organization"])
+def test_direct_repository_publication_actor_rejects_non_user(
+    tmp_path: Path,
+    actor_type: str,
+) -> None:
+    policy = load_guardian_config(
+        _write_config(tmp_path, _minimal_config())
+    ).repositories[0]
+
+    with pytest.raises(ValueError, match="publication_actor"):
+        replace(
+            policy,
+            publication_actor=TrustedActor("acme", 12, actor_type),
+        )
+
+
 def test_repository_policy_preserves_legacy_positional_defaults() -> None:
     prevention = PreventionPolicy(
         target_repository=ExactRepository("acme/pipeline", 501),
         target_base_branch="main",
         push_repository=ExactRepository("localize-bot/pipeline", 502),
         push_branch_prefix="guardian/prevention-",
+        publication_actor=TrustedActor("localize-bot", 11, "User"),
         allowed_code_path_globs=("localize/*.py",),
         allowed_test_path_globs=("tests/**/*.py",),
         focused_test_argv=(("/opt/bin/pytest", "tests/unit/test_rules.py"),),
-        sandbox_argv_prefix=("/usr/bin/sandbox-exec", "--"),
+        sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=262_144,
     )
@@ -159,7 +292,7 @@ def test_repository_policy_preserves_legacy_positional_defaults() -> None:
         "acme/widgets",
         42,
         "main",
-        (TrustedActor("localize-bot", 11, "Bot"),),
+        (TrustedActor("localize-bot", 11, "User"),),
         (TrustedActor("acme", 12, "Organization"),),
         (AllowedHeadRepository("localize-bot/widgets", 84),),
         ("localization/**",),
@@ -175,6 +308,792 @@ def test_repository_policy_preserves_legacy_positional_defaults() -> None:
     assert policy.private_repo_model_opt_in is True
     assert policy.prevention is prevention
     assert policy.pipeline_config_source is PipelineConfigSource.BASE
+    assert policy.closed_pr_backfill is None
+
+
+@pytest.mark.parametrize("actor_type", ["Bot", "Organization"])
+def test_prevention_publication_actor_must_be_a_user(actor_type: str) -> None:
+    with pytest.raises(ValueError, match="User identity"):
+        PreventionPolicy(
+            target_repository=ExactRepository("acme/pipeline", 501),
+            target_base_branch="main",
+            push_repository=ExactRepository("localize-bot/pipeline", 502),
+            push_branch_prefix="guardian/prevention-",
+            publication_actor=TrustedActor("acme", 12, actor_type),
+            allowed_code_path_globs=("localize/*.py",),
+            allowed_test_path_globs=("tests/**/*.py",),
+            focused_test_argv=(("/opt/bin/pytest", "tests/unit/test_rules.py"),),
+            sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
+            max_changed_files=4,
+            max_changed_bytes=262_144,
+        )
+
+
+def test_parses_explicit_bounded_closed_pr_backfill_policy(tmp_path: Path) -> None:
+    config_text = _minimal_config().replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 365\n"
+        "      max_prs_per_poll: 4\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.repositories[0].closed_pr_backfill == ClosedPrBackfillPolicy(
+        lookback_days=365,
+        max_prs_per_poll=4,
+    )
+
+
+def test_parses_explicit_historical_remediation_authority(tmp_path: Path) -> None:
+    config_text = _allow_remediation_namespace(_config_with_prevention()).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 365\n"
+        "      max_prs_per_poll: 4\n"
+        "      remediation:\n"
+        "        push_repository:\n"
+        "          full_name: localize-bot/widgets\n"
+        "          id: 84\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        "        publication_actor: {login: localize-bot, id: 11, type: User}\n"
+        "    trusted_reviewers:\n",
+        1,
+    ).replace(
+        "repositories:\n",
+        "mode: propose-prevention\n"
+        "limits:\n"
+        "  max_model_calls_per_day: 4\n"
+        "repositories:\n",
+        1,
+    )
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.repositories[0].closed_pr_backfill == ClosedPrBackfillPolicy(
+        lookback_days=365,
+        max_prs_per_poll=4,
+        remediation=HistoricalRemediationPolicy(
+            push_repository=ExactRepository("localize-bot/widgets", 84),
+            push_branch_prefix="localization/guardian-remediation-",
+            publication_actor=TrustedActor("localize-bot", 11, "User"),
+        ),
+    )
+
+
+@pytest.mark.parametrize("mode", ["observe", "prepare"])
+def test_historical_remediation_may_remain_dormant_in_read_only_modes(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    config_text = _allow_remediation_namespace(_minimal_config()).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository: {full_name: localize-bot/widgets, id: 84}\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        "        publication_actor: {login: localize-bot, id: 11, type: User}\n"
+        "    trusted_reviewers:\n",
+        1,
+    ).replace("repositories:\n", f"mode: {mode}\nrepositories:\n", 1)
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.mode.value == mode
+    assert config.repositories[0].closed_pr_backfill.remediation is not None
+    assert config.limits.max_remediation_drafts_per_run == 0
+
+
+def test_historical_remediation_allows_apply_mode_without_prevention(
+    tmp_path: Path,
+) -> None:
+    config_text = _allow_remediation_namespace(_minimal_config()).replace(
+        "repositories:\n",
+        "mode: apply-owned-translations\nrepositories:\n",
+        1,
+    ).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository: {full_name: localize-bot/widgets, id: 84}\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        "        publication_actor: {login: localize-bot, id: 11, type: User}\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.mode is GuardianMode.APPLY_OWNED_TRANSLATIONS
+    assert config.repositories[0].prevention is None
+    assert config.repositories[0].closed_pr_backfill.remediation is not None
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "offending"),
+    [
+        (
+            "full_name: localize-bot/widgets\n          id: 84",
+            "full_name: another-bot/widgets\n          id: 85",
+            "allowed_head_repositories",
+        ),
+        (
+            "push_branch_prefix: localization/guardian-remediation-",
+            "push_branch_prefix: guardian/remediation-",
+            "allowed_branch_globs",
+        ),
+    ],
+)
+def test_historical_remediation_must_create_a_guardian_eligible_pull(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    offending: str,
+) -> None:
+    config_text = _allow_remediation_namespace(_config_with_prevention()).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository:\n"
+        "          full_name: localize-bot/widgets\n"
+        "          id: 84\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        "        publication_actor: {login: localize-bot, id: 11, type: User}\n"
+        "    trusted_reviewers:\n",
+        1,
+    ).replace(
+        "repositories:\n",
+        "mode: propose-prevention\n"
+        "limits:\n"
+        "  max_model_calls_per_day: 4\n"
+        "repositories:\n",
+        1,
+    )
+    config_text = config_text.replace(old, new, 1)
+
+    with pytest.raises(GuardianConfigError, match=offending):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+@pytest.mark.parametrize(
+    ("actor", "match"),
+    [
+        ("{login: acme, id: 12, type: Organization}", "publication_actor"),
+        ("{login: renamed-bot, id: 999, type: Bot}", "publication_actor"),
+    ],
+)
+def test_historical_remediation_requires_one_exact_user_publication_actor(
+    tmp_path: Path,
+    actor: str,
+    match: str,
+) -> None:
+    config_text = _allow_remediation_namespace(_minimal_config()).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository: {full_name: localize-bot/widgets, id: 84}\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        f"        publication_actor: {actor}\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match=match):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+@pytest.mark.parametrize("login", ['"localize\\nbot"', '"localize\\0bot"'])
+def test_historical_remediation_rejects_non_single_line_publication_actor_login(
+    tmp_path: Path,
+    login: str,
+) -> None:
+    config_text = _allow_remediation_namespace(_minimal_config()).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository: {full_name: localize-bot/widgets, id: 84}\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        f"        publication_actor: {{login: {login}, id: 11, type: User}}\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match=r"publication_actor\.login"):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "offending"),
+    [
+        (
+            "push_branch_prefix: localization/guardian-remediation-",
+            "push_branch_prefix: refs/heads/remediation-",
+            "branch prefix",
+        ),
+        (
+            "push_branch_prefix: localization/guardian-remediation-",
+            f"push_branch_prefix: {'a' * 192}",
+            "leave room",
+        ),
+        (
+            "full_name: localize-bot/widgets\n          id: 84",
+            "full_name: acme/widgets\n          id: 84",
+            "repository identity",
+        ),
+        (
+            "full_name: localize-bot/widgets\n          id: 84",
+            "full_name: localize-bot/widgets\n          id: 42",
+            "repository identity",
+        ),
+    ],
+)
+def test_rejects_unsafe_or_ambiguous_historical_remediation_authority(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    offending: str,
+) -> None:
+    config_text = _allow_remediation_namespace(_config_with_prevention()).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository:\n"
+        "          full_name: localize-bot/widgets\n"
+        "          id: 84\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        "        publication_actor: {login: localize-bot, id: 11, type: User}\n"
+        "    trusted_reviewers:\n",
+        1,
+    ).replace("repositories:\n", "mode: propose-prevention\nrepositories:\n", 1)
+    config_text = config_text.replace(old, new, 1)
+
+    with pytest.raises(GuardianConfigError, match=offending):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+@pytest.mark.parametrize("actor_type", ["Bot", "Organization"])
+def test_historical_remediation_policy_rejects_invalid_direct_construction(
+    actor_type: str,
+) -> None:
+    with pytest.raises(ValueError, match="push_branch_prefix"):
+        HistoricalRemediationPolicy(
+            push_repository=ExactRepository("localize-bot/widgets", 84),
+            push_branch_prefix="refs/heads/remediation-",
+            publication_actor=TrustedActor("localize-bot", 11, "User"),
+        )
+
+    with pytest.raises(ValueError, match="User identity"):
+        HistoricalRemediationPolicy(
+            push_repository=ExactRepository("localize-bot/widgets", 84),
+            push_branch_prefix="localization/guardian-remediation-",
+            publication_actor=TrustedActor("acme", 12, actor_type),
+        )
+
+    remediation = HistoricalRemediationPolicy(
+        push_repository=ExactRepository("acme/widgets", 84),
+        push_branch_prefix="localization/guardian-remediation-",
+        publication_actor=TrustedActor("localize-bot", 11, "User"),
+    )
+    with pytest.raises(ValueError, match="ambiguous repository identity"):
+        RepositoryPolicy(
+            base_repo="acme/widgets",
+            base_repo_id=42,
+            base_branch="main",
+            allowed_pr_authors=(TrustedActor("localize-bot", 11, "User"),),
+            allowed_head_owners=(TrustedActor("acme", 12, "Organization"),),
+            allowed_head_repositories=(
+                AllowedHeadRepository("localize-bot/widgets", 84),
+            ),
+            allowed_branch_globs=("localization/**",),
+            allowed_path_globs=("l10n/**",),
+            pipeline_config_path="config.yaml",
+            source_locale="en",
+            trusted_reviewers={"ru": (TrustedActor("reviewer", 101, "User"),)},
+            trusted_bots={},
+            closed_pr_backfill=ClosedPrBackfillPolicy(
+                lookback_days=30,
+                max_prs_per_poll=2,
+                remediation=remediation,
+            ),
+        )
+
+
+def test_repository_policy_requires_remediation_head_scope_not_author_membership(
+) -> None:
+    common = {
+        "base_repo": "acme/widgets",
+        "base_repo_id": 42,
+        "base_branch": "main",
+        "allowed_pr_authors": (TrustedActor("translation-bot", 77, "Bot"),),
+        "allowed_head_owners": (TrustedActor("acme", 12, "Organization"),),
+        "allowed_head_repositories": (
+            AllowedHeadRepository("localize-bot/widgets", 84),
+        ),
+        "allowed_branch_globs": ("localization/**",),
+        "allowed_path_globs": ("l10n/**",),
+        "pipeline_config_path": "config.yaml",
+        "source_locale": "en",
+        "trusted_reviewers": {
+            "ru": (TrustedActor("reviewer", 101, "User"),),
+        },
+        "trusted_bots": {},
+    }
+
+    with pytest.raises(ValueError, match="allowed head repository"):
+        RepositoryPolicy(
+            **{
+                **common,
+                "allowed_branch_globs": (
+                    "localization/guardian-remediation-*",
+                ),
+            },
+            closed_pr_backfill=ClosedPrBackfillPolicy(
+                lookback_days=30,
+                max_prs_per_poll=2,
+                remediation=HistoricalRemediationPolicy(
+                    push_repository=ExactRepository("another-bot/widgets", 85),
+                    push_branch_prefix="localization/guardian-remediation-",
+                    publication_actor=TrustedActor("localize-bot", 11, "User"),
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="allowed head branch"):
+        RepositoryPolicy(
+            **common,
+            closed_pr_backfill=ClosedPrBackfillPolicy(
+                lookback_days=30,
+                max_prs_per_poll=2,
+                remediation=HistoricalRemediationPolicy(
+                    push_repository=ExactRepository("localize-bot/widgets", 84),
+                    push_branch_prefix="guardian/remediation-",
+                    publication_actor=TrustedActor("localize-bot", 11, "User"),
+                ),
+            ),
+        )
+
+    policy = RepositoryPolicy(
+        **{
+            **common,
+            "allowed_branch_globs": (
+                "localization/guardian-remediation-*",
+            ),
+        },
+        closed_pr_backfill=ClosedPrBackfillPolicy(
+            lookback_days=30,
+            max_prs_per_poll=2,
+            remediation=HistoricalRemediationPolicy(
+                push_repository=ExactRepository("localize-bot/widgets", 84),
+                push_branch_prefix="localization/guardian-remediation-",
+                publication_actor=TrustedActor("machine-user", 99, "User"),
+            ),
+        ),
+    )
+
+    assert policy.allowed_pr_authors == (TrustedActor("translation-bot", 77, "Bot"),)
+    assert policy.closed_pr_backfill.remediation.publication_actor == TrustedActor(
+        "machine-user", 99, "User"
+    )
+
+
+def test_enabled_publication_policies_require_one_github_actor_identity() -> None:
+    first_actor = TrustedActor("localize-bot", 11, "User")
+    second_actor = TrustedActor("other-bot", 99, "User")
+    remediation = HistoricalRemediationPolicy(
+        push_repository=ExactRepository("localize-bot/widgets", 84),
+        push_branch_prefix="localization/guardian-remediation-",
+        publication_actor=first_actor,
+    )
+    policy = RepositoryPolicy(
+        base_repo="acme/widgets",
+        base_repo_id=42,
+        base_branch="main",
+        allowed_pr_authors=(first_actor,),
+        allowed_head_owners=(TrustedActor("acme", 12, "Organization"),),
+        allowed_head_repositories=(
+            AllowedHeadRepository("localize-bot/widgets", 84),
+        ),
+        allowed_branch_globs=("localization/guardian-remediation-*",),
+        allowed_path_globs=("l10n/**",),
+        pipeline_config_path="config.yaml",
+        source_locale="en",
+        trusted_reviewers={
+            "ru": (TrustedActor("reviewer", 101, "User"),),
+        },
+        trusted_bots={},
+        closed_pr_backfill=ClosedPrBackfillPolicy(
+            lookback_days=30,
+            max_prs_per_poll=2,
+            remediation=remediation,
+        ),
+        publication_actor=first_actor,
+    )
+    conflicting = replace(
+        policy,
+        base_repo="example/widgets",
+        base_repo_id=43,
+        allowed_pr_authors=(second_actor,),
+        closed_pr_backfill=replace(
+            policy.closed_pr_backfill,
+            remediation=replace(remediation, publication_actor=second_actor),
+        ),
+        publication_actor=second_actor,
+    )
+
+    with pytest.raises(ValueError, match="one GitHub actor identity"):
+        GuardianConfig(
+            repositories=(policy, conflicting),
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            limits=replace(
+                GuardianConfig(repositories=(policy,)).limits,
+                max_remediation_drafts_per_run=1,
+            ),
+        )
+
+
+def test_config_rejects_different_prevention_and_remediation_actors(
+    tmp_path: Path,
+) -> None:
+    config_text = _allow_remediation_namespace(_config_with_prevention()).replace(
+        "    allowed_pr_authors:\n"
+        "      - {login: localize-bot, id: 11, type: User}\n",
+        "    allowed_pr_authors:\n"
+        "      - {login: localize-bot, id: 11, type: User}\n"
+        "      - {login: other-bot, id: 99, type: User}\n",
+        1,
+    ).replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 2\n"
+        "      remediation:\n"
+        "        push_repository: {full_name: localize-bot/widgets, id: 84}\n"
+        "        push_branch_prefix: localization/guardian-remediation-\n"
+        "        publication_actor: {login: other-bot, id: 99, type: User}\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+    config_text = (
+        "mode: propose-prevention\nlimits:\n"
+        "  max_model_calls_per_day: 4\n"
+        "  max_remediation_drafts_per_run: 1\n"
+        + config_text
+    )
+
+    with pytest.raises(GuardianConfigError, match="one GitHub actor identity"):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+@pytest.mark.parametrize("invalid_id", [True, 42.0, "42"])
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda value: TrustedActor("actor", value, "User"),
+        lambda value: AllowedHeadRepository("acme/widgets", value),
+        lambda value: ExactRepository("acme/widgets", value),
+    ],
+)
+def test_typed_github_identities_require_native_integer_ids(
+    invalid_id: object,
+    factory,
+) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        factory(invalid_id)
+
+
+def test_typed_github_actor_rejects_non_string_role_as_value_error() -> None:
+    with pytest.raises(ValueError, match="type"):
+        TrustedActor("actor", 42, ["Bot"])  # type: ignore[arg-type]
+
+
+def test_direct_repository_policy_rejects_role_and_identity_bypasses() -> None:
+    policy = parse_guardian_config(yaml.safe_load(_minimal_config())).repositories[0]
+
+    with pytest.raises(ValueError, match=r"trusted_reviewers\.ru.*User"):
+        replace(
+            policy,
+            trusted_reviewers={
+                "ru": (TrustedActor("review-bot", 303, "Bot"),),
+            },
+        )
+    with pytest.raises(ValueError, match="unique across reviewer and bot"):
+        replace(
+            policy,
+            trusted_bots={
+                "ru": (TrustedActor("same-id-bot", 101, "Bot"),),
+            },
+        )
+    with pytest.raises(ValueError, match="allowed_pr_authors.*allowed roles"):
+        replace(
+            policy,
+            allowed_pr_authors=(TrustedActor("acme", 12, "Organization"),),
+        )
+    with pytest.raises(ValueError, match="duplicate actor IDs"):
+        replace(
+            policy,
+            allowed_pr_authors=(
+                TrustedActor("translation-bot", 11, "Bot"),
+                TrustedActor("renamed-bot", 11, "Bot"),
+            ),
+        )
+    with pytest.raises(ValueError, match="duplicate identities"):
+        replace(
+            policy,
+            allowed_head_repositories=(
+                AllowedHeadRepository("localize-bot/widgets", 84),
+                AllowedHeadRepository("LOCALIZE-BOT/widgets", 85),
+            ),
+        )
+    with pytest.raises(ValueError, match="allowed_path_globs.*duplicates"):
+        replace(policy, allowed_path_globs=("l10n/**", "l10n/**"))
+
+
+def test_direct_repository_and_config_freeze_mutable_authority_inputs() -> None:
+    parsed = parse_guardian_config(yaml.safe_load(_minimal_config())).repositories[0]
+    authors = list(parsed.allowed_pr_authors)
+    owners = list(parsed.allowed_head_owners)
+    head_repositories = list(parsed.allowed_head_repositories)
+    branch_globs = list(parsed.allowed_branch_globs)
+    path_globs = list(parsed.allowed_path_globs)
+    reviewer_accounts = list(parsed.trusted_reviewers["ru"])
+    bot_accounts = list(parsed.trusted_bots["ru"])
+    reviewers = {"ru": reviewer_accounts}
+    bots = {"ru": bot_accounts}
+
+    policy = RepositoryPolicy(
+        base_repo=parsed.base_repo,
+        base_repo_id=parsed.base_repo_id,
+        base_branch=parsed.base_branch,
+        allowed_pr_authors=authors,  # type: ignore[arg-type]
+        allowed_head_owners=owners,  # type: ignore[arg-type]
+        allowed_head_repositories=head_repositories,  # type: ignore[arg-type]
+        allowed_branch_globs=branch_globs,  # type: ignore[arg-type]
+        allowed_path_globs=path_globs,  # type: ignore[arg-type]
+        pipeline_config_path=parsed.pipeline_config_path,
+        source_locale=parsed.source_locale,
+        trusted_reviewers=reviewers,  # type: ignore[arg-type]
+        trusted_bots=bots,  # type: ignore[arg-type]
+    )
+    repositories = [policy]
+    config = GuardianConfig(repositories=repositories, mode="observe")  # type: ignore[arg-type]
+
+    authors.clear()
+    owners.clear()
+    head_repositories.clear()
+    branch_globs.clear()
+    path_globs.clear()
+    reviewer_accounts.clear()
+    bot_accounts.clear()
+    reviewers.clear()
+    bots.clear()
+    repositories.clear()
+
+    assert config.mode is GuardianMode.OBSERVE
+    assert config.repositories == (policy,)
+    assert policy.allowed_pr_authors == parsed.allowed_pr_authors
+    assert policy.allowed_head_owners == parsed.allowed_head_owners
+    assert policy.allowed_head_repositories == parsed.allowed_head_repositories
+    assert policy.allowed_branch_globs == parsed.allowed_branch_globs
+    assert policy.allowed_path_globs == parsed.allowed_path_globs
+    assert policy.trusted_reviewers_for("ru") == parsed.trusted_reviewers_for("ru")
+    assert policy.trusted_bots_for("ru") == parsed.trusted_bots_for("ru")
+    with pytest.raises(TypeError):
+        policy.trusted_reviewers["de"] = ()  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"repositories": ()}, "repositories.*non-empty"),
+        ({"repositories": {"policy": object()}}, "repositories.*sequence"),
+        ({"mode": "unsafe"}, "mode"),
+        ({"repositories": (object(),)}, "RepositoryPolicy"),
+        ({"limits": object()}, "GuardianLimits"),
+        ({"runtime": object()}, "GuardianRuntime"),
+        ({"schedule": object()}, "GuardianSchedule"),
+    ],
+)
+def test_direct_guardian_config_rejects_untyped_or_empty_policy(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    policy = parse_guardian_config(yaml.safe_load(_minimal_config())).repositories[0]
+    values: dict[str, object] = {"repositories": (policy,)}
+    values.update(kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        GuardianConfig(**values)  # type: ignore[arg-type]
+
+
+def test_pipeline_bundle_digest_rejects_mixed_key_types_as_value_error() -> None:
+    with pytest.raises(ValueError, match="path/byte pairs"):
+        pipeline_config_bundle_digest(  # type: ignore[arg-type]
+            {"config.yaml": b"safe", 1: b"unsafe"}
+        )
+
+
+@pytest.mark.parametrize("invalid_id", [True, 42.0, "42"])
+def test_repository_policy_requires_a_native_integer_base_repository_id(
+    invalid_id: object,
+) -> None:
+    with pytest.raises(ValueError, match="Base repository id"):
+        RepositoryPolicy(
+            base_repo="acme/widgets",
+            base_repo_id=invalid_id,  # type: ignore[arg-type]
+            base_branch="main",
+            allowed_pr_authors=(TrustedActor("localize-bot", 11, "Bot"),),
+            allowed_head_owners=(TrustedActor("acme", 12, "Organization"),),
+            allowed_head_repositories=(
+                AllowedHeadRepository("localize-bot/widgets", 84),
+            ),
+            allowed_branch_globs=("localization/**",),
+            allowed_path_globs=("l10n/**",),
+            pipeline_config_path="config.yaml",
+            source_locale="en",
+            trusted_reviewers={},
+            trusted_bots={},
+        )
+
+
+def test_repository_policy_requires_glob_to_cover_every_generated_branch() -> None:
+    common = {
+        "base_repo": "acme/widgets",
+        "base_repo_id": 42,
+        "base_branch": "main",
+        "allowed_pr_authors": (TrustedActor("localize-bot", 11, "Bot"),),
+        "allowed_head_owners": (TrustedActor("acme", 12, "Organization"),),
+        "allowed_head_repositories": (
+            AllowedHeadRepository("localize-bot/widgets", 84),
+        ),
+        "allowed_path_globs": ("l10n/**",),
+        "pipeline_config_path": "config.yaml",
+        "source_locale": "en",
+        "trusted_reviewers": {
+            "ru": (TrustedActor("reviewer", 101, "User"),),
+        },
+        "trusted_bots": {},
+        "closed_pr_backfill": ClosedPrBackfillPolicy(
+            lookback_days=30,
+            max_prs_per_poll=2,
+            remediation=HistoricalRemediationPolicy(
+                push_repository=ExactRepository("localize-bot/widgets", 84),
+                push_branch_prefix="localization/remediation-",
+                publication_actor=TrustedActor("localize-bot", 11, "User"),
+            ),
+        ),
+    }
+
+    with pytest.raises(ValueError, match="allowed head branch"):
+        RepositoryPolicy(
+            **common,
+            allowed_branch_globs=("localization/remediation-0*",),
+        )
+
+    policy = RepositoryPolicy(
+        **common,
+        allowed_branch_globs=("localization/remediation-*",),
+    )
+    assert policy.allowed_branch_globs == ("localization/remediation-*",)
+
+
+@pytest.mark.parametrize("value", [0, 3])
+def test_parses_bounded_remediation_draft_limit(
+    tmp_path: Path,
+    value: int,
+) -> None:
+    config_text = _minimal_config().replace(
+        "repositories:\n",
+        f"limits:\n  max_remediation_drafts_per_run: {value}\nrepositories:\n",
+        1,
+    )
+
+    config = load_guardian_config(_write_config(tmp_path, config_text))
+
+    assert config.limits.max_remediation_drafts_per_run == value
+
+
+@pytest.mark.parametrize("value", ["-1", "true", "1.5"])
+def test_rejects_invalid_remediation_draft_limit(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    config_text = _minimal_config().replace(
+        "repositories:\n",
+        f"limits:\n  max_remediation_drafts_per_run: {value}\nrepositories:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match="max_remediation_drafts_per_run"):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lookback_days", "0"),
+        ("lookback_days", "-1"),
+        ("lookback_days", "3651"),
+        ("lookback_days", "true"),
+        ("lookback_days", "1.5"),
+        ("max_prs_per_poll", "0"),
+        ("max_prs_per_poll", "-1"),
+        ("max_prs_per_poll", "101"),
+        ("max_prs_per_poll", "true"),
+        ("max_prs_per_poll", "1.5"),
+    ],
+)
+def test_rejects_unbounded_or_non_integer_closed_pr_backfill_values(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    config_text = _minimal_config().replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        f"      lookback_days: {value if field == 'lookback_days' else '30'}\n"
+        f"      max_prs_per_poll: {value if field == 'max_prs_per_poll' else '4'}\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match=field):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
+def test_closed_pr_backfill_policy_rejects_invalid_direct_construction() -> None:
+    with pytest.raises(ValueError, match="lookback_days"):
+        ClosedPrBackfillPolicy(lookback_days=True, max_prs_per_poll=1)
+    with pytest.raises(ValueError, match="lookback_days"):
+        ClosedPrBackfillPolicy(lookback_days=3651, max_prs_per_poll=1)
+    with pytest.raises(ValueError, match="max_prs_per_poll"):
+        ClosedPrBackfillPolicy(lookback_days=30, max_prs_per_poll=101)
+
+
+def test_closed_pr_backfill_rejects_unknown_keys(tmp_path: Path) -> None:
+    config_text = _minimal_config().replace(
+        "    trusted_reviewers:\n",
+        "    closed_pr_backfill:\n"
+        "      lookback_days: 30\n"
+        "      max_prs_per_poll: 4\n"
+        "      include_drafts: true\n"
+        "    trusted_reviewers:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match="include_drafts"):
+        load_guardian_config(_write_config(tmp_path, config_text))
 
 
 def test_parses_operator_pipeline_config_and_daily_schedule(tmp_path: Path) -> None:
@@ -375,6 +1294,7 @@ limits:
             id=502,
         ),
         push_branch_prefix="guardian/prevention-",
+        publication_actor=TrustedActor("localize-bot", 11, "User"),
         allowed_code_path_globs=("localize/**/*.py",),
         allowed_test_path_globs=("tests/**/*.py",),
         focused_test_argv=(
@@ -385,15 +1305,42 @@ limits:
             ),
             ("/opt/localize-guardian/bin/ruff", "check", "localize", "tests"),
         ),
-        sandbox_argv_prefix=(
-            "/usr/bin/sandbox-exec",
-            "-f",
-            "/Users/operator/.config/localize-guardian/test.sb",
-            "--",
-        ),
+        sandbox_argv_prefix=("/opt/localize-guardian/bin/sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=262144,
     )
+
+
+def test_prevention_requires_one_typed_numeric_publication_actor(
+    tmp_path: Path,
+) -> None:
+    actor_block = """      publication_actor:
+        login: localize-bot
+        id: 11
+        type: User
+"""
+    missing = _config_with_prevention().replace(actor_block, "", 1)
+    with pytest.raises(GuardianConfigError, match="publication_actor"):
+        load_guardian_config(_write_config(tmp_path, missing))
+
+    for original, replacement in (
+        ("        id: 11\n", "        id: true\n"),
+        ("        type: User\n", "        type: Bot\n"),
+    ):
+        malformed = _config_with_prevention().replace(original, replacement, 1)
+        with pytest.raises(GuardianConfigError, match="publication_actor"):
+            load_guardian_config(_write_config(tmp_path, malformed))
+
+
+def test_prevention_rejects_multiline_publication_actor_login(tmp_path: Path) -> None:
+    malformed = _config_with_prevention().replace(
+        "        login: localize-bot\n",
+        '        login: "localize-bot\\nforged"\n',
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match=r"publication_actor\.login"):
+        load_guardian_config(_write_config(tmp_path, malformed))
 
 
 @pytest.mark.parametrize(
@@ -555,6 +1502,17 @@ repositories:
     assert config.repositories[0].private_repo_model_opt_in is True
 
 
+def test_value_edit_limit_has_a_finite_draft_safety_bound(tmp_path: Path) -> None:
+    config_text = _minimal_config().replace(
+        "repositories:\n",
+        "limits:\n  max_value_edits_per_run: 101\nrepositories:\n",
+        1,
+    )
+
+    with pytest.raises(GuardianConfigError, match="max_value_edits_per_run"):
+        load_guardian_config(_write_config(tmp_path, config_text))
+
+
 def test_loads_secret_free_runtime_broker_and_codex_settings(tmp_path: Path) -> None:
     fingerprint = "A" * 40
     config_text = f"""runtime:
@@ -565,7 +1523,7 @@ def test_loads_secret_free_runtime_broker_and_codex_settings(tmp_path: Path) -> 
   git_executable: /opt/local/bin/git
   signing_program: /opt/local/bin/gpg
   github_token_command: [/opt/local/bin/gh, auth, token]
-  codex_api_key_command: [/usr/bin/security, find-generic-password, -w, -s, guardian]
+  codex_api_key_command: [/opt/local/bin/model-key-helper]
   signing_key: {fingerprint}
 limits:
   daily_cost_limit_usd: 20
@@ -586,15 +1544,193 @@ limits:
         "token",
     )
     assert config.runtime.codex_api_key_command == (
-        "/usr/bin/security",
-        "find-generic-password",
-        "-w",
-        "-s",
-        "guardian",
+        "/opt/local/bin/model-key-helper",
     )
     assert config.runtime.signing_key == fingerprint
     assert config.runtime.signing_format is SigningFormat.OPENPGP
     assert config.runtime.signing_public_key is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "offending"),
+    [
+        ({"run_timeout_seconds": 0}, "run_timeout_seconds"),
+        ({"max_attempts": True}, "max_attempts"),
+        ({"max_attempts": 3}, "max_attempts"),
+        ({"max_value_edits_per_run": 101}, "max_value_edits_per_run"),
+        ({"max_prevention_drafts_per_run": -1}, "max_prevention"),
+        ({"max_remediation_drafts_per_run": -1}, "max_remediation"),
+        ({"max_model_calls_per_day": 0}, "max_model_calls"),
+        ({"raw_retention_days": 0}, "raw_retention_days"),
+        ({"daily_cost_limit_usd": 0, "model_call_reservation_usd": 1}, "daily"),
+        (
+            {"daily_cost_limit_usd": float("nan"), "model_call_reservation_usd": 1},
+            "daily",
+        ),
+        (
+            {"daily_cost_limit_usd": 2, "model_call_reservation_usd": float("inf")},
+            "reservation",
+        ),
+        ({"daily_cost_limit_usd": 2}, "set together"),
+        (
+            {"daily_cost_limit_usd": 1, "model_call_reservation_usd": 2},
+            "must not exceed",
+        ),
+        ({"min_apply_confidence": -0.1}, "min_apply_confidence"),
+        ({"min_apply_confidence": float("nan")}, "min_apply_confidence"),
+    ],
+)
+def test_typed_guardian_limits_enforce_parser_bounds(
+    kwargs: dict[str, object],
+    offending: str,
+) -> None:
+    with pytest.raises(ValueError, match=offending):
+        GuardianLimits(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "offending"),
+    [
+        ({"codex_model": ""}, "codex_model"),
+        ({"codex_model": "x" * 4097}, "codex_model"),
+        ({"codex_reasoning_effort": "none"}, "codex_reasoning_effort"),
+        ({"codex_reasoning_effort": ["high"]}, "codex_reasoning_effort"),
+        ({"codex_auth_mode": "other"}, "codex_auth_mode"),
+        ({"codex_home": "relative/path"}, "codex_home"),
+        ({"codex_home": "~/../shared"}, "codex_home"),
+        ({"github_token_command": ()}, "github_token_command"),
+        ({"github_token_command": {"helper"}}, "github_token_command"),
+        (
+            {"github_token_command": tuple("x" for _ in range(33))},
+            "github_token_command",
+        ),
+        ({"github_token_command": ("sh", "-c", "read-token")}, "shell wrapper"),
+        (
+            {"github_token_command": ("helper", "TOKEN=committed-secret")},
+            "credentials or environment assignments",
+        ),
+        (
+            {"github_token_command": ("python3", "-c", "read_secret()")},
+            "interpreter command string",
+        ),
+        (
+            {"github_token_command": ("python3", "/opt/helpers/github.py")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("node", "/opt/helpers/github.js")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("nice", "/opt/helpers/github-token")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("nohup", "/opt/helpers/github-token")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("helper", "read")},
+            "arguments",
+        ),
+        (
+            {
+                "codex_auth_mode": CodexAuthMode.API_KEY,
+                "codex_api_key_command": ("helper", "read"),
+            },
+            "arguments",
+        ),
+        ({"codex_auth_mode": CodexAuthMode.API_KEY}, "codex_api_key_command"),
+        ({"codex_api_key_command": ("helper",)}, "only valid"),
+        ({"signing_key": "A" * 16}, "40- or 64-hex"),
+        ({"signing_public_key": "/keys/guardian.pub"}, "only valid"),
+        ({"signing_format": "x509"}, "signing_format"),
+        ({"signing_format": SigningFormat.SSH}, "signing_key"),
+        (
+            {
+                "signing_format": SigningFormat.SSH,
+                "signing_key": "SHA256:" + "A" * 43,
+            },
+            "signing_public_key",
+        ),
+        (
+            {
+                "signing_format": SigningFormat.SSH,
+                "signing_key": "SHA256:" + "A" * 43,
+                "signing_public_key": "keys/guardian.pub",
+                "signing_program": "/usr/bin/ssh-keygen",
+            },
+            "absolute POSIX",
+        ),
+        (
+            {
+                "signing_format": SigningFormat.SSH,
+                "signing_key": "SHA256:" + "A" * 43,
+                "signing_public_key": "/keys/guardian.pub",
+            },
+            "signing_program",
+        ),
+    ],
+)
+def test_typed_guardian_runtime_enforces_parser_policy(
+    kwargs: dict[str, object],
+    offending: str,
+) -> None:
+    with pytest.raises(ValueError, match=offending):
+        GuardianRuntime(**kwargs)  # type: ignore[arg-type]
+
+
+def test_typed_guardian_runtime_normalizes_parser_representations() -> None:
+    runtime = GuardianRuntime(
+        codex_auth_mode="api-key",  # type: ignore[arg-type]
+        codex_api_key_command=["/opt/bin/model-token"],  # type: ignore[arg-type]
+        github_token_command=["/opt/bin/github-token"],  # type: ignore[arg-type]
+        signing_key="a" * 40,
+    )
+    limits = GuardianLimits(
+        daily_cost_limit_usd=2,
+        model_call_reservation_usd=1,
+        min_apply_confidence=1,
+    )
+
+    assert runtime.codex_auth_mode is CodexAuthMode.API_KEY
+    assert runtime.codex_api_key_command == ("/opt/bin/model-token",)
+    assert runtime.github_token_command == ("/opt/bin/github-token",)
+    assert runtime.signing_key == "A" * 40
+    assert limits.daily_cost_limit_usd == 2.0
+    assert limits.model_call_reservation_usd == 1.0
+    assert limits.min_apply_confidence == 1.0
+
+
+@pytest.mark.parametrize("typed_field", ["runtime", "limits"])
+def test_parser_wraps_typed_model_rejections_as_guardian_config_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    typed_field: str,
+) -> None:
+    if typed_field == "runtime":
+        original = GuardianRuntime
+
+        def rejecting_model(**kwargs):
+            if kwargs:
+                raise ValueError("runtime-only rejection")
+            return original()
+
+        monkeypatch.setattr("localize.guardian.config.GuardianRuntime", rejecting_model)
+    else:
+        original = GuardianLimits
+
+        def rejecting_model(**kwargs):
+            if kwargs:
+                raise ValueError("limits-only rejection")
+            return original()
+
+        monkeypatch.setattr("localize.guardian.config.GuardianLimits", rejecting_model)
+
+    with pytest.raises(
+        GuardianConfigError,
+        match=rf"at {typed_field}.*{typed_field}-only rejection",
+    ):
+        parse_guardian_config(yaml.safe_load(_minimal_config()))
 
 
 def test_loads_exact_ssh_signing_identity(tmp_path: Path) -> None:
@@ -730,16 +1866,23 @@ def test_daily_cost_limit_must_be_positive(tmp_path: Path) -> None:
         load_guardian_config(_write_config(tmp_path, config_text))
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "daily_cost_limit_usd",
+        "model_call_reservation_usd",
+        "min_apply_confidence",
+    ],
+)
 @pytest.mark.parametrize("yaml_number", [".nan", ".inf", "-.inf"])
-def test_rejects_non_finite_daily_cost_limits(
+def test_rejects_non_finite_numeric_limits_as_guardian_config_error(
     tmp_path: Path,
+    field: str,
     yaml_number: str,
 ) -> None:
-    yaml_text = (
-        f"limits:\n  daily_cost_limit_usd: {yaml_number}\n" + _minimal_config()
-    )
+    yaml_text = f"limits:\n  {field}: {yaml_number}\n" + _minimal_config()
 
-    with pytest.raises(GuardianConfigError, match="finite"):
+    with pytest.raises(GuardianConfigError, match=rf"{field}.*finite"):
         load_guardian_config(_write_config(tmp_path, yaml_text))
 
 
@@ -806,6 +1949,38 @@ def test_rejects_unknown_and_secret_fields(
         (
             "codex_api_key_command: [python3, -c, print-secret]",
             "command string",
+        ),
+        (
+            "github_token_command: [python3, /opt/helpers/github.py]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [node, /opt/helpers/github.js]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [nice, /opt/helpers/github-token]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [nohup, /opt/helpers/github-token]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [helper, read]",
+            "arguments",
+        ),
+        (
+            "github_token_command: [awk, -f, /opt/helpers/github.awk]",
+            "arguments",
+        ),
+        (
+            "github_token_command: [tclsh, /opt/helpers/github.tcl]",
+            "arguments",
+        ),
+        (
+            "github_token_command: [uv, run, /opt/helpers/github.py]",
+            "arguments",
         ),
         (
             "github_token_command: [helper, TOKEN=committed-secret]",
@@ -877,6 +2052,101 @@ def test_rejects_unsafe_prevention_identities_refs_paths_and_limits(
         load_guardian_config(_write_config(tmp_path, yaml_text))
 
 
+def test_accepts_exact_prevention_collection_and_utf8_byte_boundaries() -> None:
+    raw = _raw_config_with_prevention()
+    prevention = raw["repositories"][0]["prevention"]
+    exact_string = "é" * 2048
+    focused_commands = [
+        [f"/opt/localize-guardian/bin/check-{index}", *("arg",) * 255]
+        for index in range(64)
+    ]
+    focused_commands[0][-1] = exact_string
+    prevention.update(
+        {
+            "allowed_code_path_globs": [
+                f"localize/generated_{index}.py" for index in range(100)
+            ],
+            "allowed_test_path_globs": [
+                f"tests/generated_{index}.py" for index in range(100)
+            ],
+            "focused_test_argv": focused_commands,
+            "sandbox_argv_prefix": [
+                "/opt/localize-guardian/bin/sandbox-wrapper",
+            ],
+            "max_changed_files": 100,
+        }
+    )
+    prevention["push_repository"]["branch_prefix"] = "g/" + "a" * 176
+
+    config = parse_guardian_config(raw)
+    parsed = config.repositories[0].prevention
+
+    assert parsed is not None
+    assert len(parsed.allowed_code_path_globs) == 100
+    assert len(parsed.allowed_test_path_globs) == 100
+    assert len(parsed.focused_test_argv) == 64
+    assert all(len(argv) == 256 for argv in parsed.focused_test_argv)
+    assert parsed.sandbox_argv_prefix == (
+        "/opt/localize-guardian/bin/sandbox-wrapper",
+    )
+    assert len(parsed.focused_test_argv[0][-1].encode("utf-8")) == 4096
+    assert len(parsed.push_branch_prefix) + 77 == 255
+    assert parsed.max_changed_files == 100
+
+
+@pytest.mark.parametrize(
+    ("case", "offending"),
+    [
+        ("code_globs", "allowed_code_path_globs"),
+        ("test_globs", "allowed_test_path_globs"),
+        ("focused_commands", "focused_test_argv"),
+        ("focused_argv", "focused_test_argv"),
+        ("sandbox_argv", "sandbox_argv_prefix"),
+        ("utf8_string", "focused_test_argv"),
+        ("changed_files", "max_changed_files"),
+        ("branch_prefix", "branch_prefix"),
+    ],
+)
+def test_rejects_prevention_values_above_durable_runtime_bounds(
+    case: str,
+    offending: str,
+) -> None:
+    raw = _raw_config_with_prevention()
+    prevention = raw["repositories"][0]["prevention"]
+    if case == "code_globs":
+        prevention["allowed_code_path_globs"] = [
+            f"localize/generated_{index}.py" for index in range(101)
+        ]
+    elif case == "test_globs":
+        prevention["allowed_test_path_globs"] = [
+            f"tests/generated_{index}.py" for index in range(101)
+        ]
+    elif case == "focused_commands":
+        prevention["focused_test_argv"] = [
+            [f"/opt/localize-guardian/bin/check-{index}"] for index in range(65)
+        ]
+    elif case == "focused_argv":
+        prevention["focused_test_argv"] = [
+            ["/opt/localize-guardian/bin/pytest", *("arg",) * 256]
+        ]
+    elif case == "sandbox_argv":
+        prevention["sandbox_argv_prefix"] = [
+            "/opt/localize-guardian/bin/sandbox-wrapper",
+            "/unchecked/policy",
+        ]
+    elif case == "utf8_string":
+        prevention["focused_test_argv"] = [
+            ["/opt/localize-guardian/bin/pytest", "é" * 2049]
+        ]
+    elif case == "changed_files":
+        prevention["max_changed_files"] = 101
+    else:
+        prevention["push_repository"]["branch_prefix"] = "g/" + "a" * 177
+
+    with pytest.raises(GuardianConfigError, match=offending):
+        parse_guardian_config(raw)
+
+
 @pytest.mark.parametrize(
     "old, new, offending",
     [
@@ -911,17 +2181,17 @@ def test_rejects_unsafe_prevention_identities_refs_paths_and_limits(
             "focused_test_argv.0.0",
         ),
         (
-            "- /usr/bin/sandbox-exec",
+            "- /opt/localize-guardian/bin/sandbox-wrapper",
             "- sandbox-exec",
             "sandbox_argv_prefix.0",
         ),
         (
-            "- /usr/bin/sandbox-exec",
+            "- /opt/localize-guardian/bin/sandbox-wrapper",
             "- /bin/sh",
             "shell wrapper",
         ),
         (
-            "- /usr/bin/sandbox-exec",
+            "- /opt/localize-guardian/bin/sandbox-wrapper",
             "- TOKEN=not-allowed",
             "sandbox_argv_prefix.0",
         ),
@@ -1042,7 +2312,7 @@ def test_actor_authorization_uses_immutable_numeric_id_not_login(tmp_path: Path)
     "old, new, offending",
     [
         (
-            "allowed_pr_authors:\n      - {login: localize-bot, id: 11, type: Bot}",
+            "allowed_pr_authors:\n      - {login: localize-bot, id: 11, type: User}",
             "allowed_pr_authors: [localize-bot]",
             "allowed_pr_authors",
         ),
@@ -1062,7 +2332,7 @@ def test_actor_authorization_uses_immutable_numeric_id_not_login(tmp_path: Path)
             "allowed_head_repositories",
         ),
         (
-            "{login: localize-bot, id: 11, type: Bot}",
+            "{login: localize-bot, id: 11, type: User}",
             "{login: localize-bot, id: 11, type: Organization}",
             "allowed_pr_authors",
         ),

@@ -1,4 +1,5 @@
-# Generic, report-only Localize Guardian policy.
+# Generic, report-only policy for an operator-run, self-hosted Localize Guardian.
+# Store this operator-owned policy outside every monitored repository.
 #
 # Every numeric ID below is an inert placeholder. Replace it with the immutable
 # ID returned by the GitHub API for your repository, users, bots, and owners.
@@ -28,6 +29,7 @@ runtime:
   # mode additionally requires an absolute model-key helper, and write modes an
   # absolute signing program. Keep helpers outside monitored repositories.
   # codex_executable: /absolute/path/to/codex
+  # git_executable: /absolute/path/to/git
   # github_token_command: [/absolute/path/to/github-token-helper]
   # API billing is explicit opt-in. Change codex_auth_mode to api-key, set this
   # helper, and uncomment both USD limits below.
@@ -48,6 +50,8 @@ limits:
   # Report-only mode creates no prevention drafts. This cap provides two full
   # assessment attempts; further same-day work defers after the cap is spent.
   max_prevention_drafts_per_run: 0
+  # Closed-PR history is disabled below, and report-only mode cannot publish.
+  max_remediation_drafts_per_run: 0
   max_model_calls_per_day: 2
   # API-key mode only:
   # daily_cost_limit_usd: 2.00
@@ -62,19 +66,34 @@ repositories:
     base_branch: main
     private_repo_model_opt_in: false
 
+    # Optional in observe/prepare; required for every repository in either
+    # write mode. This exact GitHub User publishes ordinary translation commits
+    # and authors status replies. Use a narrowly scoped machine-user token;
+    # GitHub App installation-token Bot identities are not supported by the
+    # GET /user publication proof. This is independent of allowed_pr_authors, which
+    # limits the existing PR owners whose branches Guardian may advance.
+    publication_actor:
+      login: localization-machine-user
+      id: 100000002
+      type: User
+
+    # Existing pull-request authors whose owned translation branches may be
+    # advanced. This is not an allowlist for the ordinary publication actor.
     allowed_pr_authors:
-      - login: localization-service[bot]
-        id: 100000002
-        type: Bot
+      - login: translation-contributor
+        id: 100000008
+        type: User
     allowed_head_owners:
-      - login: localization-service[bot]
-        id: 100000002
-        type: Bot
+      - login: translation-contributor
+        id: 100000008
+        type: User
     allowed_head_repositories:
-      - full_name: localization-service/widgets
+      - full_name: translation-contributor/widgets
         id: 100000003
     allowed_branch_globs:
       - "localization/**"
+      # Required literal prefix glob if the remediation example below is enabled:
+      # - "localization/guardian-remediation-*"
     allowed_path_globs:
       - "src/main/resources/i18n/**"
 
@@ -85,24 +104,94 @@ repositories:
     pipeline_config_path: .localize/config.yaml
     source_locale: en
 
+    # Closed-PR history is opt-in and runs only after the open-PR phase. Each
+    # frozen scan cycle restarts at page 1, skips durable seen identities, and
+    # confirms completion with a second identity-only traversal. GitHub's list
+    # is not an atomic snapshot: completion needs a quiescent pass, and failure
+    # to reach the cutoff or list end within 100 pages/10,000 entries is visible
+    # and requires a narrower lookback. Each selected PR gets three immediate
+    # hydration attempts before a current-cycle skip and durable priority retry
+    # on later polls, including outside the discovery window.
+    # A pending multi-source remediation batch is recovered as one bounded,
+    # all-or-nothing local-state group; final remote checks are sequential.
+    # The time window admits new evidence only; durable hydration retries remain
+    # prioritized even after their source PRs leave that window, so a durable
+    # pending group cannot age out. Historical PRs are read-only evidence
+    # sources; each observed comment revision is stored immutably and later
+    # edits/deletions are detected. Already-fixed findings are terminal no-ops,
+    # ambiguous or conflicting findings defer, and only a still-current finding
+    # can produce a new correction draft linked to the source evidence.
+    # A nested remediation policy may stay configured while observe/prepare keep
+    # it dormant and make no GitHub writes.
+    # closed_pr_backfill:
+    #   lookback_days: 90
+    #   max_prs_per_poll: 5
+    #   # Remediation additionally requires apply-owned-translations or
+    #   # propose-prevention, a positive max_remediation_drafts_per_run, and an
+    #   # exact signing identity. It opens a new human-review correction draft
+    #   # with a signed commit from the current base; it never writes to the
+    #   # closed PR. The push repository must already appear in
+    #   # allowed_head_repositories. Also add the literal
+    #   # push_branch_prefix + "*" pattern to allowed_branch_globs; for the prefix
+    #   # below that is "localization/guardian-remediation-*". New attempts use
+    #   # a deterministic, policy-digest-bound v2 64-character branch hash;
+    #   # migrated v1 attempts remain recoverable. Closing a generated correction
+    #   # PR unmerged is a maintainer veto and suppresses an unchanged duplicate.
+    #   # Merging it permits a later independently revalidated recurrence to use
+    #   # a distinct attempt. Recovery requires the exact generated title and
+    #   # full body, including the marker, and never rewrites a remote branch.
+    #   # The remediation publication_actor, the credential actor authenticated
+    #   # by GET /user, and the created or recovered PR author must match by
+    #   # numeric ID and API type.
+    #   # This does not grant ownership authority in allowed_pr_authors.
+    #   remediation:
+    #     push_repository:
+    #       full_name: translation-contributor/widgets
+    #       id: 100000003
+    #     push_branch_prefix: localization/guardian-remediation-
+    #     publication_actor:
+    #       login: localization-machine-user
+    #       id: 100000002
+    #       type: User
+
     # Prevention is intentionally absent in the report-only default. To use
     # `propose-prevention`, every repository needs its own explicit block like
     # the one below, with operator-controlled IDs, refs, paths, tests, and a
-    # credential-free test environment and operator-maintained sandbox prefix.
-    # Guardian probes the exact prefix before each command. The probe requires
+    # credential-free test environment and one directly invoked, operator-
+    # maintained sandbox wrapper. Guardian probes the exact wrapper before each
+    # command. The probe requires
     # workspace read/write, denies outside read/write, and denies AF_INET bind,
     # loopback-connect, and (where supported) filesystem AF_UNIX-connect canaries.
     # Commands are argv arrays, never shell. Exact checkouts have no ignored
     # project venv, so use an absolute operator-controlled test interpreter.
+    # Hard bounds: <=100 code globs, <=100 test globs, <=64 focused commands,
+    # <=256 strings per focused argv, exactly one sandbox-wrapper executable,
+    # and <=4096 UTF-8 bytes per string. max_changed_files is <=100. The branch
+    # prefix must leave 77
+    # characters inside Git's 255-character generated branch-name limit.
+    # Canonical policy and maximum test-result attestations must each fit 512 KiB;
+    # combining many individually maximal strings can therefore still fail closed.
+    # Codex may return <=100 recurrence candidates with <=100 evidence IDs each.
+    # Generated prevention PR titles are <=120 characters and <=256 UTF-8 bytes;
+    # bodies are <=60 KiB and summarize oversized lists with a stable fingerprint.
     # prevention:
     #   target_repository:
     #     full_name: acme/localization-pipeline
     #     id: 100000006
     #     base_branch: main
     #   push_repository:
-    #     full_name: localization-service/localization-pipeline
+    #     full_name: guardian-machine-user/localization-pipeline
     #     id: 100000007
     #     branch_prefix: guardian/prevention-
+    #   # Login is a mutable display label; exact numeric ID + GitHub User type
+    #   # grant publication authority and must match GET /user and the PR.
+    #   publication_actor:
+    #     login: localization-machine-user
+    #     id: 100000002
+    #     type: User
+    #   # One GitHub credential snapshot is used per poll. If remediation is
+    #   # also enabled, every active publication_actor must identify this same
+    #   # numeric ID and GitHub type.
     #   allowed_code_path_globs:
     #     - "localize/**/*.py"
     #   allowed_test_path_globs:
@@ -110,10 +199,7 @@ repositories:
     #   focused_test_argv:
     #     - [/absolute/path/to/python, -m, pytest, tests/unit/test_rules.py, -q]
     #   sandbox_argv_prefix:
-    #     - /usr/bin/sandbox-exec
-    #     - -f
-    #     - /Users/operator/.config/localize-guardian/test.sb
-    #     - --
+    #     - /absolute/path/to/guardian-sandbox-wrapper
     #   max_changed_files: 4
     #   max_changed_bytes: 262144
     #   private_target_model_opt_in: false

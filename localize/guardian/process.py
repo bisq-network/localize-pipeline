@@ -18,6 +18,8 @@ import tempfile
 import time
 from typing import IO, Mapping, Sequence
 
+from localize.guardian.deadline import PollDeadline
+
 
 class ProcessResourceError(RuntimeError):
     """A child exceeded a Guardian-owned resource boundary."""
@@ -64,6 +66,7 @@ class WorkspaceQuota:
     baseline_entries: int
     max_growth_bytes: int
     max_added_entries: int
+    deadline: PollDeadline | None = None
 
     @classmethod
     def capture(
@@ -72,17 +75,19 @@ class WorkspaceQuota:
         *,
         max_growth_bytes: int,
         max_added_entries: int,
+        deadline: PollDeadline | None = None,
     ) -> "WorkspaceQuota":
         resolved = root.resolve(strict=True)
         if not resolved.is_dir() or max_growth_bytes <= 0 or max_added_entries <= 0:
             raise ValueError("Workspace quota configuration is invalid.")
-        total, entries = _directory_usage(resolved)
+        total, entries = _directory_usage(resolved, deadline=deadline)
         return cls(
             root=resolved,
             baseline_bytes=total,
             baseline_entries=entries,
             max_growth_bytes=max_growth_bytes,
             max_added_entries=max_added_entries,
+            deadline=deadline,
         )
 
     def exceeded(self) -> bool:
@@ -90,6 +95,7 @@ class WorkspaceQuota:
             self.root,
             stop_after_bytes=self.baseline_bytes + self.max_growth_bytes,
             stop_after_entries=self.baseline_entries + self.max_added_entries,
+            deadline=self.deadline,
         )
         return (
             total > self.baseline_bytes + self.max_growth_bytes
@@ -102,17 +108,22 @@ def _directory_usage(
     *,
     stop_after_bytes: int | None = None,
     stop_after_entries: int | None = None,
+    deadline: PollDeadline | None = None,
 ) -> tuple[int, int]:
     total = 0
     entries = 0
     try:
         for current, directories, filenames in os.walk(root, followlinks=False):
+            if deadline is not None:
+                deadline.require_remaining()
             directories[:] = [
                 name
                 for name in directories
                 if not (Path(current) / name).is_symlink()
             ]
             for name in (*directories, *filenames):
+                if deadline is not None:
+                    deadline.require_remaining()
                 try:
                     metadata = (Path(current) / name).lstat()
                 except FileNotFoundError:

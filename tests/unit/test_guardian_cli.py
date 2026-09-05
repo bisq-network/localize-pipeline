@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import errno
 import json
 import os
@@ -20,18 +21,35 @@ import pytest
 import yaml
 
 from localize import cli as root_cli
-from localize.guardian import FeedbackEvent, GuardianMode, SigningFormat
+from localize.guardian import (
+    ClosedPrBackfillPolicy,
+    ExactRepository,
+    FeedbackEvent,
+    GuardianConfig,
+    GuardianMode,
+    HistoricalRemediationPolicy,
+    PreventionPolicy,
+    SigningFormat,
+    TrustedActor,
+)
 from localize.guardian import cli
 from localize.guardian import runtime as guardian_runtime
 from localize.guardian.config import load_guardian_config
 from localize.guardian.github import GitHubRepositoryIdentity
+from localize.guardian.models import HistoricalCheckScope
 from localize.guardian.signing import SSHSigningMaterial
-from localize.guardian.state import GuardianState
+from localize.guardian.state import (
+    GuardianState,
+    HistoricalPullReference,
+    RemediationCoverageReason,
+    remediation_batch_hash,
+)
 
 
 UTC = timezone.utc
 _REAL_CODEX_CAPABILITY_PROBE = cli._codex_capability_probe
 _REAL_CODEX_CHATGPT_LOGIN_READY = cli._codex_chatgpt_login_ready
+_REAL_DOCTOR_EXECUTABLES_TRUSTED = cli._doctor_executables_trusted
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +66,7 @@ def _successful_codex_capability_probe(
         "_codex_chatgpt_login_ready",
         lambda _config: True,
     )
+    monkeypatch.setattr(cli, "_doctor_executables_trusted", lambda _config: True)
 
 
 def _init_config(tmp_path: Path) -> Path:
@@ -60,9 +79,255 @@ def _mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def _record_cli_remediation_attempt(state: GuardianState) -> str:
+    now = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
+    revision = state.record_feedback_event(
+        FeedbackEvent(
+            repository="acme/widgets",
+            pr_number=12,
+            kind="review_comment",
+            event_id="98765",
+            author="coderabbitai[bot]",
+            author_id=100000004,
+            author_type="Bot",
+            body="Please correct this translation.",
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            locale="ru",
+            html_url="https://github.test/acme/widgets/pull/12#discussion_r98765",
+        ),
+        observed_at=now,
+    )
+    source = HistoricalPullReference(
+        repository="acme/widgets",
+        repository_id=100000001,
+        pull_id=500,
+        pr_number=12,
+        pull_revision_digest="1" * 64,
+        authority_digest="3" * 64,
+        policy_digest="2" * 64,
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+    )
+    state.record_historical_pull_completion(
+        repository=source.repository,
+        repository_id=source.repository_id,
+        pull_id=source.pull_id,
+        pr_number=source.pr_number,
+        pull_revision_digest=source.pull_revision_digest,
+        policy_digest=source.policy_digest,
+        head_sha=source.head_sha,
+        base_sha=source.base_sha,
+        event_revision_ids=(revision.revision_id,),
+        authority_scope=HistoricalCheckScope.ASSESSMENT,
+        completed_at=now,
+    )
+    evidence_hash = state.validate_historical_remediation_evidence(
+        source_pulls=(source,),
+        event_revision_ids=(revision.revision_id,),
+    )
+    run_id = state.start_run(
+        repository="acme/widgets",
+        locale="ru",
+        mode=GuardianMode.PROPOSE_PREVENTION,
+        started_at=now,
+    )
+    edit_hash = "e" * 64
+    return state.record_remediation_draft_event(
+        run_id=run_id,
+        target_repository="acme/widgets",
+        target_repository_id=100000001,
+        target_base_branch="main",
+        target_base_sha="b" * 40,
+        push_repository="localization-service/widgets",
+        push_repository_id=100000003,
+        branch="localization/guardian-remediation-test",
+        candidate_sha="c" * 40,
+        evidence_hash=evidence_hash,
+        batch_hash=remediation_batch_hash((edit_hash,)),
+        edit_hashes=(edit_hash,),
+        edit_target_hashes=((edit_hash, "f" * 64),),
+        source_pulls=(source,),
+        event_revision_ids=(revision.revision_id,),
+        changed_paths=("src/main/resources/messages_ru.properties",),
+        title="Review historical localization correction",
+        body="Signed remediation candidate for human review.\n",
+        phase="validated",
+        occurred_at=now,
+    )
+
+
+def _open_cli_remediation_attempt(
+    state: GuardianState,
+    draft_key: str,
+) -> None:
+    record = state.remediation_draft_by_key(draft_key=draft_key)
+    assert record is not None
+    opened_at = record.occurred_at + timedelta(minutes=1)
+    event_kwargs = dict(
+        branch_identity_version=record.branch_identity_version,
+        run_id=record.run_id,
+        target_repository=record.target_repository,
+        target_repository_id=record.target_repository_id,
+        target_base_branch=record.target_base_branch,
+        target_base_sha=record.target_base_sha,
+        push_repository=record.push_repository,
+        push_repository_id=record.push_repository_id,
+        branch=record.branch,
+        candidate_sha=record.candidate_sha,
+        evidence_hash=record.evidence_hash,
+        batch_hash=record.batch_hash,
+        edit_hashes=record.edit_hashes,
+        edit_target_hashes=record.edit_target_hashes,
+        source_pulls=record.source_pulls,
+        event_revision_ids=record.event_revision_ids,
+        changed_paths=record.changed_paths,
+        title=record.title,
+        body=record.body,
+    )
+    state.record_remediation_draft_event(
+        **event_kwargs,
+        phase="pushed",
+        occurred_at=opened_at,
+    )
+    state.record_remediation_draft_event(
+        **event_kwargs,
+        phase="draft_opened",
+        draft_number=91,
+        draft_pull_id=9001,
+        draft_url="https://github.test/acme/widgets/pull/91",
+        occurred_at=opened_at + timedelta(minutes=1),
+    )
+    state.record_remediation_remote_observation(
+        draft_key=draft_key,
+        observation="exact",
+        state="closed",
+        is_draft=False,
+        is_merged=False,
+        pr_number=91,
+        pr_url="https://github.test/acme/widgets/pull/91",
+        observed_base_sha="d" * 40,
+        observed_head_sha=record.candidate_sha,
+        closed_at="2026-09-01T08:03:00Z",
+        observed_at=opened_at + timedelta(minutes=2),
+    )
+    state.record_draft_backed_remediation_completions(
+        {record.source_pulls[0]: (draft_key,)},
+        RemediationCoverageReason.DRAFT_RECOVERED,
+        required_edit_hashes_by_source={
+            record.source_pulls[0]: record.edit_hashes,
+        },
+        checkpoint_draft_key=draft_key,
+        occurred_at=opened_at + timedelta(minutes=3),
+    )
+
+
 def _replace_once(value: str, needle: str, replacement: str) -> str:
     assert needle in value, f"template drift for {needle!r}"
     return value.replace(needle, replacement, 1)
+
+
+def _remediation_doctor_config(
+    config_path: Path,
+    *,
+    second_policy: bool = False,
+) -> GuardianConfig:
+    config = load_guardian_config(config_path)
+    policy = config.repositories[0]
+    publication_actor = policy.publication_actor
+    assert publication_actor is not None
+    policy = replace(
+        policy,
+        allowed_branch_globs=(
+            *policy.allowed_branch_globs,
+            "localization/guardian-remediation-*",
+        ),
+        closed_pr_backfill=ClosedPrBackfillPolicy(
+            lookback_days=90,
+            max_prs_per_poll=5,
+            remediation=HistoricalRemediationPolicy(
+                push_repository=ExactRepository(
+                    full_name=policy.allowed_head_repositories[0].full_name,
+                    id=policy.allowed_head_repositories[0].id,
+                ),
+                push_branch_prefix="localization/guardian-remediation-",
+                publication_actor=publication_actor,
+            ),
+        ),
+    )
+    repositories = (policy,)
+    if second_policy:
+        repositories += (
+            replace(
+                policy,
+                base_repo="acme/other-widgets",
+                base_repo_id=100000011,
+            ),
+        )
+    return replace(
+        config,
+        mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+        limits=replace(config.limits, max_remediation_drafts_per_run=1),
+        repositories=repositories,
+    )
+
+
+def _prevention_doctor_config(
+    config_path: Path,
+    *,
+    publication_actor: TrustedActor | None = None,
+) -> GuardianConfig:
+    config = load_guardian_config(config_path)
+    policy = config.repositories[0]
+    actor = publication_actor or policy.publication_actor
+    assert actor is not None
+    policy = replace(
+        policy,
+        prevention=PreventionPolicy(
+            target_repository=ExactRepository(
+                full_name="acme/localization-pipeline",
+                id=100000006,
+            ),
+            target_base_branch="main",
+            push_repository=ExactRepository(
+                full_name="localization-service/localization-pipeline",
+                id=100000007,
+            ),
+            push_branch_prefix="guardian/prevention-",
+            publication_actor=actor,
+            allowed_code_path_globs=("localize/**/*.py",),
+            allowed_test_path_globs=("tests/**/*.py",),
+            focused_test_argv=(("/usr/bin/true",),),
+            sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
+            max_changed_files=4,
+            max_changed_bytes=262_144,
+        ),
+    )
+    return replace(
+        config,
+        mode=GuardianMode.PROPOSE_PREVENTION,
+        limits=replace(config.limits, max_prevention_drafts_per_run=1),
+        repositories=(policy,),
+    )
+
+
+def _mock_actor_stream(
+    client: Mock,
+    payload: object,
+    *,
+    status_code: int = 200,
+    chunks: tuple[bytes, ...] | None = None,
+) -> Mock:
+    response = Mock(status_code=status_code)
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    response.iter_bytes.return_value = chunks or (encoded,)
+
+    @contextmanager
+    def stream(_method: str, _path: str):
+        yield response
+
+    client.stream.side_effect = stream
+    return response
 
 
 def _configure_operator_pipeline(config_path: Path) -> Path:
@@ -177,10 +442,54 @@ def test_init_creates_valid_report_only_config_and_private_runtime_directory(
     assert config.mode is GuardianMode.OBSERVE
     assert config.report_only
     assert config.repositories[0].base_repo == "acme/widgets"
+    assert config.repositories[0].publication_actor == TrustedActor(
+        "localization-machine-user", 100000002, "User"
+    )
+    assert config.enabled_publication_actors == ()
+    assert config.repositories[0].closed_pr_backfill is None
+    assert config.limits.max_remediation_drafts_per_run == 0
     assert _mode(config_path) == 0o600
     assert _mode(config_path.parent / ".guardian") == 0o700
     assert "Created report-only Guardian config" in captured.out
-    assert "OPENAI_API_KEY" not in config_path.read_text(encoding="utf-8")
+    config_text = config_path.read_text(encoding="utf-8")
+    normalized_config = " ".join(config_text.replace("#", "").casefold().split())
+    assert "OPENAI_API_KEY" not in config_text
+    assert "# closed_pr_backfill:" in config_text
+    assert "#   lookback_days:" in config_text
+    assert "#   max_prs_per_poll:" in config_text
+    assert "#   remediation:" in config_text
+    assert "#     push_repository:" in config_text
+    assert "#     push_branch_prefix:" in config_text
+    assert "#     publication_actor:" in config_text
+    assert '# - "localization/guardian-remediation-*"' in config_text
+    assert "publication_actor, the credential actor" in normalized_config
+    assert "resulting pr author" in normalized_config
+    assert "observe/prepare keep it dormant" in normalized_config
+    assert "durable bounded scan cycles" in normalized_config
+    assert "restart at page 1" in normalized_config
+    assert "second identity-only traversal" in normalized_config
+    assert "not an atomic snapshot" in normalized_config
+    assert (
+        "quiescent pass within the 100-page/10,000-entry ceiling"
+        in normalized_config
+    )
+    assert "three immediate hydration attempts" in normalized_config
+    assert "current-cycle skip and durable priority retry" in normalized_config
+    assert "including outside the discovery window" in normalized_config
+    assert "# prevention:" in config_text
+    assert normalized_config.count("publication_actor:") >= 2
+    assert "numeric id + github user type grant authority" in normalized_config
+    assert "github app installation-token bot publication cannot satisfy" in (
+        normalized_config
+    )
+    assert "window admits new evidence" in normalized_config
+    assert "durable pending recovery group cannot age out" in normalized_config
+    assert (
+        "must stay closed, exact-identity, and policy/trust eligible"
+        in normalized_config
+    )
+    assert "new current-base correction draft with a signed commit" in normalized_config
+    assert "never writes to the closed pr" in normalized_config
 
 
 def test_init_refuses_to_overwrite_existing_config(
@@ -408,6 +717,10 @@ def test_doctor_validates_local_dependencies_and_exact_github_identities(
     assert "config: ok (observe)" in captured.out
     assert "state directory: ok" in captured.out
     assert "Codex executable: ok" in captured.out
+    assert (
+        "Codex model/effort: configured gpt-5.6-terra / high "
+        "(not capability-validated)"
+    ) in captured.out
     assert "Codex capability canary: ok" in captured.out
     assert "result schema: ok" in captured.out
     assert "GitHub credential helper: ok" in captured.out
@@ -445,6 +758,43 @@ def test_doctor_fails_when_codex_permission_canary_is_unavailable(
 
     assert exit_code == 1
     assert "Codex capability canary: error" in capsys.readouterr().out
+
+
+def test_doctor_stops_before_external_probes_when_executable_trust_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    codex_probe = Mock()
+    github_probe = Mock()
+    credential_probe = Mock()
+    monkeypatch.setattr(cli, "_doctor_executables_trusted", lambda _config: False)
+    monkeypatch.setattr(cli, "_codex_capability_probe", codex_probe)
+    monkeypatch.setattr(cli, "_probe_github", github_probe)
+    monkeypatch.setattr(cli, "_credential_helper_works", credential_probe)
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    assert exit_code == 1
+    assert "executable trust: error" in capsys.readouterr().out
+    codex_probe.assert_not_called()
+    github_probe.assert_not_called()
+    credential_probe.assert_not_called()
+
+
+def test_doctor_real_trust_preflight_rejects_shebang_arguments(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    codex, _github_helper, _model_helper = _configure_scheduled_runtime(
+        config_path,
+        tmp_path,
+    )
+    codex.write_text("#!/bin/sh -e\nexit 0\n", encoding="utf-8")
+
+    assert not _REAL_DOCTOR_EXECUTABLES_TRUSTED(load_guardian_config(config_path))
 
 
 @pytest.mark.parametrize(
@@ -568,6 +918,284 @@ def test_doctor_github_probe_disables_environment_proxy_inheritance(
 
     assert identities[0].repository_id == 100000001
     assert client_factory.call_args.kwargs["trust_env"] is False
+
+
+def test_doctor_github_probe_preflights_one_exact_publication_actor_across_policies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _remediation_doctor_config(config_path, second_policy=True)
+    token_read = Mock(return_value="remediation-secret")
+    monkeypatch.setattr(cli.SecretCommand, "read", token_read)
+    reader = Mock()
+    reader.repository_identity.side_effect = (
+        GitHubRepositoryIdentity("acme/widgets", 100000001, False),
+        GitHubRepositoryIdentity("acme/other-widgets", 100000011, False),
+    )
+    monkeypatch.setattr(cli, "GitHubReader", lambda _client, _policy: reader)
+    client = Mock()
+    _mock_actor_stream(
+        client,
+        {
+            "login": "mutable-display-label",
+            "id": 100000002,
+            "type": "User",
+        },
+    )
+
+    with patch("localize.guardian.cli.httpx.Client") as client_factory:
+        client_factory.return_value.__enter__.return_value = client
+        identities = cli._probe_github(config)
+
+    assert tuple(identity.repository_id for identity in identities) == (
+        100000001,
+        100000011,
+    )
+    token_read.assert_called_once()
+    client.stream.assert_called_once_with("GET", "/user")
+
+
+def test_config_rejects_different_publication_actor_across_policies(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _remediation_doctor_config(config_path, second_policy=True)
+    other_actor = TrustedActor("other-service", 100000099, "User")
+    second_backfill = config.repositories[1].closed_pr_backfill
+    assert second_backfill is not None
+    second_remediation = second_backfill.remediation
+    assert second_remediation is not None
+    second_policy = replace(
+        config.repositories[1],
+        allowed_pr_authors=(other_actor,),
+        closed_pr_backfill=replace(
+            second_backfill,
+            remediation=replace(
+                second_remediation,
+                publication_actor=other_actor,
+            ),
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="Enabled publication policies must use one GitHub actor identity",
+    ):
+        replace(config, repositories=(config.repositories[0], second_policy))
+
+
+@pytest.mark.parametrize(
+    ("status_code", "chunks"),
+    [
+        (401, (b"credential-specific upstream body",)),
+        (
+            200,
+            (
+                b"x" * cli._MAX_DOCTOR_GITHUB_ACTOR_BYTES,
+                b"one-byte-too-many",
+            ),
+        ),
+    ],
+)
+def test_doctor_github_probe_redacts_invalid_actor_responses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    chunks: tuple[bytes, ...],
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _remediation_doctor_config(config_path)
+    monkeypatch.setattr(cli.SecretCommand, "read", lambda _self: "secret-token")
+    monkeypatch.setattr(cli, "GitHubReader", Mock())
+    client = Mock()
+    _mock_actor_stream(
+        client,
+        {"id": 100000002, "type": "User"},
+        status_code=status_code,
+        chunks=chunks,
+    )
+
+    with patch("localize.guardian.cli.httpx.Client") as client_factory:
+        client_factory.return_value.__enter__.return_value = client
+        with pytest.raises(cli.GuardianCLIError, match="publication actor") as error:
+            cli._probe_github(config)
+
+    assert "credential-specific" not in str(error.value)
+    assert "secret-token" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "actor_payload",
+    [
+        {"login": "service", "id": True, "type": "User"},
+        {"login": "service", "id": 0, "type": "User"},
+        {"login": "service", "id": "100000002", "type": "User"},
+        {"login": "service", "id": 100000002, "type": "Bot"},
+        {"login": "service", "id": 100000002, "type": "Organization"},
+        {"login": "service", "id": 100000002, "type": None},
+        {"login": "service", "id": 100000002, "type": []},
+        {"login": "", "id": 100000002, "type": "User"},
+        {"login": "bad\nlogin", "id": 100000002, "type": "User"},
+        {"id": 100000002, "type": "User"},
+        [],
+    ],
+)
+def test_doctor_github_probe_rejects_invalid_or_unallowed_publication_actor_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actor_payload: object,
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _remediation_doctor_config(config_path)
+    monkeypatch.setattr(cli.SecretCommand, "read", lambda _self: "secret-token")
+    reader = Mock()
+    reader.repository_identity.return_value = GitHubRepositoryIdentity(
+        "acme/widgets",
+        100000001,
+        False,
+    )
+    monkeypatch.setattr(cli, "GitHubReader", lambda _client, _policy: reader)
+    client = Mock()
+    _mock_actor_stream(client, actor_payload)
+
+    with patch("localize.guardian.cli.httpx.Client") as client_factory:
+        client_factory.return_value.__enter__.return_value = client
+        with pytest.raises(cli.GuardianCLIError, match="publication actor"):
+            cli._probe_github(config)
+
+
+def test_doctor_github_probe_preflights_prevention_only_publication_actor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _prevention_doctor_config(config_path)
+    monkeypatch.setattr(cli.SecretCommand, "read", lambda _self: "secret-token")
+    reader = Mock()
+    reader.repository_identity.return_value = GitHubRepositoryIdentity(
+        "acme/widgets",
+        100000001,
+        False,
+    )
+    monkeypatch.setattr(cli, "GitHubReader", lambda _client, _policy: reader)
+    client = Mock()
+    _mock_actor_stream(
+        client,
+        {"login": "renamed-service", "id": 100000002, "type": "User"},
+    )
+
+    with patch("localize.guardian.cli.httpx.Client") as client_factory:
+        client_factory.return_value.__enter__.return_value = client
+        cli._probe_github(config)
+
+    client.stream.assert_called_once_with("GET", "/user")
+
+
+def test_config_rejects_different_prevention_and_remediation_actors(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    remediation_config = _remediation_doctor_config(config_path)
+    other_actor = TrustedActor("other-service", 100000099, "User")
+    prevention = _prevention_doctor_config(config_path).repositories[0].prevention
+    assert prevention is not None
+    prevention = replace(prevention, publication_actor=other_actor)
+    with pytest.raises(
+        ValueError,
+        match="Enabled publication policies must use one GitHub actor identity",
+    ):
+        replace(
+            remediation_config,
+            mode=GuardianMode.PROPOSE_PREVENTION,
+            limits=replace(
+                remediation_config.limits,
+                max_prevention_drafts_per_run=1,
+            ),
+            repositories=(
+                replace(
+                    remediation_config.repositories[0],
+                    prevention=prevention,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "max_prevention_drafts_per_run", "expects_actor_probe"),
+    [
+        (GuardianMode.PROPOSE_PREVENTION, 0, True),
+        (GuardianMode.APPLY_OWNED_TRANSLATIONS, 1, True),
+        (GuardianMode.PREPARE, 1, False),
+    ],
+)
+def test_doctor_github_probe_uses_only_currently_enabled_publication_actors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: GuardianMode,
+    max_prevention_drafts_per_run: int,
+    expects_actor_probe: bool,
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _prevention_doctor_config(config_path)
+    config = replace(
+        config,
+        mode=mode,
+        limits=replace(
+            config.limits,
+            max_prevention_drafts_per_run=max_prevention_drafts_per_run,
+        ),
+    )
+    monkeypatch.setattr(cli.SecretCommand, "read", lambda _self: "secret-token")
+    reader = Mock()
+    reader.repository_identity.return_value = GitHubRepositoryIdentity(
+        "acme/widgets",
+        100000001,
+        False,
+    )
+    monkeypatch.setattr(cli, "GitHubReader", lambda _client, _policy: reader)
+    client = Mock()
+    if expects_actor_probe:
+        _mock_actor_stream(
+            client,
+            {"login": "renamed-service", "id": 100000002, "type": "User"},
+        )
+
+    with patch("localize.guardian.cli.httpx.Client") as client_factory:
+        client_factory.return_value.__enter__.return_value = client
+        cli._probe_github(config)
+
+    if expects_actor_probe:
+        client.stream.assert_called_once_with("GET", "/user")
+    else:
+        client.stream.assert_not_called()
+
+
+def test_doctor_github_probe_skips_actor_endpoint_without_publish_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _init_config(tmp_path)
+    config = _remediation_doctor_config(config_path)
+    config = replace(
+        config,
+        mode=GuardianMode.PREPARE,
+        limits=replace(config.limits, max_remediation_drafts_per_run=0),
+    )
+    monkeypatch.setattr(cli.SecretCommand, "read", lambda _self: "secret-token")
+    reader = Mock()
+    reader.repository_identity.return_value = GitHubRepositoryIdentity(
+        "acme/widgets",
+        100000001,
+        False,
+    )
+    monkeypatch.setattr(cli, "GitHubReader", lambda _client, _policy: reader)
+    client = Mock()
+
+    with patch("localize.guardian.cli.httpx.Client") as client_factory:
+        client_factory.return_value.__enter__.return_value = client
+        cli._probe_github(config)
+
+    client.stream.assert_not_called()
 
 
 def test_doctor_never_prints_helper_or_environment_secrets(
@@ -766,6 +1394,7 @@ def test_signing_probe_signs_and_verifies_with_exact_key_in_isolated_context(
 ) -> None:
     gnupg_home = tmp_path / "gnupg"
     gnupg_home.mkdir()
+    gnupg_home.chmod(0o700)
     monkeypatch.setenv("GNUPGHOME", str(gnupg_home))
     monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(cli, "_command_available", lambda _command: True)
@@ -802,6 +1431,7 @@ def test_signing_probe_fails_closed_when_exact_key_cannot_sign(
 ) -> None:
     gnupg_home = tmp_path / "gnupg"
     gnupg_home.mkdir()
+    gnupg_home.chmod(0o700)
     monkeypatch.setenv("GNUPGHOME", str(gnupg_home))
     monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/git")
     monkeypatch.setattr(cli, "_command_available", lambda _command: True)
@@ -820,6 +1450,30 @@ def test_signing_probe_fails_closed_when_exact_key_cannot_sign(
         signing_program="/usr/bin/gpg",
     ) is False
     assert calls == 2
+
+
+def test_signing_probe_rejects_an_untrusted_openpgp_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gnupg_home = tmp_path / "gnupg"
+    gnupg_home.mkdir(mode=0o700)
+    gnupg_home.chmod(0o777)
+    monkeypatch.setenv("GNUPGHOME", str(gnupg_home))
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(
+        cli,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an unsafe OpenPGP home must be rejected before invoking Git"
+        ),
+    )
+
+    assert cli._signing_key_configured(
+        "B" * 40,
+        git_executable="/usr/bin/git",
+        signing_program="/usr/bin/gpg",
+    ) is False
 
 
 def test_ssh_signing_probe_uses_frozen_key_and_agent_only_for_commit(
@@ -985,7 +1639,10 @@ def test_doctor_consumes_secret_free_runtime_commands_from_config(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Codex model: gpt-5.6-terra (high)" in output
+    assert (
+        "Codex model/effort: configured gpt-5.6-terra / high "
+        "(not capability-validated)"
+    ) in output
     github_probe.assert_called_once_with(config)
     assert "Signing program: not required (observe mode)" in output
     signing_probe.assert_not_called()
@@ -1566,6 +2223,11 @@ def test_status_summarizes_audit_metadata_without_raw_bodies_or_messages(
     assert "pending feedback revisions: 0" in output
     assert "actions: completed=1" in output
     assert "health: github=ok" in output
+    assert "historical correction attempts: pending=0, opened=0" in output
+    assert (
+        "remote correction PRs: open=0, closed_unmerged_veto=0, "
+        "not_found=0, conflict=0"
+    ) in output
     assert secret not in output
 
 
@@ -1582,7 +2244,320 @@ def test_status_is_read_only_when_no_state_database_exists(
 
     assert exit_code == 0
     assert not state_path.exists()
+    assert not (cli.guardian_state_dir(config_path) / "poll.lock").exists()
     assert "state: no runs recorded" in capsys.readouterr().out
+
+
+def test_remediation_list_is_empty_without_state_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+
+    assert cli.main(
+        ["remediation", "list", "--config", str(config_path)]
+    ) == 0
+
+    assert capsys.readouterr().out == "No remediation attempts.\n"
+    assert not (cli.guardian_state_dir(config_path) / "poll.lock").exists()
+
+
+def test_history_retry_list_is_empty_without_state_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+
+    assert cli.main(
+        ["history-retry", "list", "--config", str(config_path)]
+    ) == 0
+
+    assert capsys.readouterr().out == "No pending historical hydration retries.\n"
+    assert not (cli.guardian_state_dir(config_path) / "poll.lock").exists()
+
+
+def test_remediation_quarantine_requires_explicit_terminal_skip_acknowledgement(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+
+    assert cli.main(
+        [
+            "remediation",
+            "quarantine",
+            "--config",
+            str(config_path),
+            "--draft-key",
+            "a" * 64,
+            "--repository",
+            "acme/widgets",
+        ]
+    ) == 1
+
+    assert "--acknowledge-terminal-local-skip" in capsys.readouterr().err
+
+
+def test_remediation_quarantine_resolves_exact_local_attempt_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    state_directory = cli.guardian_state_dir(config_path)
+    state_directory.mkdir(mode=0o700, exist_ok=True)
+    state_directory.chmod(0o700)
+    state_path = cli.guardian_state_path(config_path)
+    state_path.write_bytes(b"state")
+    state_path.chmod(0o600)
+    calls: list[dict[str, object]] = []
+
+    @contextmanager
+    def fake_lock(_directory: Path):
+        yield
+
+    class FakeState:
+        def __init__(self, path: Path) -> None:
+            assert path == state_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def remediation_draft_by_key(self, *, draft_key: str):
+            assert draft_key == "a" * 64
+            return SimpleNamespace(target_repository="acme/widgets")
+
+        def record_remediation_resolution(self, **kwargs: object) -> bool:
+            calls.append(dict(kwargs))
+            return True
+
+    monkeypatch.setattr(cli, "_exclusive_poll_lock", fake_lock)
+    monkeypatch.setattr(cli, "GuardianState", FakeState)
+
+    assert cli.main(
+        [
+            "remediation",
+            "quarantine",
+            "--config",
+            str(config_path),
+            "--draft-key",
+            "a" * 64,
+            "--repository",
+            "acme/widgets",
+            "--acknowledge-terminal-local-skip",
+        ]
+    ) == 0
+
+    assert calls == [
+        {
+            "draft_key": "a" * 64,
+            "resolution": "operator_quarantined",
+            "terminal_local_skip_acknowledged": True,
+        }
+    ]
+    output = capsys.readouterr().out
+    assert "No remote branch or pull request was changed." in output
+
+
+def test_remediation_list_and_quarantine_use_real_locked_sqlite_state(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    state_path = cli.guardian_state_path(config_path)
+    with GuardianState(state_path) as state:
+        draft_key = _record_cli_remediation_attempt(state)
+
+    assert cli.main(
+        ["remediation", "list", "--config", str(config_path), "--limit", "1"]
+    ) == 0
+    listed = capsys.readouterr().out
+    assert draft_key in listed
+    assert (
+        "target=acme/widgets target_id=100000001 "
+        "phase=validated identity=v2"
+    ) in listed
+    assert f"target_base: main@{'b' * 40}" in listed
+    assert "push_repository: localization-service/widgets id=100000003" in listed
+    assert f"candidate_commit: {'c' * 40}" in listed
+    assert "pull_request: none" in listed
+    assert "resolution: none" in listed
+    assert "remote: none" in listed
+    assert "coverage: none" in listed
+
+    quarantine_args = [
+        "remediation",
+        "quarantine",
+        "--config",
+        str(config_path),
+        "--draft-key",
+        draft_key,
+        "--repository",
+        "acme/widgets",
+        "--acknowledge-terminal-local-skip",
+    ]
+    assert cli.main(quarantine_args) == 0
+    first = capsys.readouterr().out
+    assert "terminally skipped" in first
+    assert "No remote branch or pull request was changed." in first
+
+    # Repeating the exact append is idempotent and never mutates GitHub.
+    assert cli.main(quarantine_args) == 0
+    assert "Already quarantined" in capsys.readouterr().out
+    with GuardianState(state_path) as state:
+        assert state.remediation_resolution(draft_key=draft_key) == (
+            "operator_quarantined"
+        )
+
+    assert cli.main(
+        ["remediation", "list", "--config", str(config_path), "--limit", "1"]
+    ) == 0
+    terminal = capsys.readouterr().out
+    assert draft_key in terminal
+    assert "resolution: operator_quarantined" in terminal
+
+
+def test_remediation_list_surfaces_closed_veto_and_exact_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    state_path = cli.guardian_state_path(config_path)
+    with GuardianState(state_path) as state:
+        draft_key = _record_cli_remediation_attempt(state)
+        _open_cli_remediation_attempt(state, draft_key)
+    monkeypatch.setattr(
+        GuardianState,
+        "remediation_draft_count_for_operator",
+        lambda _self: 3,
+    )
+    monkeypatch.setattr(
+        GuardianState,
+        "remediation_source_coverage_count_for_draft",
+        lambda _self, _draft_key: 2,
+    )
+
+    assert cli.main(
+        ["remediation", "list", "--config", str(config_path)]
+    ) == 0
+
+    listed = capsys.readouterr().out
+    assert "pull_request: #91 https://github.test/acme/widgets/pull/91" in listed
+    assert "remote: exact state=closed type=ready merged=false" in listed
+    assert f"base={'d' * 40}" in listed
+    assert "acme/widgets#12 repository_id=100000001 pull_id=500" in listed
+    assert f"pull_revision={'1' * 64}" in listed
+    assert f"authority={'3' * 64}" in listed
+    assert f"policy={'2' * 64}" in listed
+    assert "reason=draft_recovered" in listed
+    assert f"effective=true drafts={draft_key}" in listed
+    assert "coverage: showing 1 of 2 groups" in listed
+    assert "Showing 1 of 3 remediation attempts." in listed
+
+
+def test_history_retry_list_and_permanent_policy_veto_use_real_sqlite(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    state_path = cli.guardian_state_path(config_path)
+    failed_at = datetime(2026, 9, 1, 8, 0, tzinfo=UTC)
+    retry = {
+        "repository": "acme/widgets",
+        "repository_id": 100000001,
+        "policy_digest": "b" * 64,
+        "pull_id": 500,
+        "pr_number": 12,
+    }
+    with GuardianState(state_path) as state:
+        state.record_historical_pull_retry(
+            **retry,
+            failure_type="GitHubAPIError",
+            failed_at=failed_at,
+        )
+
+    assert cli.main(
+        ["history-retry", "list", "--config", str(config_path)]
+    ) == 0
+    listed = capsys.readouterr().out
+    for expected in (
+        "repository=acme/widgets",
+        "repository_id=100000001",
+        f"policy_digest={'b' * 64}",
+        "pull_id=500",
+        "pr_number=12",
+        "failure=GitHubAPIError",
+    ):
+        assert expected in listed
+
+    base_args = [
+        "history-retry",
+        "quarantine",
+        "--config",
+        str(config_path),
+        "--repository",
+        "acme/widgets",
+        "--repository-id",
+        "100000001",
+        "--policy-digest",
+        "b" * 64,
+        "--pull-id",
+        "500",
+        "--pr-number",
+        "12",
+    ]
+    assert cli.main(base_args) == 1
+    assert "later feedback under that policy will be ignored" in capsys.readouterr().err
+
+    quarantine_args = [*base_args, "--acknowledge-terminal-local-skip"]
+    assert cli.main(quarantine_args) == 0
+    output = capsys.readouterr().out
+    assert "Permanently vetoed source PR #12" in output
+    assert "Later comments on this PR are intentionally ignored" in output
+    assert "policy change makes it eligible again" in output
+    assert "No remote pull request or comment was changed." in output
+
+    assert cli.main(quarantine_args) == 0
+    assert "Already permanently vetoed" in capsys.readouterr().out
+    with GuardianState(state_path) as state:
+        assert state.pending_historical_pull_retry_count() == 0
+        state.record_historical_pull_retry(
+            **{**retry, "policy_digest": "c" * 64},
+            failure_type="GitHubAPIError",
+            failed_at=failed_at + timedelta(minutes=1),
+        )
+        assert state.pending_historical_pull_retry_count() == 1
+
+
+@pytest.mark.parametrize("command", ["status", "remediation", "history-retry"])
+def test_operator_state_commands_fail_closed_while_real_poll_lock_is_held(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    state_path = cli.guardian_state_path(config_path)
+    with GuardianState(state_path):
+        pass
+    argv = [command]
+    if command != "status":
+        argv.append("list")
+    argv.extend(("--config", str(config_path)))
+
+    with guardian_runtime._exclusive_poll_lock(cli.guardian_state_dir(config_path)):
+        assert cli.main(argv) == 1
+
+    assert "unavailable" in capsys.readouterr().err
 
 
 def test_status_refuses_a_symlinked_state_database_without_reading_its_target(
@@ -1602,6 +2577,41 @@ def test_status_refuses_a_symlinked_state_database_without_reading_its_target(
     assert exit_code == 1
     assert secret not in captured.out
     assert secret not in captured.err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("status",),
+        ("remediation", "list"),
+        ("history-retry", "list"),
+    ],
+)
+def test_operator_state_commands_reject_unsafe_sqlite_sidecars(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    state_path = cli.guardian_state_path(config_path)
+    with GuardianState(state_path):
+        pass
+    wal_path = Path(f"{state_path}-wal")
+    if wal_path.exists():
+        wal_path.unlink()
+    secret = b"sidecar-secret"
+    target = tmp_path / "foreign-wal"
+    target.write_bytes(secret)
+    target.chmod(0o600)
+    wal_path.symlink_to(target)
+
+    assert cli.main([*argv, "--config", str(config_path)]) == 1
+
+    captured = capsys.readouterr()
+    assert target.read_bytes() == secret
+    assert secret.decode() not in captured.out
+    assert secret.decode() not in captured.err
     assert "unavailable or invalid" in captured.err
 
 
@@ -1796,6 +2806,38 @@ def test_install_requires_absolute_executables_for_unattended_runs(
     assert not paths.plist_path.exists()
 
 
+def test_install_rejects_unchecked_sandbox_policy_arguments_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    _configure_scheduled_runtime(config_path, tmp_path)
+    config = _prevention_doctor_config(config_path)
+    prevention = config.repositories[0].prevention
+    assert prevention is not None
+    object.__setattr__(
+        prevention,
+        "sandbox_argv_prefix",
+        ("/usr/bin/sandbox-exec", "-f", "/mutable/policy.sb"),
+    )
+    monkeypatch.setattr(cli, "_load_config_or_raise", lambda _path: config)
+    executable = tmp_path / "localize"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    exit_code = cli.main(
+        ["install", "--config", str(config_path), "--executable", str(executable)]
+    )
+
+    assert exit_code == 1
+    assert "exactly one direct wrapper" in capsys.readouterr().err
+    paths = cli.guardian_install_paths(config_path)
+    assert not paths.runner_path.exists()
+    assert not paths.plist_path.exists()
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "group-writable"])
 def test_install_rejects_mutable_or_redirected_scheduled_executables(
     tmp_path: Path,
@@ -1806,8 +2848,12 @@ def test_install_rejects_mutable_or_redirected_scheduled_executables(
     config_path = _init_config(tmp_path)
     capsys.readouterr()
     codex, _github_helper, _model_helper = _configure_scheduled_runtime(
-        config_path, tmp_path
+        config_path,
+        tmp_path,
+        api_key=False,
     )
+    login_probe = Mock(return_value=True)
+    monkeypatch.setattr(cli, "_codex_chatgpt_login_ready", login_probe)
     if unsafe_kind == "symlink":
         target = codex.with_name("codex-target")
         codex.rename(target)
@@ -1829,6 +2875,7 @@ def test_install_rejects_mutable_or_redirected_scheduled_executables(
 
     assert exit_code == 1
     assert "runtime.codex_executable" in capsys.readouterr().err
+    login_probe.assert_not_called()
     paths = cli.guardian_install_paths(config_path)
     assert not paths.runner_path.exists()
     assert not paths.plist_path.exists()

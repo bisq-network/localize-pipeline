@@ -41,6 +41,39 @@ def test_official_openai_provider_reports_reasoning_capability_for_gpt5():
     assert provider.capabilities_for_model("gpt-4o").supports_reasoning_effort is False
 
 
+def test_official_openai_routes_report_astra_efforts_without_none():
+    openai_provider = OpenAICompatibleProvider(
+        client=None,
+        supports_openai_reasoning_effort=True,
+    )
+    aisuite_provider = AiSuiteProvider(
+        client=None,
+        default_provider="openai",
+        supports_openai_reasoning_effort=True,
+    )
+    expected = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+    assert openai_provider.capabilities_for_model(
+        "gpt-6-astra"
+    ).supported_reasoning_efforts == expected
+    assert aisuite_provider.capabilities_for_model(
+        "gpt-6-astra"
+    ).supported_reasoning_efforts == expected
+    assert aisuite_provider.capabilities_for_model(
+        "openai:gpt-6-astra"
+    ).supported_reasoning_efforts == expected
+    assert chat_reasoning_effort_kwargs(
+        aisuite_provider,
+        "openai:gpt-6-astra",
+        "low",
+    ) == {"reasoning_effort": "low"}
+    assert chat_reasoning_effort_kwargs(
+        aisuite_provider,
+        "openai:gpt-6-astra",
+        "none",
+    ) == {}
+
+
 def test_aisuite_reports_model_specific_openai_capabilities():
     provider = AiSuiteProvider(
         client=None,

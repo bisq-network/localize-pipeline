@@ -105,6 +105,122 @@ quality_gate:
     assert report["source_identical"]["unexpected_source_identical_count"] == 1
 
 
+def test_action_scope_rejects_nested_target_before_translation(tmp_path):
+    workspace = tmp_path / "workspace"
+    nested = workspace / "nested"
+    nested.mkdir(parents=True)
+    config_path = workspace / "config.yaml"
+    config_path.write_text(
+        "target_project_root: nested\ninput_folder: l10n\n",
+        encoding="utf-8",
+    )
+
+    action = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    scope_step = next(
+        step
+        for step in action["runs"]["steps"]
+        if step["name"] == "Validate Action workspace scope"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+            "TRANSLATOR_CONFIG_FILE": str(config_path),
+            "LOCALIZE_ACTION_WORKSPACE": str(workspace),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", scope_step["run"]],
+        cwd=workspace,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "must resolve exactly to the GitHub workspace" in result.stderr
+
+
+def test_action_gate_aborts_when_enabled_semantic_review_cannot_start(tmp_path):
+    repo = tmp_path / "target"
+    input_folder = repo / "l10n"
+    report_folder = tmp_path / "reports"
+    input_folder.mkdir(parents=True)
+    (input_folder / "app.properties").write_text("hello=Hello\n", encoding="utf-8")
+    target_file = input_folder / "app_de.properties"
+    target_file.write_text("hello=Alt\n", encoding="utf-8")
+    config_path = repo / "config.yaml"
+    config_path.write_text(
+        """
+target_project_root: "."
+input_folder: "l10n"
+localization_format: "java_properties"
+localization_layout:
+  id: "suffix"
+  source_locale: "en"
+supported_locales:
+  - { code: "de", name: "German" }
+model_provider: "openai"
+semantic_review:
+  enabled: true
+  model: "gpt-4o"
+quality_gate:
+  block_on_pipeline_warnings: false
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _run(["git", "init", "-q"], cwd=repo)
+    _run(["git", "config", "user.name", "Action Test"], cwd=repo)
+    _run(["git", "config", "user.email", "action@example.invalid"], cwd=repo)
+    _run(["git", "config", "commit.gpgSign", "false"], cwd=repo)
+    _run(["git", "add", "."], cwd=repo)
+    _run(["git", "commit", "-q", "-m", "Seed target repository"], cwd=repo)
+    target_file.write_text("hello=Hallo\n", encoding="utf-8")
+
+    action = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    gate_step = next(
+        step
+        for step in action["runs"]["steps"]
+        if step["name"] == "Run translation quality gate"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+            "PYTHONPATH": str(PROJECT_ROOT),
+            "TRANSLATOR_CONFIG_FILE": str(config_path),
+            "ACTION_QUALITY_REPORT_DIR": str(report_folder),
+            "LOCALIZE_ACTION_WORKSPACE": str(repo),
+            "LOCALIZE_OPENAI_API_KEY_INPUT": "",
+            "LOCALIZE_API_BASE_URL_INPUT": "",
+            "LOCALIZE_REVIEW_MODEL_INPUT": "",
+            "LOCALIZE_DRY_RUN": "false",
+            "LOCALIZE_PLUGIN_MODULES": "",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", gate_step["run"]],
+        cwd=repo,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (report_folder / "translation_validation_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["semantic_review"]["failed_run"] is True
+    assert not (report_folder / "translation_quality_report.json").exists()
+
+
 def test_action_gate_rejects_target_repository_outside_workspace_before_git_reset(tmp_path):
     workspace = tmp_path / "workspace"
     config_folder = workspace / "translations"
@@ -156,6 +272,67 @@ def test_action_gate_rejects_target_repository_outside_workspace_before_git_rese
     )
 
     assert result.returncode != 0
-    assert "must be inside the GitHub workspace" in result.stderr
+    assert "must resolve exactly to the GitHub workspace" in result.stderr
     staged = _run(["git", "diff", "--cached", "--name-only"], cwd=outside_repo)
     assert staged.stdout.splitlines() == ["l10n/app.properties"]
+
+
+def test_action_gate_rejects_nested_target_root_before_git_reset(tmp_path):
+    workspace = tmp_path / "workspace"
+    nested_repo = workspace / "project"
+    nested_input = nested_repo / "l10n"
+    nested_input.mkdir(parents=True)
+
+    outer_file = workspace / "release-notes.txt"
+    target_file = nested_input / "app.properties"
+    outer_file.write_text("Original\n", encoding="utf-8")
+    target_file.write_text("key=Original\n", encoding="utf-8")
+    _run(["git", "init", "-q"], cwd=workspace)
+    _run(["git", "config", "user.name", "Action Test"], cwd=workspace)
+    _run(["git", "config", "user.email", "action@example.invalid"], cwd=workspace)
+    _run(["git", "config", "commit.gpgSign", "false"], cwd=workspace)
+    _run(["git", "add", "."], cwd=workspace)
+    _run(["git", "commit", "-q", "-m", "Seed workspace"], cwd=workspace)
+
+    outer_file.write_text("Staged\n", encoding="utf-8")
+    target_file.write_text("key=Staged\n", encoding="utf-8")
+    _run(["git", "add", "."], cwd=workspace)
+
+    config_path = workspace / "config.yaml"
+    config_path.write_text(
+        "target_project_root: project\ninput_folder: l10n\n",
+        encoding="utf-8",
+    )
+
+    action = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    gate_step = next(
+        step for step in action["runs"]["steps"]
+        if step["name"] == "Run translation quality gate"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+            "PYTHONPATH": str(PROJECT_ROOT),
+            "TRANSLATOR_CONFIG_FILE": str(config_path),
+            "ACTION_QUALITY_REPORT_DIR": str(tmp_path / "reports"),
+            "LOCALIZE_ACTION_WORKSPACE": str(workspace),
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", gate_step["run"]],
+        cwd=workspace,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "must resolve exactly to the GitHub workspace" in result.stderr
+    staged = _run(["git", "diff", "--cached", "--name-only"], cwd=workspace)
+    assert staged.stdout.splitlines() == [
+        "project/l10n/app.properties",
+        "release-notes.txt",
+    ]

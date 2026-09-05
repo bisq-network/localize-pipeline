@@ -8,11 +8,10 @@ state.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
 import errno
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -31,27 +30,35 @@ except ImportError:  # pragma: no cover - Guardian scheduling is POSIX-only toda
 
 from localize.guardian.codex import CodexDriver
 from localize.guardian.config import GuardianConfigError, parse_guardian_config_yaml
-from localize.guardian.controller import GuardianController, PollOutcome
+from localize.guardian.controller import GuardianController, PollOutcome, _stored_feedback
 from localize.guardian.credentials import (
     CredentialError,
+    CredentialSnapshot,
     SecretCommand,
+    credential_snapshot,
     git_credential_environment,
     resolve_model_api_key,
 )
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.executable_trust import (
     ExecutableTrustError,
+    require_absolute_trusted_direct_executable,
     require_absolute_trusted_executable,
+    require_absolute_trusted_wrapper,
 )
 from localize.guardian.filesystem_trust import (
     create_or_wait_for_private_directory,
     is_trusted_directory,
 )
 from localize.guardian.github import (
+    BaseRevisionSnapshot,
+    ClosedPullScanResult,
     FeedbackRevision,
     GitHubAuthenticationError,
     GitHubReader,
     GitHubRepositoryPolicy,
     GitHubWriteBroker,
+    OpenPullPathAuthority,
     PullRequestFeedbackSnapshot,
 )
 from localize.guardian.models import (
@@ -64,12 +71,18 @@ from localize.guardian.models import (
     PreventionPolicy,
     RepositoryPolicy,
     SigningFormat,
+    TrustedActor,
+    pipeline_config_bundle_digest,
 )
 from localize.guardian.prevention_runtime import (
     PreventionCodexAuthor,
     PreventionCoordinator,
     PreventionGitHubBroker,
     SandboxedTestRunner,
+)
+from localize.guardian.remediation import (
+    RemediationCoordinator,
+    RemediationGitHubBroker,
 )
 from localize.guardian.scheduler import is_run_due
 from localize.guardian.signing import (
@@ -79,8 +92,18 @@ from localize.guardian.signing import (
     canonical_ssh_fingerprint,
     snapshot_ssh_signing_material,
 )
-from localize.guardian.state import GuardianState, _validate_sqlite_state_artifacts
-from localize.guardian.workspace import ExactRevision, materialize_exact_checkout
+from localize.guardian.state import (
+    GuardianState,
+    HistoricalPullReference,
+    OpenPullAuthorityReference,
+    _validate_sqlite_state_artifacts,
+)
+from localize.guardian.workspace import (
+    ExactRevision,
+    HistoricalRevision,
+    materialize_exact_checkout,
+    materialize_historical_checkout,
+)
 
 
 _GITHUB_API_URL = "https://api.github.com"
@@ -491,6 +514,7 @@ def _read_private_operator_file(
     *,
     root: Path,
     required: bool,
+    deadline: PollDeadline | None = None,
 ) -> bytes | None:
     """Read one bounded 0600 file through a non-following descriptor."""
 
@@ -517,9 +541,7 @@ def _read_private_operator_file(
         raise GuardianRuntimeError(
             "Guardian operator pipeline config is unavailable or unsafe."
         ) from None
-    if stat.S_ISLNK(leaf_metadata.st_mode) or not stat.S_ISREG(
-        leaf_metadata.st_mode
-    ):
+    if stat.S_ISLNK(leaf_metadata.st_mode) or not stat.S_ISREG(leaf_metadata.st_mode):
         raise GuardianRuntimeError(
             "Guardian operator pipeline config is unavailable or unsafe."
         )
@@ -557,6 +579,8 @@ def _read_private_operator_file(
         chunks: list[bytes] = []
         remaining = _MAX_OPERATOR_PIPELINE_FILE_BYTES + 1
         while remaining:
+            if deadline is not None:
+                deadline.require_remaining()
             chunk = os.read(descriptor, min(65_536, remaining))
             if not chunk:
                 break
@@ -594,32 +618,28 @@ def _decode_operator_yaml(content: bytes) -> Mapping[str, Any]:
     return payload
 
 
-def _copy_private_bundle_file(root: Path, relative: PurePosixPath, content: bytes) -> Path:
+def _copy_private_bundle_file(
+    root: Path,
+    relative: PurePosixPath,
+    content: bytes,
+    *,
+    deadline: PollDeadline | None = None,
+) -> Path:
     """Copy immutable snapshot bytes below a fresh private bundle root."""
 
     destination = root.joinpath(*relative.parts)
+    if deadline is not None:
+        deadline.require_remaining()
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     current = root
     for component in relative.parts[:-1]:
         current = current / component
         current.chmod(0o700)
+    if deadline is not None:
+        deadline.require_remaining()
     destination.write_bytes(content)
     destination.chmod(0o600)
     return destination
-
-
-def _operator_bundle_digest(files: Mapping[str, bytes]) -> str:
-    """Hash sorted path and raw-byte tuples without concatenation ambiguity."""
-
-    digest = hashlib.sha256()
-    for name in sorted(files):
-        encoded_name = name.encode("utf-8")
-        content = files[name]
-        digest.update(len(encoded_name).to_bytes(4, "big"))
-        digest.update(encoded_name)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
-    return digest.hexdigest()
 
 
 @contextmanager
@@ -628,6 +648,7 @@ def _snapshot_operator_pipeline_configs(
     config: GuardianConfig,
     guardian_config_path: Path,
     state_directory: Path,
+    deadline: PollDeadline | None = None,
 ) -> Iterator[dict[str, PipelineConfigSnapshot]]:
     """Snapshot every operator pipeline config before external poll work starts."""
 
@@ -649,14 +670,17 @@ def _snapshot_operator_pipeline_configs(
         snapshot_parent.chmod(0o700)
         snapshots: dict[str, PipelineConfigSnapshot] = {}
         for index, policy in enumerate(operator_policies):
-            config_relative = _safe_operator_relative_path(
-                policy.pipeline_config_path
-            )
+            if deadline is not None:
+                deadline.require_remaining()
+            config_relative = _safe_operator_relative_path(policy.pipeline_config_path)
             live_config_path = operator_root.joinpath(*config_relative.parts)
+            if deadline is not None:
+                deadline.require_remaining()
             config_bytes = _read_private_operator_file(
                 live_config_path,
                 root=operator_root,
                 required=True,
+                deadline=deadline,
             )
             assert config_bytes is not None
             pipeline_config = _decode_operator_yaml(config_bytes)
@@ -678,10 +702,13 @@ def _snapshot_operator_pipeline_configs(
                 *glossary_relative_to_config.parts,
             )
             live_glossary_path = operator_root.joinpath(*glossary_relative.parts)
+            if deadline is not None:
+                deadline.require_remaining()
             glossary_bytes = _read_private_operator_file(
                 live_glossary_path,
                 root=operator_root,
                 required=explicit_glossary,
+                deadline=deadline,
             )
             if glossary_bytes is not None:
                 try:
@@ -698,23 +725,31 @@ def _snapshot_operator_pipeline_configs(
             bundle_files = {config_relative.as_posix(): config_bytes}
             if glossary_bytes is not None:
                 bundle_files[glossary_relative.as_posix()] = glossary_bytes
+            if deadline is not None:
+                deadline.require_remaining()
             snapshot_root = snapshot_parent / f"repository-{index}"
             snapshot_root.mkdir(mode=0o700)
+            if deadline is not None:
+                deadline.require_remaining()
             snapshot_config = _copy_private_bundle_file(
                 snapshot_root,
                 config_relative,
                 config_bytes,
+                deadline=deadline,
             )
             if glossary_bytes is not None:
+                if deadline is not None:
+                    deadline.require_remaining()
                 _copy_private_bundle_file(
                     snapshot_root,
                     glossary_relative,
                     glossary_bytes,
+                    deadline=deadline,
                 )
             snapshots[policy.base_repo] = PipelineConfigSnapshot(
                 config_root=snapshot_root.resolve(),
                 config_path=snapshot_config.resolve(),
-                bundle_digest=_operator_bundle_digest(bundle_files),
+                bundle_digest=pipeline_config_bundle_digest(bundle_files),
             )
         yield snapshots
 
@@ -760,22 +795,31 @@ def _validate_scheduled_executables(config: GuardianConfig) -> None:
     commands: list[tuple[Sequence[str], str]] = [
         ((config.runtime.codex_executable,), "runtime.codex_executable"),
         ((config.runtime.git_executable,), "runtime.git_executable"),
-        (config.runtime.github_token_command, "runtime.github_token_command"),
     ]
+    direct_commands: list[tuple[Sequence[str], str, bool]] = [
+        (
+            config.runtime.github_token_command,
+            "runtime.github_token_command",
+            True,
+        ),
+    ]
+    sandbox_wrappers: list[tuple[Sequence[str], str]] = []
     if config.mode in _WRITE_MODES:
-        commands.append(
-            ((config.runtime.signing_program,), "runtime.signing_program")
-        )
+        commands.append(((config.runtime.signing_program,), "runtime.signing_program"))
     if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
-        commands.append(
-            (config.runtime.codex_api_key_command, "runtime.codex_api_key_command")
+        direct_commands.append(
+            (
+                config.runtime.codex_api_key_command,
+                "runtime.codex_api_key_command",
+                False,
+            )
         )
     if config.mode is GuardianMode.PROPOSE_PREVENTION:
         for policy_index, policy in enumerate(config.repositories):
             prevention = policy.prevention
             if prevention is None:
                 continue
-            commands.append(
+            sandbox_wrappers.append(
                 (
                     prevention.sandbox_argv_prefix,
                     f"repositories.{policy_index}.prevention.sandbox_argv_prefix",
@@ -788,6 +832,14 @@ def _validate_scheduled_executables(config: GuardianConfig) -> None:
     try:
         for command, field in commands:
             require_absolute_trusted_executable(command, field=field)
+        for command, field, allow_github_cli in direct_commands:
+            require_absolute_trusted_direct_executable(
+                command,
+                field=field,
+                allow_github_cli=allow_github_cli,
+            )
+        for command, field in sandbox_wrappers:
+            require_absolute_trusted_wrapper(command, field=field)
     except ExecutableTrustError:
         raise GuardianRuntimeError(
             "Guardian scheduled executable authority is unavailable or unsafe."
@@ -832,27 +884,78 @@ class AuthenticatedGitHubSnapshotProvider:
     def __init__(
         self,
         *,
-        credential: SecretCommand,
+        credential: SecretCommand | CredentialSnapshot,
         timeout_seconds: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        deadline: PollDeadline | None = None,
+        previous_feedback_provider: Callable[
+            [str, int], tuple[FeedbackRevision, ...]
+        ]
+        | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("GitHub timeout must be positive.")
         self._credential = credential
         self._timeout_seconds = float(timeout_seconds)
         self._transport = transport
+        self._deadline = deadline
+        self._previous_feedback_provider = previous_feedback_provider
+        self.loads_previous_feedback_per_pull = (
+            previous_feedback_provider is not None
+        )
 
-    def __call__(
+    def _previous_for_pull(
         self,
         policy: RepositoryPolicy,
-        previous_feedback: tuple[FeedbackRevision, ...],
-    ) -> Sequence[PullRequestFeedbackSnapshot]:
-        try:
-            token = self._credential.read()
-        except CredentialError:
+    ) -> Callable[[int], tuple[FeedbackRevision, ...]] | None:
+        provider = self._previous_feedback_provider
+        if provider is None:
+            return None
+        return lambda pull_number: provider(policy.base_repo, pull_number)
+
+    def require_publication_actor(
+        self,
+        policy: RepositoryPolicy,
+        expected_actors: Sequence[TrustedActor],
+    ) -> None:
+        """Fail before poll work unless one credential matches every writer."""
+
+        expected = tuple(expected_actors)
+        if not expected:
+            return
+        if any(actor.type != "User" for actor in expected):
             raise GitHubAuthenticationError(
-                "GitHub credential helper failed"
-            ) from None
+                "GitHub publication actor must be a User identity."
+            )
+        with self._reader(policy) as reader:
+            actual = reader.authenticated_actor()
+        if actual.type != "User" or any(
+            (actor.id, actor.type) != (actual.id, actual.type)
+            for actor in expected
+        ):
+            raise GitHubAuthenticationError(
+                "GitHub publication actor does not match enabled policy."
+            )
+
+    @contextmanager
+    def _reader(self, policy: RepositoryPolicy) -> Iterator[GitHubReader]:
+        """Yield one read-only client whose token exists only for this call."""
+
+        credential = self._credential
+        if self._deadline is not None and isinstance(credential, SecretCommand):
+            credential = SecretCommand(
+                credential.argv,
+                timeout_seconds=self._deadline.remaining(
+                    credential.timeout_seconds
+                ),
+                environment=credential.environment,
+            )
+        try:
+            token = credential.read()
+        except CredentialError:
+            if self._deadline is not None:
+                self._deadline.require_remaining()
+            raise GitHubAuthenticationError("GitHub credential helper failed") from None
         try:
             with httpx.Client(
                 base_url=_GITHUB_API_URL,
@@ -862,17 +965,121 @@ class AuthenticatedGitHubSnapshotProvider:
                     "User-Agent": "localize-guardian",
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
-                timeout=self._timeout_seconds,
+                timeout=(
+                    self._timeout_seconds
+                    if self._deadline is None
+                    else self._deadline.remaining(self._timeout_seconds)
+                ),
                 transport=self._transport,
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                return GitHubReader(
-                    client,
-                    _github_policy(policy),
-                ).collect_open_pull_requests(previous_feedback=previous_feedback)
+                try:
+                    reader_kwargs: dict[str, object] = {}
+                    if self._deadline is not None:
+                        reader_kwargs["deadline"] = self._deadline
+                    yield GitHubReader(client, _github_policy(policy), **reader_kwargs)
+                finally:
+                    client.headers.pop("Authorization", None)
         finally:
             token = ""
+
+    def __call__(
+        self,
+        policy: RepositoryPolicy,
+        previous_feedback: tuple[FeedbackRevision, ...],
+    ) -> Sequence[PullRequestFeedbackSnapshot]:
+        with self._reader(policy) as reader:
+            per_pull = self._previous_for_pull(policy)
+            if per_pull is None:
+                return reader.collect_open_pull_requests(
+                    previous_feedback=previous_feedback
+                )
+            return reader.collect_open_pull_requests(
+                previous_feedback_for_pull=per_pull
+            )
+
+    def collect_closed_pull_requests(
+        self,
+        policy: RepositoryPolicy,
+        previous_feedback: tuple[FeedbackRevision, ...],
+        *,
+        cutoff: datetime,
+        upper_bound: datetime,
+        max_prs_per_poll: int,
+        seen_pulls: tuple[tuple[int, int], ...],
+        excluded_pulls: tuple[tuple[int, int], ...],
+        priority_pull_groups: tuple[tuple[tuple[int, int], ...], ...],
+    ) -> ClosedPullScanResult:
+        """Collect one restart-safe historical batch under an ephemeral token."""
+
+        with self._reader(policy) as reader:
+            kwargs: dict[str, object] = {}
+            per_pull = self._previous_for_pull(policy)
+            if per_pull is None:
+                kwargs["previous_feedback"] = previous_feedback
+            else:
+                kwargs["previous_feedback_for_pull"] = per_pull
+            return reader.collect_closed_pull_requests(
+                cutoff=cutoff,
+                upper_bound=upper_bound,
+                max_prs_per_poll=max_prs_per_poll,
+                seen_pulls=seen_pulls,
+                excluded_pulls=excluded_pulls,
+                priority_pull_groups=priority_pull_groups,
+                **kwargs,
+            )
+
+    def revalidate_closed_pull_requests(
+        self,
+        policy: RepositoryPolicy,
+        sources: tuple[HistoricalPullReference, ...],
+    ) -> tuple[PullRequestFeedbackSnapshot, ...]:
+        """Rehydrate exact historical sources at a mutation boundary."""
+
+        if not sources or any(
+            not isinstance(source, HistoricalPullReference) for source in sources
+        ):
+            raise ValueError("sources must contain exact historical pull identities")
+        with self._reader(policy) as reader:
+            return reader.collect_exact_closed_pulls(
+                tuple((source.pull_id, source.pr_number) for source in sources)
+            )
+
+    def revalidate_open_pull_request(
+        self,
+        policy: RepositoryPolicy,
+        source: OpenPullAuthorityReference,
+    ) -> PullRequestFeedbackSnapshot:
+        """Rehydrate one exact open source under an ephemeral read token."""
+
+        if not isinstance(source, OpenPullAuthorityReference) or (
+            source.repository,
+            source.repository_id,
+        ) != (policy.base_repo, policy.base_repo_id):
+            raise ValueError("source must match the exact open repository policy")
+        with self._reader(policy) as reader:
+            return reader.collect_exact_open_pull(
+                (source.pull_id, source.pr_number)
+            )
+
+    def collect_open_changed_paths(
+        self,
+        policy: RepositoryPolicy,
+    ) -> tuple[OpenPullPathAuthority, ...]:
+        """Capture complete allowed open-PR path authority without review text."""
+
+        with self._reader(policy) as reader:
+            return reader.collect_open_changed_paths()
+
+    def capture_base_revision(
+        self,
+        policy: RepositoryPolicy,
+    ) -> BaseRevisionSnapshot:
+        """Capture the exact current base under an ephemeral read token."""
+
+        with self._reader(policy) as reader:
+            return reader.capture_base_revision()
 
 
 def _attempt_timeout(config: GuardianConfig) -> float:
@@ -904,6 +1111,7 @@ def _snapshot_poll_signing_material(
     *,
     config: GuardianConfig,
     state_directory: Path,
+    deadline: PollDeadline | None = None,
 ) -> Iterator[SSHSigningMaterial | None]:
     """Freeze an SSH public identity before any external write-mode work."""
 
@@ -916,13 +1124,18 @@ def _snapshot_poll_signing_material(
     try:
         assert config.runtime.signing_public_key is not None
         assert config.runtime.signing_key is not None
-        with snapshot_ssh_signing_material(
-            public_key_path=config.runtime.signing_public_key,
-            expected_fingerprint=config.runtime.signing_key,
-            signing_program=config.runtime.signing_program,
-            temporary_root=state_directory,
-        ) as material:
+        snapshot_kwargs: dict[str, object] = {
+            "public_key_path": config.runtime.signing_public_key,
+            "expected_fingerprint": config.runtime.signing_key,
+            "signing_program": config.runtime.signing_program,
+            "temporary_root": state_directory,
+        }
+        if deadline is not None:
+            snapshot_kwargs["deadline"] = deadline
+        with snapshot_ssh_signing_material(**snapshot_kwargs) as material:
             yield material
+    except PollDeadlineExceeded:
+        raise
     except SigningError:
         raise GuardianRuntimeError(
             "Guardian SSH signing identity is unavailable or unsafe."
@@ -934,21 +1147,57 @@ def _build_controller(
     config: GuardianConfig,
     state: GuardianState,
     state_directory: Path,
-    github_credential: SecretCommand,
+    github_credential: SecretCommand | CredentialSnapshot,
     model_credential: SecretCommand | None,
     git_environment: Any,
     ssh_signing_material: SSHSigningMaterial | None = None,
     operator_pipeline_configs: Mapping[str, PipelineConfigSnapshot] | None = None,
+    deadline: PollDeadline | None = None,
 ) -> GuardianController:
     """Assemble trusted production adapters without invoking a credential yet."""
 
     _require_explicit_write_signing_key(config)
     attempt_timeout = _attempt_timeout(config)
     github_timeout = min(30.0, attempt_timeout)
+    deadline_kwargs: dict[str, PollDeadline] = (
+        {} if deadline is None else {"deadline": deadline}
+    )
     snapshot_provider = AuthenticatedGitHubSnapshotProvider(
         credential=github_credential,
         timeout_seconds=github_timeout,
+        previous_feedback_provider=lambda repository, pr_number: _stored_feedback(
+            state.latest_event_revisions(
+                repository=repository,
+                pr_number=pr_number,
+            )
+        ),
+        **deadline_kwargs,
     )
+    has_historical_backfill = any(
+        policy.closed_pr_backfill is not None for policy in config.repositories
+    )
+    has_historical_remediation = any(
+        policy.closed_pr_backfill is not None
+        and policy.closed_pr_backfill.remediation is not None
+        for policy in config.repositories
+    )
+    has_historical_prevention = (
+        config.mode is GuardianMode.PROPOSE_PREVENTION
+        and any(
+            policy.closed_pr_backfill is not None
+            and policy.prevention is not None
+            for policy in config.repositories
+        )
+    )
+    remediation_limit = config.limits.max_remediation_drafts_per_run
+    if (
+        isinstance(remediation_limit, bool)
+        or not isinstance(remediation_limit, int)
+        or remediation_limit < 0
+    ):
+        raise GuardianRuntimeError(
+            "Historical remediation publication limit is invalid."
+        )
     codex_driver = CodexDriver(
         model=config.runtime.codex_model,
         reasoning_effort=config.runtime.codex_reasoning_effort,
@@ -957,6 +1206,7 @@ def _build_controller(
         executable=config.runtime.codex_executable,
         timeout_seconds=attempt_timeout,
         max_attempts=config.limits.max_attempts,
+        **deadline_kwargs,
     )
 
     def checkout_factory(revision: ExactRevision):
@@ -966,6 +1216,7 @@ def _build_controller(
             "signing_program": config.runtime.signing_program,
             "timeout_seconds": attempt_timeout,
         }
+        checkout_kwargs.update(deadline_kwargs)
         if config.runtime.signing_format is SigningFormat.SSH:
             if ssh_signing_material is None:
                 if config.mode in _WRITE_MODES:
@@ -980,21 +1231,61 @@ def _build_controller(
                 )
         return materialize_exact_checkout(revision, **checkout_kwargs)
 
+    historical_snapshot_provider = (
+        snapshot_provider.collect_closed_pull_requests
+        if has_historical_backfill
+        else None
+    )
+    current_base_provider = (
+        snapshot_provider.capture_base_revision if has_historical_backfill else None
+    )
+
+    def create_historical_checkout(revision: HistoricalRevision):
+        checkout_kwargs: dict[str, Any] = {
+            "credential_environment": git_environment,
+            "git_binary": config.runtime.git_executable,
+            "timeout_seconds": attempt_timeout,
+        }
+        checkout_kwargs.update(deadline_kwargs)
+        return materialize_historical_checkout(revision, **checkout_kwargs)
+
+    historical_checkout_factory = (
+        create_historical_checkout if has_historical_backfill else None
+    )
+
     def model_credential_provider() -> str | None:
         if config.runtime.codex_auth_mode is CodexAuthMode.CHATGPT:
             return None
-        return resolve_model_api_key(model_credential)
+        if model_credential is None:
+            return resolve_model_api_key(None)
+        if deadline is None:
+            return resolve_model_api_key(model_credential)
+        bounded_credential = SecretCommand(
+            model_credential.argv,
+            timeout_seconds=deadline.remaining(model_credential.timeout_seconds),
+            environment=model_credential.environment,
+        )
+        try:
+            return resolve_model_api_key(bounded_credential)
+        except CredentialError:
+            deadline.require_remaining()
+            raise
 
     write_broker_factory = None
     if config.mode in _WRITE_MODES:
 
         def create_write_broker(policy: RepositoryPolicy) -> GitHubWriteBroker:
+            if policy.publication_actor is None:  # pragma: no cover - config invariant
+                raise GuardianRuntimeError(
+                    "Write-capable repository lacks a publication actor."
+                )
             return GitHubWriteBroker(
                 policy=_github_policy(policy),
-                token_command=config.runtime.github_token_command,
+                expected_actor=policy.publication_actor,
+                credential=github_credential,
                 base_url=_GITHUB_API_URL,
                 timeout=github_timeout,
-                token_command_timeout=github_timeout,
+                **deadline_kwargs,
             )
 
         write_broker_factory = create_write_broker
@@ -1007,11 +1298,11 @@ def _build_controller(
         ) -> PreventionGitHubBroker:
             return PreventionGitHubBroker(
                 policy=policy,
-                token_command=config.runtime.github_token_command,
+                credential=github_credential,
                 github_host=_GITHUB_HOST,
                 base_url=_GITHUB_API_URL,
                 timeout_seconds=github_timeout,
-                token_command_timeout=github_timeout,
+                **deadline_kwargs,
             )
 
         prevention_runner = PreventionCoordinator(
@@ -1026,8 +1317,12 @@ def _build_controller(
                 executable=config.runtime.codex_executable,
                 timeout_seconds=attempt_timeout,
                 max_attempts=config.limits.max_attempts,
+                **deadline_kwargs,
             ),
-            test_runner=SandboxedTestRunner(timeout_seconds=attempt_timeout),
+            test_runner=SandboxedTestRunner(
+                timeout_seconds=attempt_timeout,
+                **deadline_kwargs,
+            ),
             model_credential_provider=model_credential_provider,
             publish_credential_environment=git_environment,
             signing_key=config.runtime.signing_key,
@@ -1036,10 +1331,38 @@ def _build_controller(
             reservation_usd=config.limits.model_call_reservation_usd,
             daily_limit_usd=config.limits.daily_cost_limit_usd,
             max_model_calls_per_day=config.limits.max_model_calls_per_day,
-            api_billed=(
-                config.runtime.codex_auth_mode is CodexAuthMode.API_KEY
-            ),
+            api_billed=(config.runtime.codex_auth_mode is CodexAuthMode.API_KEY),
             temporary_root=state_directory,
+            **deadline_kwargs,
+        )
+
+    remediation_runner = None
+    if (
+        has_historical_remediation
+        and remediation_limit > 0
+        and config.mode in _WRITE_MODES
+    ):
+
+        def create_remediation_broker(
+            policy: RepositoryPolicy,
+        ) -> RemediationGitHubBroker:
+            return RemediationGitHubBroker(
+                policy=policy,
+                credential=github_credential,
+                github_host=_GITHUB_HOST,
+                base_url=_GITHUB_API_URL,
+                timeout_seconds=github_timeout,
+                **deadline_kwargs,
+            )
+
+        remediation_runner = RemediationCoordinator(
+            state=state,
+            broker_factory=create_remediation_broker,
+            publish_credential_environment=git_environment,
+            signing_key=config.runtime.signing_key,
+            signing_environment=None,
+            max_drafts=remediation_limit,
+            **deadline_kwargs,
         )
 
     return GuardianController(
@@ -1051,11 +1374,27 @@ def _build_controller(
         model_credential_provider=model_credential_provider,
         write_broker_factory=write_broker_factory,
         prevention_runner=prevention_runner,
+        historical_snapshot_provider=historical_snapshot_provider,
+        historical_source_snapshot_provider=(
+            snapshot_provider.revalidate_closed_pull_requests
+            if remediation_runner is not None or has_historical_prevention
+            else None
+        ),
+        historical_checkout_factory=historical_checkout_factory,
+        current_base_provider=current_base_provider,
+        remediation_runner=remediation_runner,
         publish_credential_environment=git_environment,
         evidence_root=state_directory / "evidence",
         github_host=_GITHUB_HOST,
         signing_key=config.runtime.signing_key,
         operator_pipeline_configs=operator_pipeline_configs,
+        publication_actor_preflight=(
+            lambda: snapshot_provider.require_publication_actor(
+                config.repositories[0],
+                config.enabled_publication_actors,
+            )
+        ),
+        **deadline_kwargs,
     )
 
 
@@ -1134,10 +1473,51 @@ def _exit_code(outcome: PollOutcome) -> int:
         outcome.authentication_circuit_open
         or outcome.model_circuit_open
         or outcome.runs_failed
+        or outcome.prevention_failures
+        or outcome.remediation_failures
         or outcome.failures
     ):
         return 1
     return 0
+
+
+@contextmanager
+def _deadline_credential_snapshot(
+    command: SecretCommand,
+    *,
+    deadline: PollDeadline,
+) -> Iterator[CredentialSnapshot]:
+    """Mint one credential using no more than the poll's remaining budget."""
+
+    bounded_command = SecretCommand(
+        command.argv,
+        timeout_seconds=deadline.remaining(command.timeout_seconds),
+        environment=command.environment,
+    )
+    with credential_snapshot(bounded_command) as snapshot:
+        deadline.require_remaining()
+        yield snapshot
+
+
+@contextmanager
+def _record_poll_deadline_failure(
+    *,
+    state: GuardianState,
+    checked_at: datetime,
+) -> Iterator[None]:
+    """Persist a redacted terminal health record for setup-time expiry."""
+
+    try:
+        yield
+    except PollDeadlineExceeded:
+        state.record_health(
+            component="guardian",
+            status="failed",
+            message="Guardian poll deadline was exceeded.",
+            details={"failure_types": ("PollDeadlineExceeded",)},
+            checked_at=checked_at,
+        )
+        raise
 
 
 def _poll_with_locked_state(
@@ -1164,6 +1544,7 @@ def _poll_with_locked_state(
                 schedule=config.schedule,
             ):
                 return 0
+            deadline = PollDeadline(config.limits.run_timeout_seconds)
             state.record_health(
                 component=_POLL_ATTEMPT_COMPONENT,
                 status="attempted",
@@ -1175,10 +1556,15 @@ def _poll_with_locked_state(
                 },
                 checked_at=attempted_at,
             )
-            _validate_runtime_authority(config, scheduled=scheduled)
+            with _record_poll_deadline_failure(
+                state=state,
+                checked_at=attempted_at,
+            ):
+                _validate_runtime_authority(config, scheduled=scheduled)
+                deadline.require_remaining()
 
             helper_timeout = min(30.0, _attempt_timeout(config))
-            github_credential = SecretCommand(
+            github_credential_command = SecretCommand(
                 config.runtime.github_token_command,
                 timeout_seconds=helper_timeout,
             )
@@ -1190,14 +1576,27 @@ def _poll_with_locked_state(
                 if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY
                 else None
             )
-            with _snapshot_poll_signing_material(
-                config=config,
-                state_directory=state_directory,
-            ) as ssh_signing_material, _snapshot_operator_pipeline_configs(
-                config=config,
-                guardian_config_path=resolved_config,
-                state_directory=state_directory,
-            ) as operator_pipeline_configs:
+            with (
+                _record_poll_deadline_failure(
+                    state=state,
+                    checked_at=attempted_at,
+                ),
+                _snapshot_poll_signing_material(
+                    config=config,
+                    state_directory=state_directory,
+                    deadline=deadline,
+                ) as ssh_signing_material,
+                _snapshot_operator_pipeline_configs(
+                    config=config,
+                    guardian_config_path=resolved_config,
+                    state_directory=state_directory,
+                    deadline=deadline,
+                ) as operator_pipeline_configs,
+                _deadline_credential_snapshot(
+                    github_credential_command,
+                    deadline=deadline,
+                ) as github_credential,
+            ):
                 for repository, snapshot in operator_pipeline_configs.items():
                     state.record_health(
                         component="pipeline-config",
@@ -1222,6 +1621,7 @@ def _poll_with_locked_state(
                         git_environment=git_environment,
                         ssh_signing_material=ssh_signing_material,
                         operator_pipeline_configs=operator_pipeline_configs,
+                        deadline=deadline,
                     )
                     try:
                         outcome = controller.poll_once()
@@ -1233,7 +1633,9 @@ def _poll_with_locked_state(
     except GuardianRuntimeError:
         raise
     except Exception:
-        raise GuardianRuntimeError("Guardian production runtime failed safely.") from None
+        raise GuardianRuntimeError(
+            "Guardian poll runtime failed safely."
+        ) from None
 
 
 def run_once(config_path: Path, scheduled: bool = False) -> int:

@@ -9,16 +9,20 @@ from pathlib import Path
 
 import pytest
 
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.models import SigningFormat
 from localize.guardian.signing import SSHSigningMaterial
 from localize.guardian.workspace import (
     CommitResult,
     ExactRevision,
     GuardianWorkspace,
+    HistoricalRevision,
+    HistoricalWorkspace,
     PreventionPublicationResult,
     PublicationResult,
     WorkspaceError,
     materialize_exact_checkout,
+    materialize_historical_checkout,
 )
 
 
@@ -81,6 +85,75 @@ def _revision(*, ref: str, sha: str) -> ExactRevision:
         ref=ref,
         sha=sha,
     )
+
+
+def _historical_revision(*, sha: str, pull_number: int | None = None) -> HistoricalRevision:
+    return HistoricalRevision(
+        host="github.example.com",
+        owner="acme",
+        repository="project",
+        sha=sha,
+        pull_number=pull_number,
+    )
+
+
+@pytest.mark.parametrize("pull_number", [0, -1, True, "7"])
+def test_historical_revision_rejects_invalid_pull_numbers(pull_number):
+    """Historical refs must be exact positive numeric GitHub PR identities."""
+
+    with pytest.raises((TypeError, ValueError)):
+        _historical_revision(sha="a" * 40, pull_number=pull_number)
+
+
+def test_historical_checkout_fetches_an_exact_old_commit_without_a_live_branch(
+    tmp_path,
+):
+    """An old base SHA remains reconstructible after its branch advances."""
+
+    remote, base_sha, head_sha = _create_remote(tmp_path)
+    assert _git(remote, "rev-parse", "refs/heads/translation-review") == head_sha
+
+    with materialize_historical_checkout(
+        _historical_revision(sha=base_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        assert isinstance(workspace, HistoricalWorkspace)
+        assert _git(workspace.path, "rev-parse", "HEAD") == base_sha
+        assert _git(workspace.path, "symbolic-ref", "-q", "HEAD", check=False) == ""
+        assert not hasattr(workspace, "commit_validated_changes")
+        assert not hasattr(workspace, "publish_commit")
+
+
+def test_historical_checkout_fetches_the_immutable_pull_head_ref(tmp_path):
+    """A closed PR head is read from the upstream pull ref, not a fork branch."""
+
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    _git(remote, "update-ref", "refs/pull/7/head", head_sha)
+    _git(remote, "update-ref", "-d", "refs/heads/translation-review")
+
+    with materialize_historical_checkout(
+        _historical_revision(sha=head_sha, pull_number=7),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        assert _git(workspace.path, "rev-parse", "HEAD") == head_sha
+        assert workspace.revision.fetch_target == "refs/pull/7/head"
+
+
+def test_historical_checkout_rejects_a_pull_ref_at_the_wrong_sha(tmp_path):
+    """GitHub pull-ref movement cannot substitute a different historical head."""
+
+    remote, base_sha, head_sha = _create_remote(tmp_path)
+    _git(remote, "update-ref", "refs/pull/7/head", head_sha)
+
+    with pytest.raises(WorkspaceError, match="exact expected SHA"):
+        with materialize_historical_checkout(
+            _historical_revision(sha=base_sha, pull_number=7),
+            remote_url=remote.as_uri(),
+            allow_file_remote=True,
+        ):
+            pytest.fail("a mismatched historical pull ref must not be yielded")
 
 
 @pytest.mark.parametrize(
@@ -176,6 +249,48 @@ def test_remote_must_be_credential_free_identity_bound_https_by_default(remote_u
             pytest.fail("invalid remote must not be used")
 
 
+def test_checkout_stops_before_starting_git_after_the_poll_deadline(tmp_path):
+    now = [10.0]
+    calls: list[float] = []
+
+    def expire_after_first_call(args, **kwargs):
+        calls.append(kwargs["timeout"])
+        now[0] = 13.0
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        with materialize_exact_checkout(
+            _revision(ref="refs/heads/main", sha="a" * 40),
+            temporary_root=tmp_path,
+            timeout_seconds=37,
+            deadline=PollDeadline(3, clock=lambda: now[0]),
+            _process_runner=expire_after_first_call,
+        ):
+            pytest.fail("an expired checkout must not be yielded")
+
+    assert calls == [3]
+
+
+def test_checkout_promotes_a_deadline_bound_git_timeout(tmp_path):
+    calls: list[float] = []
+
+    def timed_out_git(args, **kwargs):
+        calls.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        with materialize_exact_checkout(
+            _revision(ref="refs/heads/main", sha="a" * 40),
+            temporary_root=tmp_path,
+            timeout_seconds=37,
+            deadline=PollDeadline(3, clock=lambda: 10.0),
+            _process_runner=timed_out_git,
+        ):
+            pytest.fail("a deadline-bound git timeout must not yield a checkout")
+
+    assert calls == [3]
+
+
 def test_credentials_are_fetch_only_and_never_placed_in_argv(tmp_path):
     remote, _base_sha, head_sha = _create_remote(tmp_path)
     secret = "guardian-secret-value"
@@ -256,6 +371,22 @@ def test_credential_provider_failure_does_not_echo_secret_exception_text(tmp_pat
     assert failure.value.__cause__ is None
 
 
+def test_credential_provider_preserves_poll_deadline_expiry(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+
+    def expired_provider():
+        raise PollDeadlineExceeded("Guardian poll deadline was exceeded.")
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        with materialize_exact_checkout(
+            _revision(ref="refs/heads/translation-review", sha=head_sha),
+            remote_url=remote.as_uri(),
+            allow_file_remote=True,
+            credential_environment=expired_provider,
+        ):
+            pytest.fail("an expired credential provider must not yield a checkout")
+
+
 def test_commits_only_exact_translation_paths_and_links_feedback(tmp_path):
     remote, _base_sha, head_sha = _create_remote(tmp_path)
 
@@ -323,7 +454,7 @@ def test_fork_commit_links_feedback_in_the_base_repository(tmp_path):
         )
 
 
-def test_publishes_exact_descendant_with_normal_push_and_confirms_ref(tmp_path):
+def test_publishes_exact_descendant_with_expected_old_ref_and_confirms_ref(tmp_path):
     remote, _base_sha, head_sha = _create_remote(tmp_path)
     calls = []
     publication_sequence: list[str] = []
@@ -391,7 +522,10 @@ def test_publishes_exact_descendant_with_normal_push_and_confirms_ref(tmp_path):
     assert all("publish-secret" not in "\0".join(argv) for argv, _ in network_calls)
     push_argv = next(argv for argv, _ in network_calls if "push" in argv)
     assert "--force" not in push_argv
-    assert not any(argument.startswith("--force-with-lease") for argument in push_argv)
+    assert "--atomic" in push_argv
+    assert (
+        f"--force-with-lease=refs/heads/translation-review:{head_sha}" in push_argv
+    )
     assert publication_sequence == ["fetch", "lease-check", "push", "ls-remote"]
 
 
@@ -425,6 +559,100 @@ def test_publish_callback_failure_prevents_the_remote_mutation(tmp_path):
                 before_push=lost_lease,
             )
 
+    assert _git(remote, "rev-parse", "refs/heads/translation-review") == head_sha
+
+
+def test_publish_exact_lease_rejects_remote_rewind_during_callback(tmp_path):
+    """A force-rewind cannot be overwritten by our otherwise fast-forward commit."""
+
+    remote, base_sha, head_sha = _create_remote(tmp_path)
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        commit = workspace.commit_validated_changes(
+            expected_paths=("i18n/messages_ru.properties",),
+            pull_number=7,
+            feedback_urls=(
+                "https://github.example.com/acme/project/pull/7#discussion_r123",
+            ),
+            sign=False,
+        )
+
+        def rewind_remote() -> None:
+            _git(
+                remote,
+                "update-ref",
+                "refs/heads/translation-review",
+                base_sha,
+                head_sha,
+            )
+
+        with pytest.raises(WorkspaceError, match="git push failed"):
+            workspace.publish_commit(
+                commit,
+                require_signature=False,
+                before_push=rewind_remote,
+            )
+
+    assert _git(remote, "rev-parse", "refs/heads/translation-review") == base_sha
+
+
+def test_publish_rechecks_authority_after_final_signature_verification(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    original_run = subprocess.run
+    authority_current = True
+    verify_calls = 0
+    push_calls = 0
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        nonlocal authority_current, push_calls, verify_calls
+        arguments = tuple(args)
+        if "commit" in arguments and "-S" in arguments:
+            arguments = tuple(
+                "--no-gpg-sign" if value == "-S" else value for value in arguments
+            )
+        if "verify-commit" in arguments:
+            verify_calls += 1
+            if verify_calls == 3:
+                authority_current = False
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        if "push" in arguments:
+            push_calls += 1
+        return original_run(arguments, **kwargs)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        _process_runner=signing_spy,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        commit = workspace.commit_validated_changes(
+            expected_paths=("i18n/messages_ru.properties",),
+            pull_number=7,
+            feedback_urls=(
+                "https://github.example.com/acme/project/pull/7#discussion_r123",
+            ),
+        )
+
+        def require_current_authority() -> None:
+            if not authority_current:
+                raise RuntimeError("authority lost")
+
+        with pytest.raises(RuntimeError, match="authority lost"):
+            workspace.publish_commit(commit, before_push=require_current_authority)
+
+    assert verify_calls == 3
+    assert push_calls == 0
     assert _git(remote, "rev-parse", "refs/heads/translation-review") == head_sha
 
 
@@ -571,6 +799,34 @@ def test_openpgp_profile_keeps_the_existing_git_flags_and_environment(tmp_path):
         )
         assert environment["GNUPGHOME"] == str(gnupg_home.resolve())
         assert "SSH_AUTH_SOCK" not in environment
+
+
+def test_openpgp_commit_rejects_an_untrusted_signing_home_before_staging(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    gnupg_home = tmp_path / "gnupg"
+    gnupg_home.mkdir(mode=0o700)
+    gnupg_home.chmod(0o777)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="0700"):
+            workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                signing_environment={"GNUPGHOME": str(gnupg_home)},
+            )
+
+        assert _git(workspace.path, "diff", "--cached", "--name-only") == ""
 
 
 def test_ssh_signing_uses_exact_snapshot_and_limits_agent_socket_to_commit(
@@ -928,6 +1184,266 @@ def test_signs_validated_prevention_modifications_and_new_tests_then_creates_bra
         "prevention-secret" not in "\0".join(arguments)
         for arguments, _environment in calls
     )
+
+
+def test_prevention_rechecks_authority_after_final_signature_verification(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    original_run = subprocess.run
+    authority_current = True
+    verify_calls = 0
+    push_calls = 0
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        nonlocal authority_current, push_calls, verify_calls
+        arguments = tuple(args)
+        if "commit" in arguments and "-S" in arguments:
+            arguments = tuple(
+                "--no-gpg-sign" if value == "-S" else value for value in arguments
+            )
+        if "verify-commit" in arguments:
+            verify_calls += 1
+            if verify_calls == 3:
+                authority_current = False
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        if "push" in arguments:
+            push_calls += 1
+        return original_run(arguments, **kwargs)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        _process_runner=signing_spy,
+    ) as workspace:
+        (workspace.path / "README.md").write_text("prevention\n", encoding="utf-8")
+        commit = workspace.commit_prevention_changes(
+            expected_paths=("README.md",),
+            evidence_hash="a" * 64,
+        )
+
+        def require_current_authority() -> None:
+            if not authority_current:
+                raise RuntimeError("authority lost")
+
+        with pytest.raises(RuntimeError, match="authority lost"):
+            workspace.publish_prevention_branch(
+                commit,
+                push_repository="acme/project",
+                branch="guardian/prevention-authority-loss",
+                branch_prefix="guardian/prevention-",
+                credential_environment=lambda: {},
+                before_push=require_current_authority,
+                remote_url=remote.as_uri(),
+                allow_file_remote=True,
+            )
+
+    assert verify_calls == 3
+    assert push_calls == 0
+    assert (
+        _git(
+            remote,
+            "show-ref",
+            "--verify",
+            "refs/heads/guardian/prevention-authority-loss",
+            check=False,
+        )
+        == ""
+    )
+
+
+def test_signs_value_only_historical_remediation_with_cross_pr_evidence(tmp_path):
+    """A remediation commit may link several closed PRs but only tracked values."""
+
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    original_run = subprocess.run
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        arguments = tuple(args)
+        if "commit" in arguments and "-S" in arguments:
+            arguments = tuple(
+                "--no-gpg-sign" if value == "-S" else value for value in arguments
+            )
+        if "verify-commit" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        return original_run(arguments, **kwargs)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        _process_runner=signing_spy,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        commit = workspace.commit_historical_remediation_changes(
+            expected_paths=("i18n/messages_ru.properties",),
+            feedback_repository="upstream/project",
+            feedback_pull_numbers=(7, 11),
+            feedback_urls=(
+                "https://github.example.com/upstream/project/pull/7#discussion_r123",
+                "https://github.example.com/upstream/project/issues/11#issuecomment-456",
+            ),
+            evidence_hash="b" * 64,
+        )
+
+        assert commit.parent_sha == head_sha
+        assert commit.changed_paths == ("i18n/messages_ru.properties",)
+        assert commit.signature_verified is True
+        assert _git(workspace.path, "show", "--format=%s", "--no-patch", "HEAD") == (
+            "[localize-guardian] Repair historical feedback"
+        )
+        body = _git(workspace.path, "show", "--format=%B", "--no-patch", "HEAD")
+        assert "human review" in body
+        assert "pull/7#discussion_r123" in body
+        assert "issues/11#issuecomment-456" in body
+        assert f"Historical evidence: {'b' * 64}" in body
+
+
+def test_historical_remediation_rejects_new_files_and_wrong_pr_links(tmp_path):
+    """Historical repair authority cannot add files or cite unrelated PRs."""
+
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    original_run = subprocess.run
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        arguments = tuple(args)
+        if "commit" in arguments and "-S" in arguments:
+            arguments = tuple(
+                "--no-gpg-sign" if value == "-S" else value for value in arguments
+            )
+        if "verify-commit" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        return original_run(arguments, **kwargs)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        _process_runner=signing_spy,
+    ) as workspace:
+        new_file = workspace.path / "i18n/messages_de.properties"
+        new_file.write_text("hello=Hallo\n", encoding="utf-8")
+        with pytest.raises(WorkspaceError, match="tracked file"):
+            workspace.commit_historical_remediation_changes(
+                expected_paths=("i18n/messages_de.properties",),
+                feedback_repository="upstream/project",
+                feedback_pull_numbers=(7,),
+                feedback_urls=(
+                    "https://github.example.com/upstream/project/pull/7#discussion_r123",
+                ),
+                evidence_hash="c" * 64,
+            )
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        _process_runner=signing_spy,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="historical feedback URL"):
+            workspace.commit_historical_remediation_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                feedback_repository="upstream/project",
+                feedback_pull_numbers=(7,),
+                feedback_urls=(
+                    "https://github.example.com/upstream/project/pull/8#discussion_r123",
+                ),
+                evidence_hash="d" * 64,
+            )
+
+
+def test_open_and_historical_commits_reject_hardlinked_tracked_files(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    original_run = subprocess.run
+
+    def signing_spy(args: Sequence[str], **kwargs):
+        arguments = tuple(args)
+        if "commit" in arguments and "-S" in arguments:
+            arguments = tuple(
+                "--no-gpg-sign" if value == "-S" else value for value in arguments
+            )
+        if "verify-commit" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        return original_run(arguments, **kwargs)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        outside = tmp_path / "open-hardlink-source.properties"
+        outside.write_text("hello=Здравствуйте\n", encoding="utf-8")
+        target = workspace.path / "i18n/messages_ru.properties"
+        target.unlink()
+        os.link(outside, target)
+
+        with pytest.raises(WorkspaceError, match="hard-linked"):
+            workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                sign=False,
+            )
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+        _process_runner=signing_spy,
+    ) as workspace:
+        outside = tmp_path / "remediation-hardlink-source.properties"
+        outside.write_text("hello=Здравствуйте\n", encoding="utf-8")
+        target = workspace.path / "i18n/messages_ru.properties"
+        target.unlink()
+        os.link(outside, target)
+
+        with pytest.raises(WorkspaceError, match="hard-linked"):
+            workspace.commit_historical_remediation_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                feedback_repository="upstream/project",
+                feedback_pull_numbers=(7,),
+                feedback_urls=(
+                    "https://github.example.com/upstream/project/pull/7#discussion_r123",
+                ),
+                evidence_hash="e" * 64,
+            )
+
+
+def test_remediation_publication_uses_remediation_specific_diagnostics(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        unsigned = CommitResult(
+            commit_sha=head_sha,
+            parent_sha=head_sha,
+            changed_paths=("i18n/messages_ru.properties",),
+            signature_verified=False,
+        )
+
+        with pytest.raises(WorkspaceError, match="unsigned remediation commit") as error:
+            workspace.publish_remediation_branch(
+                unsigned,
+                push_repository="acme/project",
+                branch="guardian/remediation-candidate",
+                branch_prefix="guardian/remediation-",
+                credential_environment=lambda: {},
+                before_push=lambda: None,
+                remote_url=remote.as_uri(),
+                allow_file_remote=True,
+            )
+
+        assert "prevention" not in str(error.value)
 
 
 def test_prevention_commit_rejects_unexpected_staged_deleted_or_hardlinked_paths(

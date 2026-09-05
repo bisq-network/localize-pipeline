@@ -27,6 +27,7 @@ from localize.usage_tracker import DEFAULT_PRICES, UsageTracker
 _LOCAL_PROVIDER_PLACEHOLDER_KEY = "not-needed"
 DEFAULT_MODEL_PROVIDER = "aisuite"
 DEFAULT_AISUITE_PROVIDER = "openai"
+DEFAULT_TRANSLATION_MODEL = "gpt-4o-mini"
 _AISUITE_OPENAI_ONLY_REQUEST_KWARGS = frozenset({
     "reasoning_effort",
     "response_format",
@@ -42,6 +43,9 @@ REASONING_EFFORT_VALUES = frozenset({
 })
 _GPT56_REASONING_EFFORTS = frozenset({
     "none", "low", "medium", "high", "xhigh", "max",
+})
+_GPT6_ASTRA_REASONING_EFFORTS = frozenset({
+    "low", "medium", "high", "xhigh", "max",
 })
 _GPT54_55_REASONING_EFFORTS = frozenset({
     "none", "low", "medium", "high", "xhigh",
@@ -96,6 +100,9 @@ class ChatModelProvider(Protocol):
         locale_codes: Sequence[str],
         translate_model: str,
         review_model: str,
+        review_num_keys: Optional[int] = None,
+        semantic_review_model: Optional[str] = None,
+        semantic_review_num_keys: Optional[int] = None,
         avg_prompt_tokens_per_string: int = 220,
         avg_completion_tokens_per_string: int = 40,
     ) -> CostEstimate:
@@ -135,6 +142,8 @@ def normalize_reasoning_effort(value: Any) -> Optional[str]:
 def _openai_supported_reasoning_efforts(model: str) -> frozenset[str]:
     """Return documented effort values for an OpenAI model family."""
     bare_model = model.split(":", 1)[-1].strip().lower()
+    if bare_model.startswith("gpt-6-astra"):
+        return _GPT6_ASTRA_REASONING_EFFORTS
     if bare_model.startswith("gpt-5.6"):
         return _GPT56_REASONING_EFFORTS
     if bare_model.startswith(("gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro")):
@@ -360,6 +369,9 @@ class OpenAICompatibleProvider:
         locale_codes: Sequence[str],
         translate_model: str,
         review_model: str,
+        review_num_keys: Optional[int] = None,
+        semantic_review_model: Optional[str] = None,
+        semantic_review_num_keys: Optional[int] = None,
         avg_prompt_tokens_per_string: int = 220,
         avg_completion_tokens_per_string: int = 40,
     ) -> CostEstimate:
@@ -368,6 +380,9 @@ class OpenAICompatibleProvider:
             locale_codes=locale_codes,
             translate_model=translate_model,
             review_model=review_model,
+            review_num_keys=review_num_keys,
+            semantic_review_model=semantic_review_model,
+            semantic_review_num_keys=semantic_review_num_keys,
             avg_prompt_tokens_per_string=avg_prompt_tokens_per_string,
             avg_completion_tokens_per_string=avg_completion_tokens_per_string,
             prices=self._prices,

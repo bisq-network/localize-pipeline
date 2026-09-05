@@ -37,6 +37,15 @@ def test_cost_calculation():
 
 def test_default_prices_cover_configured_gpt5_models():
     """The built-in price table covers every supported GPT-5 tier."""
+    assert DEFAULT_PRICES["gpt-6-astra"] == {
+        "input": 10.00,
+        "cached_input": 1.00,
+        "cache_write": 12.50,
+        "output": 50.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    }
     assert DEFAULT_PRICES["gpt-5.6"] == {
         "input": 4.00,
         "cached_input": 0.40,
@@ -192,6 +201,26 @@ def test_gpt56_long_context_pricing_covers_every_tier():
         assert base_cost is not None
         assert long_cost is not None
         assert long_cost > base_cost
+
+
+def test_astra_long_context_pricing_includes_reads_writes_and_output():
+    base_cost = cost_for_tokens(
+        "openai:gpt-6-astra",
+        272_000,
+        100_000,
+        cached_tokens=100_000,
+        cache_write_tokens=50_000,
+    )
+    long_cost = cost_for_tokens(
+        "openai:gpt-6-astra",
+        272_001,
+        100_000,
+        cached_tokens=100_000,
+        cache_write_tokens=50_000,
+    )
+
+    assert base_cost == pytest.approx(6.945)
+    assert long_cost == pytest.approx(11.39002)
 
 
 def test_long_context_pricing_is_applied_per_call_not_aggregate():

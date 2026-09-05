@@ -11,9 +11,11 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import tempfile
 
 from localize.guardian.filesystem_trust import is_trusted_directory
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_executable,
@@ -466,7 +468,10 @@ def _inspect_snapshot(
     public_key: Path,
     expected_fingerprint: str,
     key_type: str,
+    deadline: PollDeadline | None = None,
 ) -> None:
+    timeout = 10.0 if deadline is None else deadline.remaining(10.0)
+    deadline_bound_timeout = deadline is not None and timeout < 10.0
     try:
         completed = run_bounded_process(
             (
@@ -484,11 +489,29 @@ def _inspect_snapshot(
             errors="strict",
             env={"LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
             shell=False,
-            timeout=10,
+            timeout=timeout,
             start_new_session=True,
-            limits=ProcessLimits.for_timeout(10, max_file_size_bytes=1024 * 1024),
+            limits=ProcessLimits.for_timeout(
+                timeout,
+                max_file_size_bytes=1024 * 1024,
+            ),
         )
+    except PollDeadlineExceeded:
+        raise
+    except subprocess.TimeoutExpired:
+        if deadline_bound_timeout:
+            raise PollDeadlineExceeded(
+                "Guardian poll deadline was exceeded."
+            ) from None
+        if deadline is not None:
+            deadline.require_remaining()
+        raise SigningError("SSH public key could not be inspected safely.") from None
     except Exception:
+        if deadline is not None:
+            try:
+                deadline.require_remaining()
+            except PollDeadlineExceeded:
+                raise
         raise SigningError("SSH public key could not be inspected safely.") from None
     output = completed.stdout.strip()
     match = _SSH_KEYGEN_OUTPUT_RE.fullmatch(output)
@@ -510,6 +533,7 @@ def snapshot_ssh_signing_material(
     expected_fingerprint: str,
     signing_program: str,
     temporary_root: str | Path,
+    deadline: PollDeadline | None = None,
 ) -> Iterator[SSHSigningMaterial]:
     """Yield a private, exact-key SSH signing snapshot and trust file."""
 
@@ -554,6 +578,7 @@ def snapshot_ssh_signing_material(
                 public_key=public_key,
                 expected_fingerprint=fingerprint,
                 key_type=key_type,
+                deadline=deadline,
             )
             _write_private_file(
                 allowed_signers,

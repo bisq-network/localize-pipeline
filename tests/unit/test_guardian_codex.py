@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from localize.guardian import codex
+from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.models import CodexAuthMode, FeedbackEvent
 
 
@@ -121,7 +122,7 @@ def test_codex_driver_uses_read_only_contract_and_scrubbed_environment(
         "-c",
         "shell_environment_policy.inherit=none",
         "-c",
-        'model_reasoning_effort="max"',
+        'model_reasoning_effort="high"',
         "-c",
         'default_permissions="guardian_evidence"',
         "-c",
@@ -185,6 +186,154 @@ def test_codex_driver_uses_read_only_contract_and_scrubbed_environment(
     assert result.usage is None
 
 
+def test_codex_driver_clamps_each_attempt_to_the_remaining_poll_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    now = [10.0]
+    observed: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        observed.update(kwargs)
+        _write_result(list(argv), _valid_payload())
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(codex, "run_bounded_process", fake_run)
+    result = codex.CodexDriver(
+        model="gpt-5.6-sol",
+        timeout_seconds=37,
+        deadline=PollDeadline(3, clock=lambda: now[0]),
+    ).run(codex.CodexTask(prompt="review", evidence_dir=evidence_dir))
+
+    assert result.attempts == 1
+    assert observed["timeout"] == 3
+    assert observed["limits"].require_linux_cgroup is True
+
+
+def test_codex_driver_does_not_start_an_attempt_after_poll_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    now = [10.0]
+    calls = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        now[0] = 13.0
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(codex, "run_bounded_process", fake_run)
+    driver = codex.CodexDriver(
+        model="gpt-5.6-sol",
+        timeout_seconds=37,
+        max_attempts=2,
+        deadline=PollDeadline(3, clock=lambda: now[0]),
+    )
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        driver.run(codex.CodexTask(prompt="review", evidence_dir=evidence_dir))
+
+    assert calls == 1
+
+
+def test_codex_driver_cancels_reserved_attempt_if_deadline_expires_before_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    now = [10.0]
+    process_calls = 0
+    phases: list[str] = []
+
+    def forbidden_run(*args, **kwargs):
+        nonlocal process_calls
+        process_calls += 1
+        raise AssertionError("expired attempt must not launch")
+
+    def observe_attempt(attempt, phase, usage):
+        del attempt, usage
+        phases.append(phase)
+        if phase == "started":
+            now[0] = 13.0
+
+    monkeypatch.setattr(codex, "run_bounded_process", forbidden_run)
+    driver = codex.CodexDriver(
+        model="gpt-5.6-sol",
+        deadline=PollDeadline(3, clock=lambda: now[0]),
+    )
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        driver.run(
+            codex.CodexTask(prompt="review", evidence_dir=evidence_dir),
+            attempt_observer=observe_attempt,
+        )
+
+    assert phases == ["started", "not_started"]
+    assert process_calls == 0
+
+
+def test_codex_driver_marks_started_attempt_unknown_on_in_process_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    phases: list[str] = []
+
+    def expired_process(*_args, **_kwargs):
+        raise PollDeadlineExceeded("Guardian poll deadline was exceeded.")
+
+    def observe_attempt(_attempt, phase, _usage):
+        phases.append(phase)
+
+    monkeypatch.setattr(codex, "run_bounded_process", expired_process)
+    driver = codex.CodexDriver(
+        model="gpt-5.6-sol",
+        deadline=PollDeadline(3, clock=lambda: 10.0),
+    )
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        driver.run(
+            codex.CodexTask(prompt="review", evidence_dir=evidence_dir),
+            attempt_observer=observe_attempt,
+        )
+
+    assert phases == ["started", "failed"]
+
+
+def test_codex_driver_promotes_deadline_bound_process_timeout_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    calls = 0
+
+    def timed_out_process(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(codex, "run_bounded_process", timed_out_process)
+    driver = codex.CodexDriver(
+        model="gpt-5.6-sol",
+        timeout_seconds=37,
+        max_attempts=2,
+        deadline=PollDeadline(3, clock=lambda: 10.0),
+    )
+
+    with pytest.raises(PollDeadlineExceeded, match="deadline"):
+        driver.run(codex.CodexTask(prompt="review", evidence_dir=evidence_dir))
+
+    assert calls == 1
+
+
 def test_explicit_codex_key_is_scoped_to_child_and_redacted(tmp_path, monkeypatch):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
@@ -241,6 +390,76 @@ def test_codex_driver_rejects_malformed_or_extra_output(tmp_path, monkeypatch, p
         )
 
     assert calls == 2
+
+
+@pytest.mark.parametrize("oversized_field", ["candidates", "evidence"])
+def test_codex_driver_rejects_recurrence_worksets_above_schema_bound(
+    tmp_path,
+    monkeypatch,
+    oversized_field,
+):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    payload = _valid_payload()
+    candidate = {
+        "scope": "pipeline_code",
+        "summary": "Prevent this review failure from recurring.",
+        "evidence_feedback_ids": ["github:comment:123"],
+    }
+    if oversized_field == "candidates":
+        payload["recurrence_candidates"] = [dict(candidate) for _ in range(101)]
+    else:
+        candidate["evidence_feedback_ids"] = ["github:comment:123"] * 101
+        payload["recurrence_candidates"] = [candidate]
+
+    def fake_run(argv, **_kwargs):
+        _write_result(list(argv), payload)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(codex, "run_bounded_process", fake_run)
+
+    with pytest.raises(codex.CodexOutputError, match="schema"):
+        codex.CodexDriver(model="gpt-5.6-sol").run(
+            codex.CodexTask(prompt="review", evidence_dir=evidence_dir)
+        )
+
+
+def test_codex_driver_accepts_exact_recurrence_schema_bound(tmp_path, monkeypatch):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    payload = _valid_payload()
+    feedback_ids = [f"github:comment:{index}" for index in range(100)]
+    payload["feedback"] = [
+        {
+            "feedback_id": feedback_id,
+            "verdict": "needs_human",
+            "confidence": 0.9,
+            "rationale": "A maintainer must decide this bounded finding.",
+            "replacements": [],
+        }
+        for feedback_id in feedback_ids
+    ]
+    payload["recurrence_candidates"] = [
+        {
+            "scope": "pipeline_code",
+            "summary": f"Bound recurrence candidate {index}",
+            "evidence_feedback_ids": feedback_ids,
+        }
+        for index in range(100)
+    ]
+
+    def fake_run(argv, **_kwargs):
+        _write_result(list(argv), payload)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(codex, "run_bounded_process", fake_run)
+
+    result = codex.CodexDriver(model="gpt-5.6-sol").run(
+        codex.CodexTask(prompt="review", evidence_dir=evidence_dir)
+    )
+
+    assert len(result.recurrence_candidates) == 100
+    assert len(result.recurrence_candidates[0].evidence_feedback_ids) == 100
 
 
 @pytest.mark.parametrize("non_json_number", [float("nan"), float("inf"), -float("inf")])
@@ -394,12 +613,45 @@ def test_codex_driver_does_not_retry_permanent_auth_failures(tmp_path, monkeypat
 
     assert calls == 1
     assert api_key not in str(exc_info.value)
-    assert "[REDACTED_CODEX_API_KEY]" in str(exc_info.value)
+    assert "diagnostic output withheld" in str(exc_info.value)
 
 
-def test_codex_driver_does_not_retry_exhausted_plan_allowance(
-    tmp_path, monkeypatch
-):
+@pytest.mark.parametrize(
+    ("secret", "diagnostic"),
+    (
+        (
+            'sk-quoted-"-backslash-\\-snow-雪',
+            '{"error":"sk-quoted-\\"-backslash-\\\\-snow-\\u96ea"}',
+        ),
+        ("sk-provider/a+b", '{"error":"sk-provider\\/a+b"}'),
+        ("sk-雪", '{"error":"sk-\\u96EA"}'),
+        (
+            'sk-"\\tail',
+            '{"outer":"{\\"error\\":\\"sk-\\\\\\"\\\\\\\\tail\\"}"}',
+        ),
+    ),
+)
+def test_codex_diagnostic_redaction_withholds_all_credential_output_forms(
+    secret: str,
+    diagnostic: str,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        ("codex",),
+        1,
+        stdout=diagnostic,
+        stderr="",
+    )
+
+    detail = codex._redacted_detail(  # noqa: SLF001
+        completed,
+        {"CODEX_API_KEY": secret},
+    )
+
+    assert detail == "diagnostic output withheld because a model credential was present"
+    assert diagnostic not in detail
+
+
+def test_codex_driver_does_not_retry_exhausted_plan_allowance(tmp_path, monkeypatch):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
     calls = 0

@@ -178,6 +178,54 @@ runs:
         set -euo pipefail
         bash -lc "$PLUGIN_INSTALL_COMMAND"
 
+    - name: Validate Action workspace scope
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
+        LOCALIZE_ACTION_WORKSPACE: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        from pathlib import Path
+        import os
+
+        import yaml
+
+        workspace = Path(os.environ["LOCALIZE_ACTION_WORKSPACE"]).resolve()
+        config_path = Path(os.environ["TRANSLATOR_CONFIG_FILE"]).resolve()
+        try:
+            config_path.relative_to(workspace)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Configured config file '{config_path}' must be inside "
+                f"the GitHub workspace '{workspace}'."
+            ) from exc
+
+        raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        repo_root = Path(str(raw_config.get("target_project_root") or ".")).expanduser()
+        if not repo_root.is_absolute():
+            repo_root = config_path.parent / repo_root
+        repo_root = repo_root.resolve()
+        if repo_root != workspace:
+            raise SystemExit(
+                f"Configured target_project_root '{repo_root}' must resolve exactly "
+                f"to the GitHub workspace '{workspace}' for Action execution."
+            )
+
+        input_folder = Path(str(raw_config.get("input_folder") or ".")).expanduser()
+        if not input_folder.is_absolute():
+            input_folder = repo_root / input_folder
+        input_folder = input_folder.resolve()
+        try:
+            input_folder.relative_to(repo_root)
+        except ValueError as exc:
+            raise SystemExit(
+                f"Configured input_folder '{input_folder}' must be inside "
+                f"target_project_root '{repo_root}' for Action execution."
+            ) from exc
+        PY
+
     - name: Check localization setup
       shell: bash
       working-directory: ${{ github.workspace }}
@@ -259,6 +307,10 @@ runs:
         TRANSLATOR_CONFIG_FILE: ${{ github.workspace }}/${{ inputs.config-file }}
         ACTION_QUALITY_REPORT_DIR: ${{ github.action_path }}/logs
         LOCALIZE_ACTION_WORKSPACE: ${{ github.workspace }}
+        LOCALIZE_OPENAI_API_KEY_INPUT: ${{ inputs.openai-api-key }}
+        LOCALIZE_API_BASE_URL_INPUT: ${{ inputs.api-base-url }}
+        LOCALIZE_REVIEW_MODEL_INPUT: ${{ inputs.review-model }}
+        LOCALIZE_DRY_RUN: ${{ inputs.dry-run }}
         LOCALIZE_PLUGIN_MODULES: ${{ inputs.plugin-modules }}
       run: |
         set -euo pipefail
@@ -287,13 +339,11 @@ runs:
         if not repo_root.is_absolute():
             repo_root = config_dir / repo_root
         repo_root = repo_root.resolve()
-        try:
-            repo_root.relative_to(workspace)
-        except ValueError as exc:
+        if repo_root != workspace:
             raise SystemExit(
-                f"Configured target_project_root '{repo_root}' must be inside "
-                f"the GitHub workspace '{workspace}' for Action publication."
-            ) from exc
+                f"Configured target_project_root '{repo_root}' must resolve exactly "
+                f"to the GitHub workspace '{workspace}' for Action publication."
+            )
 
         input_folder = Path(str(raw_config.get("input_folder") or ".")).expanduser()
         if not input_folder.is_absolute():
@@ -363,6 +413,31 @@ runs:
         fi
 
         mkdir -p "$ACTION_QUALITY_REPORT_DIR"
+        if [ -n "${LOCALIZE_OPENAI_API_KEY_INPUT:-}" ]; then
+          export OPENAI_API_KEY="$LOCALIZE_OPENAI_API_KEY_INPUT"
+        else
+          unset OPENAI_API_KEY
+        fi
+        if [ -n "${LOCALIZE_API_BASE_URL_INPUT:-}" ]; then
+          export OPENAI_BASE_URL="$LOCALIZE_API_BASE_URL_INPUT"
+        else
+          unset OPENAI_BASE_URL
+        fi
+        if [ -n "${LOCALIZE_REVIEW_MODEL_INPUT:-}" ]; then
+          export REVIEW_MODEL_NAME="$LOCALIZE_REVIEW_MODEL_INPUT"
+        else
+          unset REVIEW_MODEL_NAME
+        fi
+        python -m localize.translation_semantic_reviewer \
+          --repo-root "$repo_root" \
+          --input-folder "$input_folder" \
+          --config "$TRANSLATOR_CONFIG_FILE" \
+          --validation-summary "$ACTION_QUALITY_REPORT_DIR/translation_validation_summary.json" \
+          --token-usage-summary "$ACTION_QUALITY_REPORT_DIR/token_usage_summary.json" \
+          --changed-files "${changed_files[@]}"
+        git add -- "${changed_files[@]}"
+        unset OPENAI_API_KEY LOCALIZE_OPENAI_API_KEY_INPUT
+
         python -m localize.cli quality-gate \
           --repo-root "$repo_root" \
           --input-folder "$input_folder" \

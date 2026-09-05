@@ -1,8 +1,10 @@
 # GitHub Action
 
 Use the composite action when you want translation PRs from normal CI. The action
-installs the pipeline, runs `localize check`, runs `localize run`, commits
-changed localization files, and opens a pull request with the workflow token.
+installs the pipeline, runs `localize check`, runs `localize run`, stages the
+changed localization files, runs any enabled semantic review, enforces the
+deterministic quality gate, commits the result, and opens a pull request with the
+workflow token.
 
 ## Minimal Workflow
 

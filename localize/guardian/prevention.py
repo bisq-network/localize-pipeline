@@ -20,6 +20,7 @@ import stat
 from typing import Iterable, Mapping, Sequence
 import unicodedata
 
+from localize.guardian.deadline import PollDeadline
 from localize.guardian.path_globs import matches_any_path_glob
 
 
@@ -44,6 +45,21 @@ _ALLOWED_TEXT_CONTROLS = frozenset("\t\n\r\f")
 _DEFAULT_MAX_CHANGED_BYTES = 256 * 1024
 _MAX_ROOT_CAUSE_LENGTH = 500
 _MAX_FEEDBACK_IDS = 100
+_MAX_PATH_GLOBS = 100
+_MAX_CHANGED_FILES = 100
+_MAX_ARGV_ITEMS = 256
+_MAX_FOCUSED_TEST_COMMANDS = 64
+_MAX_TEST_RESULT_RECORDS = _MAX_FOCUSED_TEST_COMMANDS * 2
+_MAX_ARGUMENT_BYTES = 4096
+_MAX_TITLE_CHARS = 120
+_MAX_TITLE_BYTES = 256
+_MAX_BODY_BYTES = 60 * 1024
+_MAX_BODY_LIST_BYTES = 16 * 1024
+_MAX_RENDERED_ARGV_BYTES = 4096
+# Full-tree inspection stays finite before tighter changed-file limits apply.
+_MAX_INVENTORY_ENTRIES = 100_000
+_MAX_INVENTORY_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_INVENTORY_FILE_BYTES = 256 * 1024 * 1024
 
 
 class PreventionPolicyError(ValueError):
@@ -77,12 +93,13 @@ def _executable_name(value: str) -> str:
 
 
 def _validate_argv(argv: object) -> tuple[str, ...]:
-    if not isinstance(argv, tuple) or not argv:
+    if not isinstance(argv, tuple) or not 1 <= len(argv) <= _MAX_ARGV_ITEMS:
         raise ValueError("test command argv must be a non-empty tuple of strings")
     for argument in argv:
         if (
             not isinstance(argument, str)
             or not argument
+            or len(argument.encode("utf-8")) > _MAX_ARGUMENT_BYTES
             or any(
                 unicodedata.category(character).startswith("C")
                 for character in argument
@@ -186,9 +203,16 @@ class _TreeEntry:
     path: Path
 
 
-def _validate_limit(value: object, *, label: str) -> int:
+def _validate_limit(
+    value: object,
+    *,
+    label: str,
+    maximum: int | None = None,
+) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise PreventionPolicyError(f"{label} must be a positive integer")
+    if maximum is not None and value > maximum:
+        raise PreventionPolicyError(f"{label} exceeds the bound {maximum}")
     return value
 
 
@@ -242,7 +266,14 @@ def _safe_relative_path(parts: tuple[str, ...]) -> str:
     return relative
 
 
-def _digest_regular_file(path: Path, expected_metadata: os.stat_result) -> str:
+def _digest_regular_file(
+    path: Path,
+    expected_metadata: os.stat_result,
+    *,
+    deadline: PollDeadline | None = None,
+) -> str:
+    if deadline is not None:
+        deadline.require_remaining()
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -267,28 +298,51 @@ def _digest_regular_file(path: Path, expected_metadata: os.stat_result) -> str:
                 "repository file changed while it was inspected"
             )
         while chunk := os.read(descriptor, 64 * 1024):
+            if deadline is not None:
+                deadline.require_remaining()
             digest.update(chunk)
     finally:
         os.close(descriptor)
     return digest.hexdigest()
 
 
-def _inventory(root: Path) -> dict[str, _TreeEntry]:
+def _inventory(
+    root: Path,
+    *,
+    deadline: PollDeadline | None = None,
+) -> dict[str, _TreeEntry]:
     result: dict[str, _TreeEntry] = {}
     pending: list[tuple[Path, tuple[str, ...]]] = [(root, ())]
+    entries_seen = 0
+    bytes_seen = 0
     while pending:
+        if deadline is not None:
+            deadline.require_remaining()
         directory, parent_parts = pending.pop()
         try:
-            entries = sorted(os.scandir(directory), key=lambda item: item.name)
+            entries = []
+            with os.scandir(directory) as scanner:
+                for entry in scanner:
+                    if deadline is not None:
+                        deadline.require_remaining()
+                    if not parent_parts and entry.name == ".git":
+                        continue
+                    entries_seen += 1
+                    if entries_seen > _MAX_INVENTORY_ENTRIES:
+                        raise PreventionPolicyError(
+                            "workspace exceeds the inventory entry bound"
+                        )
+                    entries.append(entry)
+            entries.sort(key=lambda item: item.name)
         except OSError as exc:
             raise PreventionPolicyError(
                 "workspace could not be inspected safely"
             ) from exc
         for entry in entries:
+            if deadline is not None:
+                deadline.require_remaining()
             parts = (*parent_parts, entry.name)
             relative = _safe_relative_path(parts)
-            if relative == ".git":
-                continue
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError as exc:
@@ -297,6 +351,15 @@ def _inventory(root: Path) -> dict[str, _TreeEntry]:
                 ) from exc
             entry_path = Path(entry.path)
             permissions = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                bytes_seen += metadata.st_size
+            if bytes_seen > _MAX_INVENTORY_BYTES or (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size > _MAX_INVENTORY_FILE_BYTES
+            ):
+                raise PreventionPolicyError(
+                    "workspace exceeds the inventory file or byte bound"
+                )
             if stat.S_ISDIR(metadata.st_mode):
                 result[relative] = _TreeEntry(
                     kind="directory",
@@ -315,7 +378,11 @@ def _inventory(root: Path) -> dict[str, _TreeEntry]:
                     kind="regular",
                     size=metadata.st_size,
                     mode=permissions,
-                    digest=_digest_regular_file(entry_path, metadata),
+                    digest=_digest_regular_file(
+                        entry_path,
+                        metadata,
+                        deadline=deadline,
+                    ),
                     path=entry_path,
                 )
             elif stat.S_ISLNK(metadata.st_mode):
@@ -362,9 +429,13 @@ def _entry_changed(before: _TreeEntry | None, after: _TreeEntry | None) -> bool:
 def _changed_entries(
     before: dict[str, _TreeEntry],
     after: dict[str, _TreeEntry],
+    *,
+    deadline: PollDeadline | None = None,
 ) -> dict[str, tuple[_TreeEntry | None, _TreeEntry | None]]:
     result: dict[str, tuple[_TreeEntry | None, _TreeEntry | None]] = {}
     for path in sorted(set(before) | set(after)):
+        if deadline is not None:
+            deadline.require_remaining()
         base_entry = before.get(path)
         candidate_entry = after.get(path)
         if (
@@ -385,11 +456,16 @@ def _changed_entries(
 def _validate_globs(values: Sequence[str], *, label: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)) or not values:
         raise PreventionPolicyError(f"{label} path glob allowlist must not be empty")
+    if len(values) > _MAX_PATH_GLOBS:
+        raise PreventionPolicyError(
+            f"{label} path glob allowlist exceeds its {_MAX_PATH_GLOBS}-item bound"
+        )
     result: list[str] = []
     for value in values:
         if (
             not isinstance(value, str)
             or not value
+            or len(value.encode("utf-8")) > _MAX_ARGUMENT_BYTES
             or "\\" in value
             or "\x00" in value
             or value.startswith("/")
@@ -398,6 +474,13 @@ def _validate_globs(values: Sequence[str], *, label: str) -> tuple[str, ...]:
                 unicodedata.category(character).startswith("C") for character in value
             )
         ):
+            if (
+                isinstance(value, str)
+                and len(value.encode("utf-8")) > _MAX_ARGUMENT_BYTES
+            ):
+                raise PreventionPolicyError(
+                    f"{label} path glob exceeds {_MAX_ARGUMENT_BYTES} UTF-8 bytes"
+                )
             raise PreventionPolicyError(f"{label} path glob is unsafe")
         parts = value.split("/")
         if any(part in {"", ".", ".."} for part in parts) or parts[0] == ".git":
@@ -412,7 +495,13 @@ def _matches(path: str, patterns: Sequence[str]) -> bool:
     return matches_any_path_glob(path, patterns)
 
 
-def _read_changed_text(entry: _TreeEntry) -> None:
+def _read_changed_text(
+    entry: _TreeEntry,
+    *,
+    deadline: PollDeadline | None = None,
+) -> None:
+    if deadline is not None:
+        deadline.require_remaining()
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -428,6 +517,8 @@ def _read_changed_text(entry: _TreeEntry) -> None:
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != entry.size:
             raise PreventionPolicyError("changed file changed while it was validated")
         while chunk := os.read(descriptor, 64 * 1024):
+            if deadline is not None:
+                deadline.require_remaining()
             chunks.append(chunk)
     finally:
         os.close(descriptor)
@@ -531,6 +622,10 @@ def _regression_evidence(
         raise PreventionPolicyError(
             "focused regression evidence must have failed on the exact base SHA"
         )
+    if len(supplied) > _MAX_TEST_RESULT_RECORDS:
+        raise PreventionPolicyError(
+            "focused regression evidence exceeds its bounded result count"
+        )
 
     seen: set[tuple[str, tuple[str, ...]]] = set()
     candidate_shas: set[str] = set()
@@ -590,24 +685,38 @@ def _regression_evidence(
         raise PreventionPolicyError(
             "regression evidence must use the same focused argv on base and patch"
         )
+    if len(matched) > _MAX_FOCUSED_TEST_COMMANDS:
+        raise PreventionPolicyError(
+            "focused regression command count exceeds its bound"
+        )
     return next(iter(candidate_shas)), matched, next(iter(overlay_hashes))
 
 
 def _patch_hash(
     changes: dict[str, tuple[_TreeEntry | None, _TreeEntry | None]],
+    *,
+    deadline: PollDeadline | None = None,
 ) -> str:
-    canonical = [
-        {
-            "after": None
-            if after is None
-            else [after.kind, after.size, bool(after.mode & 0o111), after.digest],
-            "before": None
-            if before is None
-            else [before.kind, before.size, bool(before.mode & 0o111), before.digest],
-            "path": path,
-        }
-        for path, (before, after) in changes.items()
-    ]
+    canonical = []
+    for path, (before, after) in changes.items():
+        if deadline is not None:
+            deadline.require_remaining()
+        canonical.append(
+            {
+                "after": None
+                if after is None
+                else [after.kind, after.size, bool(after.mode & 0o111), after.digest],
+                "before": None
+                if before is None
+                else [
+                    before.kind,
+                    before.size,
+                    bool(before.mode & 0o111),
+                    before.digest,
+                ],
+                "path": path,
+            }
+        )
     return hashlib.sha256(
         json.dumps(
             canonical,
@@ -621,9 +730,13 @@ def _patch_hash(
 def _overlay_hash(
     test_paths: Sequence[str],
     changes: Mapping[str, tuple[_TreeEntry | None, _TreeEntry | None]],
+    *,
+    deadline: PollDeadline | None = None,
 ) -> str:
     canonical = []
     for path in test_paths:
+        if deadline is not None:
+            deadline.require_remaining()
         candidate = changes[path][1]
         if candidate is None:  # pragma: no cover - deletions are rejected first
             raise PreventionPolicyError("test overlay cannot contain a deletion")
@@ -641,10 +754,15 @@ def inspect_prevention_patch(
     allowed_test_path_globs: Sequence[str],
     max_changed_files: int,
     max_changed_bytes: int = _DEFAULT_MAX_CHANGED_BYTES,
+    deadline: PollDeadline | None = None,
 ) -> PreventionPatch:
     """Inspect candidate bytes and scope before exposing a signing credential."""
 
-    file_limit = _validate_limit(max_changed_files, label="changed file limit")
+    file_limit = _validate_limit(
+        max_changed_files,
+        label="changed file limit",
+        maximum=_MAX_CHANGED_FILES,
+    )
     byte_limit = _validate_limit(max_changed_bytes, label="changed byte limit")
     code_globs = _validate_globs(allowed_code_path_globs, label="code")
     test_globs = _validate_globs(allowed_test_path_globs, label="test")
@@ -652,7 +770,11 @@ def inspect_prevention_patch(
     candidate_root = _trusted_workspace(candidate_workspace, label="candidate")
     if _workspaces_overlap(base_root, candidate_root):
         raise PreventionPolicyError("base and candidate workspaces overlap")
-    changes = _changed_entries(_inventory(base_root), _inventory(candidate_root))
+    changes = _changed_entries(
+        _inventory(base_root, deadline=deadline),
+        _inventory(candidate_root, deadline=deadline),
+        deadline=deadline,
+    )
     if not changes:
         raise PreventionPolicyError("prevention draft contains no changed files")
     if len(changes) > file_limit:
@@ -664,6 +786,8 @@ def inspect_prevention_patch(
     code_paths: list[str] = []
     test_paths: list[str] = []
     for path, (base_entry, candidate_entry) in changes.items():
+        if deadline is not None:
+            deadline.require_remaining()
         if base_entry is not None and candidate_entry is None:
             raise PreventionPolicyError(
                 f"prevention draft must not delete repository path {path!r}"
@@ -695,7 +819,7 @@ def inspect_prevention_patch(
                 f"changed content exceeds the {byte_limit}-byte limit"
             )
         for entry in entries:
-            _read_changed_text(entry)
+            _read_changed_text(entry, deadline=deadline)
         if (
             is_code
             and candidate_entry is not None
@@ -721,8 +845,12 @@ def inspect_prevention_patch(
     return PreventionPatch(
         paths=tuple(changes),
         test_paths=sorted_test_paths,
-        patch_hash=_patch_hash(changes),
-        test_overlay_hash=_overlay_hash(sorted_test_paths, changes),
+        patch_hash=_patch_hash(changes, deadline=deadline),
+        test_overlay_hash=_overlay_hash(
+            sorted_test_paths,
+            changes,
+            deadline=deadline,
+        ),
     )
 
 
@@ -740,6 +868,99 @@ def _code(value: str) -> str:
     return f"<code>{escaped}</code>"
 
 
+def _truncate_utf8(
+    value: str,
+    *,
+    max_bytes: int,
+    max_chars: int,
+    suffix: str = "…",
+) -> str:
+    """Truncate at a Unicode boundary while satisfying both public limits."""
+
+    if len(value) <= max_chars and len(value.encode("utf-8")) <= max_bytes:
+        return value
+    suffix_bytes = len(suffix.encode("utf-8"))
+    if len(suffix) > max_chars or suffix_bytes > max_bytes:
+        raise PreventionPolicyError("generated text suffix exceeds its byte bound")
+    candidate = value[: max_chars - len(suffix)]
+    byte_budget = max_bytes - suffix_bytes
+    low = 0
+    high = len(candidate)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(candidate[:midpoint].encode("utf-8")) <= byte_budget:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return candidate[:low].rstrip() + suffix
+
+
+def _sequence_fingerprint(values: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _bounded_code_list(values: Sequence[str], *, max_bytes: int) -> str:
+    """Render complete list items and summarize any omitted tail deterministically."""
+
+    rendered = tuple(f"- {_code(value)}" for value in values)
+    complete = "\n".join(rendered)
+    if len(complete.encode("utf-8")) <= max_bytes:
+        return complete
+
+    fingerprint = _sequence_fingerprint(values)
+    selected: list[str] = []
+    selected_bytes = 0
+    for index, line in enumerate(rendered):
+        omitted = len(rendered) - index - 1
+        omission = (
+            f"- {omitted} additional item(s) omitted; full-list fingerprint: "
+            f"{_code(fingerprint)}"
+        )
+        separator_bytes = 1 if selected else 0
+        projected = (
+            selected_bytes
+            + separator_bytes
+            + len(line.encode("utf-8"))
+            + 1
+            + len(omission.encode("utf-8"))
+        )
+        if projected > max_bytes:
+            break
+        selected.append(line)
+        selected_bytes += separator_bytes + len(line.encode("utf-8"))
+
+    omitted = len(rendered) - len(selected)
+    omission = (
+        f"- {omitted} additional item(s) omitted; full-list fingerprint: "
+        f"{_code(fingerprint)}"
+    )
+    result = "\n".join((*selected, omission))
+    if len(result.encode("utf-8")) > max_bytes:  # pragma: no cover - fixed text
+        raise PreventionPolicyError("generated list summary exceeds its byte bound")
+    return result
+
+
+def _argv_display(argv: tuple[str, ...]) -> str:
+    rendered = json.dumps(list(argv), ensure_ascii=True)
+    if len(rendered.encode("utf-8")) <= _MAX_RENDERED_ARGV_BYTES:
+        return rendered
+    executable = _truncate_utf8(
+        argv[0],
+        max_bytes=512,
+        max_chars=512,
+    )
+    return (
+        f"{json.dumps([executable], ensure_ascii=True)}; "
+        f"{len(argv) - 1} additional argument(s) omitted; argv fingerprint: "
+        f"{_sequence_fingerprint(argv)}"
+    )
+
+
 def _draft_text(
     *,
     root_cause: str,
@@ -752,16 +973,21 @@ def _draft_text(
     focused_argv: Sequence[tuple[str, ...]],
 ) -> tuple[str, str]:
     title_prefix = "Prevent recurrence: "
-    maximum_summary = 120 - len(title_prefix)
-    summary = root_cause.replace("@", "＠")
-    if len(summary) > maximum_summary:
-        summary = summary[: maximum_summary - 1].rstrip() + "…"
+    summary = _truncate_utf8(
+        root_cause.replace("@", "＠"),
+        max_bytes=_MAX_TITLE_BYTES - len(title_prefix.encode("utf-8")),
+        max_chars=_MAX_TITLE_CHARS - len(title_prefix),
+    )
     title = title_prefix + summary
 
-    feedback_lines = "\n".join(f"- {_code(value)}" for value in feedback_ids)
-    path_lines = "\n".join(f"- {_code(value)}" for value in paths)
-    command_lines = "\n".join(
-        f"- {_code(json.dumps(list(argv), ensure_ascii=True))}" for argv in focused_argv
+    feedback_lines = _bounded_code_list(
+        feedback_ids,
+        max_bytes=_MAX_BODY_LIST_BYTES,
+    )
+    path_lines = _bounded_code_list(paths, max_bytes=_MAX_BODY_LIST_BYTES)
+    command_lines = _bounded_code_list(
+        tuple(_argv_display(argv) for argv in focused_argv),
+        max_bytes=_MAX_BODY_LIST_BYTES,
     )
     body = (
         "## Localize Guardian prevention draft\n\n"
@@ -781,6 +1007,10 @@ def _draft_text(
         "state and publish only this signed candidate. The Guardian cannot merge or "
         "deploy prevention drafts.\n"
     )
+    if len(title.encode("utf-8")) > _MAX_TITLE_BYTES:  # pragma: no cover - helper
+        raise PreventionPolicyError("generated title exceeds its byte bound")
+    if len(body.encode("utf-8")) > _MAX_BODY_BYTES:
+        raise PreventionPolicyError("generated body exceeds its byte bound")
     return title, body
 
 
@@ -797,6 +1027,7 @@ def plan_prevention_draft(
     test_results: Iterable[TestCommandResult],
     max_changed_bytes: int = _DEFAULT_MAX_CHANGED_BYTES,
     known_evidence_hashes: Iterable[str] = (),
+    deadline: PollDeadline | None = None,
 ) -> DraftPreventionPlan:
     """Validate and describe a candidate prevention patch without mutating state.
 
@@ -831,6 +1062,7 @@ def plan_prevention_draft(
         allowed_test_path_globs=allowed_test_path_globs,
         max_changed_files=max_changed_files,
         max_changed_bytes=max_changed_bytes,
+        deadline=deadline,
     )
     if test_overlay_hash != patch.test_overlay_hash:
         raise PreventionPolicyError(

@@ -88,6 +88,8 @@ LOCALIZATION_SCHEMA = {
     "type": "object",
     "additionalProperties": {"type": "string"},
 }
+HOLISTIC_REVIEW_CONTEXT_MAX_KEYS = 24
+HOLISTIC_REVIEW_CONTEXT_MAX_UTF8_BYTES = 16 * 1024
 
 # Extract configuration values for convenience
 PROJECT_ROOT_DIR = config.project_root
@@ -97,6 +99,8 @@ GLOSSARY_FILE_PATH = config.glossary_file_path
 MODEL_NAME = config.model_name
 REVIEW_MODEL_NAME = config.review_model_name
 REVIEW_REASONING_EFFORT = config.review_reasoning_effort
+SEMANTIC_REVIEW_ENABLED = config.semantic_review_enabled
+SEMANTIC_REVIEW_MODEL_NAME = config.semantic_review_model_name
 MAX_MODEL_TOKENS = config.max_model_tokens
 DRY_RUN = config.dry_run
 PROCESS_ALL_FILES = config.process_all_files
@@ -214,6 +218,58 @@ def compute_ledger_hash(value: Optional[str]) -> str:
     """Compute a stable hash for ledger comparisons."""
     normalized = normalize_value(value)
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+
+def _ledger_verified_existing_translation(
+        key: str,
+        source_translations: Mapping[str, str],
+        existing_translations: Mapping[str, str],
+        file_ledger_entries: Mapping[str, Mapping[str, str]],
+) -> Optional[str]:
+    source_value = source_translations.get(key)
+    existing_value = existing_translations.get(key)
+    ledger_entry = file_ledger_entries.get(key)
+    if (
+            isinstance(source_value, str)
+            and isinstance(existing_value, str)
+            and existing_value.strip()
+            and normalize_value(existing_value) != normalize_value(source_value)
+            and isinstance(ledger_entry, Mapping)
+            and ledger_entry.get("source_hash") == compute_ledger_hash(source_value)
+            and ledger_entry.get("target_hash") == compute_ledger_hash(existing_value)
+    ):
+        return existing_value
+    return None
+
+
+def prefer_existing_translation_on_failure(
+        results: List[Tuple[int, str, bool]],
+        keys_to_translate: List[str],
+        source_translations: Mapping[str, str],
+        existing_translations: Mapping[str, str],
+        file_ledger_entries: Mapping[str, Mapping[str, str]],
+) -> List[Tuple[int, str, bool]]:
+    """Keep a verified current-source translation when a model call fails.
+
+    A prior target is safe to reuse only when the ledger binds both its source
+    and target hashes to the values still on disk.  This avoids restoring a
+    stale translation after the source changed or after an unrecorded target
+    edit.  The failure flag remains false so the key is retried and never seeds
+    translation memory.
+    """
+    repaired: List[Tuple[int, str, bool]] = []
+    for position, value, succeeded in results:
+        if not succeeded and 0 <= position < len(keys_to_translate):
+            existing_value = _ledger_verified_existing_translation(
+                keys_to_translate[position],
+                source_translations,
+                existing_translations,
+                file_ledger_entries,
+            )
+            if existing_value is not None:
+                value = existing_value
+        repaired.append((position, value, succeeded))
+    return repaired
 
 
 def translation_memory_context_fingerprint(
@@ -743,6 +799,76 @@ def _shared_key_prefix_length(key_a: str, key_b: str) -> int:
             break
         shared += 1
     return shared
+
+
+def _select_holistic_review_context_keys(
+        source_translations: Mapping[str, str],
+        translated_translations: Mapping[str, str],
+        keys_to_review: List[str],
+        localization_format: LocalizationFormat,
+        *,
+        excluded_context_keys: Optional[Set[str]] = None,
+        max_context_keys: int = HOLISTIC_REVIEW_CONTEXT_MAX_KEYS,
+        max_context_utf8_bytes: int = HOLISTIC_REVIEW_CONTEXT_MAX_UTF8_BYTES,
+) -> List[str]:
+    """Select bounded, read-only sibling terminology context for review.
+
+    Only established localized values are useful as terminology evidence;
+    callers exclude every key newly translated in the current run so an
+    unreviewed draft from another chunk cannot become terminology authority.
+    Candidates are ordered by their strongest shared dotted-key prefix with a
+    reviewed key, with target-file order breaking ties. The byte limit covers
+    the serialized source and target context excerpts together.
+    """
+    reviewed_keys = list(dict.fromkeys(keys_to_review))
+    excluded_key_set = set(excluded_context_keys or ())
+    excluded_key_set.update(reviewed_keys)
+    if not reviewed_keys or max_context_keys <= 0 or max_context_utf8_bytes <= 0:
+        return []
+
+    ranked_candidates: List[Tuple[int, int, str]] = []
+    for file_order, (key, target_value) in enumerate(translated_translations.items()):
+        if key in excluded_key_set:
+            continue
+        source_value = source_translations.get(key)
+        if (
+                not isinstance(source_value, str)
+                or not source_value.strip()
+                or not isinstance(target_value, str)
+                or not target_value.strip()
+                or normalize_value(source_value) == normalize_value(target_value)
+        ):
+            continue
+        strongest_prefix = max(
+            _shared_key_prefix_length(key, reviewed_key)
+            for reviewed_key in reviewed_keys
+        )
+        if strongest_prefix < 1:
+            continue
+        ranked_candidates.append((strongest_prefix, file_order, key))
+
+    ranked_candidates.sort(key=lambda item: (-item[0], item[1]))
+    adapter = get_localization_adapter(localization_format)
+    selected: List[str] = []
+    for _prefix_length, _file_order, key in ranked_candidates:
+        if len(selected) >= max_context_keys:
+            break
+        candidate_keys = [*selected, key]
+        source_context = adapter.build_review_content(
+            source_translations,
+            candidate_keys,
+        )
+        target_context = adapter.build_review_content(
+            translated_translations,
+            candidate_keys,
+        )
+        context_size = len(source_context.encode("utf-8")) + len(
+            target_context.encode("utf-8")
+        )
+        if context_size > max_context_utf8_bytes:
+            continue
+        selected.append(key)
+    return selected
 
 
 def build_context(
@@ -1524,7 +1650,7 @@ def _build_holistic_review_system_prompt(
     glossary_section = glossary_heading + glossary_rules + "\n\n" if glossary_rules else ""
 
     return f"""
-You are a lead editor and quality assurance specialist for software localization. Your task is to review a list of newly translated keys within a {localization_format.display_name} file for {target_language}. You are given the full source and translated files for context, but you MUST only review and return the keys specified.
+You are a lead editor and quality assurance specialist for software localization. Your task is to review a list of newly translated keys within a {localization_format.display_name} file for {target_language}. You are given source and translated excerpts containing every requested key and, when available, related read-only context keys. You MUST only review and return the keys specified.
 
 **Critical Instructions**:
 1.  **Strictly Limited Scope**: Review every item below. The left side is an opaque item ID; the right side is the source localization key used to find its values in the supplied files.
@@ -1538,9 +1664,10 @@ You are a lead editor and quality assurance specialist for software localization
     - These tokens are automatically managed by the system
 3.  **CRITICAL - Translate ALL Other Text**: You MUST ensure that ALL regular text (text that is NOT a placeholder token) is properly translated, even if it appears between, before, or after placeholder tokens. Do not leave any translatable text untranslated just because it is near placeholders.
 4.  **Apply All Quality Rules**: Meticulously apply the language-specific quality checklist to every key in your scope.
-5.  **Preserve Format Semantics**: Return plain translated string values. The system will serialize and escape values according to the target localization format. For Java `MessageFormat` strings, return single quotes (') as literal characters; the system handles required escaping.
-6.  **Output JSON Only**: Your final output **must** be a single, valid JSON object that adheres to the required schema. Return every opaque item ID listed in the "Strictly Limited Scope" section exactly once, with its final corrected translation as the value. JSON property names MUST be the opaque item IDs, never the source localization keys.
-7.  **Do Not Add Explanations**: Do not output any text, markdown, or explanations before or after the JSON object.
+5.  **Consistent UI Terminology**: Use the provided translated context. Related keys that refer to the same concept or control, including keys with a shared dotted prefix, MUST use the same established term. Context keys outside the requested scope are read-only: never edit or return them.
+6.  **Preserve Format Semantics**: Return plain translated string values. The system will serialize and escape values according to the target localization format. For Java `MessageFormat` strings, return single quotes (') as literal characters; the system handles required escaping.
+7.  **Output JSON Only**: Your final output **must** be a single, valid JSON object that adheres to the required schema. Return every opaque item ID listed in the "Strictly Limited Scope" section exactly once, with its final corrected translation as the value. JSON property names MUST be the opaque item IDs, never the source localization keys.
+8.  **Do Not Add Explanations**: Do not output any text, markdown, or explanations before or after the JSON object.
 
 {glossary_section}{style_rules_text}
 
@@ -1594,14 +1721,14 @@ def _build_holistic_review_user_prompt(
     return f"""
 
 **Review Request**:
-Return a JSON object containing the fully corrected translations for the following files.
+Return a JSON object containing the fully corrected translations for the requested items in the following excerpts.
 
-**Source (English) File**:
+**Source (English) Context**:
 ```{localization_format.code_fence}
 {source_content}
 ```
 
-**Translated ({target_language}) File to Review**:
+**Translated ({target_language}) Context**:
 ```{localization_format.code_fence}
 {translated_content}
 ```
@@ -1658,13 +1785,11 @@ async def holistic_review_async(
         translation_glossary: Optional[Mapping[str, str]] = None,
         translation_glossary_enforcement: str = "exact",
 ) -> Optional[Dict[str, str]]:
-    """
-    Performs a holistic review of an entire translated file and returns corrections
-    as a JSON object.
+    """Review a bounded localization excerpt and return scoped corrections.
 
     Args:
-        source_content (str): The source localization content for the scoped keys.
-        translated_content (str): The draft translated localization content for the scoped keys.
+        source_content (str): Source content for requested and context keys.
+        translated_content (str): Draft content for requested and context keys.
         target_language (str): The target language of the translation.
         keys_to_review (List[str]): The specific list of keys to review and return.
         semaphore (asyncio.Semaphore): For concurrency control.
@@ -2575,6 +2700,13 @@ async def process_translation_queue(
                 locale_codes=[language_code],
                 translate_model=MODEL_NAME,
                 review_model=REVIEW_MODEL_NAME,
+                review_num_keys=len(keys_to_translate),
+                semantic_review_model=(
+                    SEMANTIC_REVIEW_MODEL_NAME if SEMANTIC_REVIEW_ENABLED else None
+                ),
+                semantic_review_num_keys=(
+                    len(keys_to_translate) if SEMANTIC_REVIEW_ENABLED else None
+                ),
             )
             logger.info("Pre-run estimate for '%s':", translation_file)
             for line in provider.format_estimate(file_estimate).splitlines():
@@ -2632,6 +2764,13 @@ async def process_translation_queue(
                     texts_to_translate[position] if position < len(texts_to_translate) else "",
                 )
                 results.append((position, fallback_text, False))
+            results = prefer_existing_translation_on_failure(
+                results,
+                keys_to_translate,
+                source_translations,
+                original_target_translations,
+                file_ledger_entries,
+            )
             results.sort(key=lambda x: x[0])
             translations = [result for _, result, _ in results]
             model_failed_keys = {
@@ -2640,10 +2779,27 @@ async def process_translation_queue(
                 if not succeeded and position < len(keys_to_translate)
             }
             if model_failed_keys:
+                preserved_existing_keys = {
+                    keys_to_translate[position]
+                    for position, _result, succeeded in results
+                    if (
+                        not succeeded
+                        and position < len(keys_to_translate)
+                        and _ledger_verified_existing_translation(
+                            keys_to_translate[position],
+                            source_translations,
+                            original_target_translations,
+                            file_ledger_entries,
+                        )
+                        is not None
+                    )
+                }
                 logger.warning(
-                    "Model translation failed for %d key(s) in '%s'; keeping source fallback and marking failed.",
+                    "Model translation failed for %d key(s) in '%s'; preserved %d ledger-verified existing translation(s), used the current source fallback for %d, and marked all failed for retry.",
                     len(model_failed_keys),
                     translation_file,
+                    len(preserved_existing_keys),
+                    len(model_failed_keys) - len(preserved_existing_keys),
                 )
 
             # Integrate initial translations to create a draft file for review
@@ -2686,10 +2842,29 @@ async def process_translation_queue(
                 for i in range(0, len(keys_to_translate), HOLISTIC_REVIEW_CHUNK_SIZE)
             ]
 
+            review_inputs = []
+            newly_translated_keys = set(keys_to_translate)
+            for key_chunk in key_chunks:
+                context_keys = _select_holistic_review_context_keys(
+                    source_translations,
+                    draft_translations,
+                    key_chunk,
+                    localization_format,
+                    excluded_context_keys=newly_translated_keys,
+                )
+                review_content_keys = [*key_chunk, *context_keys]
+                review_inputs.append((key_chunk, review_content_keys))
+
             review_results = await asyncio.gather(
                 *[holistic_review_async(
-                    source_content=adapter.build_review_content(source_translations, key_chunk),
-                    translated_content=adapter.build_review_content(draft_translations, key_chunk),
+                    source_content=adapter.build_review_content(
+                        source_translations,
+                        review_content_keys,
+                    ),
+                    translated_content=adapter.build_review_content(
+                        draft_translations,
+                        review_content_keys,
+                    ),
                     target_language=target_language,
                     keys_to_review=key_chunk,
                     semaphore=semaphore,
@@ -2698,7 +2873,7 @@ async def process_translation_queue(
                     localization_format=localization_format,
                     translation_glossary=language_glossary,
                     translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
-                ) for key_chunk in key_chunks],
+                ) for key_chunk, review_content_keys in review_inputs],
                 return_exceptions=True,
             )
 

@@ -7,9 +7,90 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
-## [0.1.20] - 2026-09-02
+## [0.1.20] - 2026-09-05
+
+### Added
+
+- Add opt-in, per-repository closed pull-request backfill with strict lookback
+  and per-poll bounds, frozen scan windows, append-only per-cycle seen
+  identities, bounded identity-only confirmation traversals, append-only
+  completion checkpoints, and rechecks when relevant policy or
+  localization-config inputs change. Completion requires a quiescent pass, not
+  an atomic GitHub snapshot. A discovery or confirmation traversal that cannot
+  reach the cutoff or list end within 100 pages or 10,000 entries fails visibly;
+  failed hydration gets three immediate attempts before a current-cycle skip
+  and durable priority retry on later polls, including outside the discovery
+  window. The window admits new evidence only;
+  durable pending recovery groups cannot age out and remain subject to exact
+  identity, closed-state, and policy/trust checks.
+- Add optional current-base remediation batches with signed commits in Guardian
+  write modes.
+  Each eligible repository can produce at most one new Guardian-marked draft per
+  poll, subject to a separate global cap that defaults to zero and publication
+  recovery backed by the Guardian's private durable state. Multi-source recovery
+  batches remain grouped and all-or-nothing in local state, while final remote
+  destination and source observations remain sequential. Exact edits are
+  deduplicated across historical evidence, and same-target conflicts or
+  incompatible remote state defer rather than being overwritten. If evidence
+  or the target base moves
+  before a branch-only attempt acquires an exact PR, the local attempt is
+  abandoned, any remote branch is left untouched, and its durable source retry
+  can create a distinct attempt. Unexpected remote identity or content still
+  defers for operator cleanup or an explicit terminal-local skip. Bounded
+  pending recovery deliberately favors publication safety and backlog fairness
+  over automatic liveness.
+- Add append-only correction-PR lifecycle observations and source-to-draft
+  coverage generations. A maintainer-closed, unmerged correction remains
+  deduplication evidence and is not recreated unchanged; merging invalidates
+  its draft-backed coverage so a later independently validated recurrence can
+  produce a new attempt. New policy-digest-bound v2 branch identities prevent
+  changed policy from colliding with old remote branches while migrated v1
+  attempts remain recoverable. The bounded remediation worklist exposes the
+  current canonical PR URL and lifecycle, resolution, branch-identity version,
+  and exact source-to-draft coverage provenance without raw review bodies.
 
 ### Security
+
+- Add matching parser, typed-model, planning, and result-schema bounds for
+  prevention globs, command argv, changed files, recurrence candidates, and
+  evidence IDs. Generated prevention titles and bodies now obey deterministic
+  UTF-8 byte limits and summarize oversized human-facing lists with stable
+  fingerprints.
+- Make `limits.run_timeout_seconds` one monotonic deadline for active work in
+  each Guardian poll, rather than a fresh timeout per repository, page, retry,
+  or subprocess. Setup snapshots, GitHub streaming and pagination, credential
+  helpers, Codex, prevention tests, and Git/workspace operations stop or clamp
+  against the remaining budget. Expiry prevents later repositories and remote
+  mutations while bounded state finalization, process teardown, temporary-file
+  cleanup, and poll-lease release finish safely.
+
+- Treat every closed pull request, historical revision, and old review comment
+  as read-only evidence. Corrections must independently match the exact current
+  base and deterministic localization policy. An authorized, still-valid,
+  uncovered finding is published only through a new draft correction PR with a
+  signed commit and links to its read-only source PR and feedback; the Guardian
+  never reopens, edits, comments on, or merges a closed pull request. An
+  already-fixed or obsolete finding is a terminal no-op; ambiguous or
+  conflicting evidence defers without a write.
+- Pin remediation target, push repository, configured publication actor,
+  authenticated draft author, current base SHA, signed candidate commit, exact
+  draft title, full body including its marker, canonical URL, lifecycle, and
+  literal branch-prefix allowlist before publishing or recovering a
+  human-review draft. A terminal close-unmerged is a human veto; conflicting
+  or mismatching remote state fails closed instead of being overwritten.
+- Authenticate recovered status replies by numeric actor ID/type, exact body,
+  canonical comment URL, and durable publication evidence. Foreign, altered,
+  duplicated, or actor-rotated markers fail closed and cannot spoof completed
+  Guardian work.
+- Require each repository in a Guardian write mode to pin the exact actor that
+  pushes ordinary translation commits and authors status replies, independently
+  of the allowed PR authors. Authenticate that numeric ID and API type before
+  and around remote writes, and require every enabled remediation or prevention
+  publisher in the poll to use the same identity.
+- Restrict Guardian publication actors to GitHub `User` identities proven by
+  `GET /user`. GitHub App installation-token `Bot` publication is unsupported
+  until it has a separate installation-identity proof; trusted reviewer bots
+  remain supported.
 
 - Build GitHub CLI with gRPC-Go 1.83.2, resolving the image's
   CVE-2026-84304 dependency finding for fragmented HTTP/2 DATA-frame heap
@@ -21,11 +102,43 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Changed
 
+- Ask the holistic review pass to align terminology across related UI keys by
+  supplying bounded, deterministic dotted-sibling context while keeping edits
+  strictly within the requested scope.
+- On a model failure, retain an existing localized value only when the key
+  ledger hashes still match its normalized target and source. The key remains
+  failed and retryable; a changed source, unrecorded target edit, missing value,
+  or source-identical value still uses the current source fallback.
 - The default bootstrap action ref is now `v0.1.20`.
+- Use `gpt-4o-mini` as the centralized initial-translation fallback when a
+  config omits `model_name`, replacing the legacy `gpt-4` loader fallback.
+  Newly generated and generic example configs use `gpt-5.6-terra` with
+  `review_reasoning_effort: none` for the holistic review pass.
+- Let an enabled semantic review with an omitted, empty, or null model inherit
+  the effective holistic-review model, including `REVIEW_MODEL_NAME`; an
+  explicitly configured semantic model remains authoritative.
+- Make pre-run estimates distinguish initial-translation, holistic-review, and
+  optional semantic-review pass units. Translation-memory hits now skip only
+  the initial-translation estimate while remaining in review scope.
+- Add GPT-6 Astra pricing and reasoning-capability metadata, including its lack
+  of `none` effort support. Keep Terra as the translation-review and Guardian
+  default while Astra is rolling out and until representative localization
+  evaluations justify its materially higher token rates.
 - Correct the deployment guides to document the 90-file PR batch default,
   Compose runtime key mounts, host-level cron, and root-safe Compose commands.
 - Remove obsolete dummy credential files and unused secret-related build
   arguments from the CI image build.
+- Require custom Guardian credential commands to name one directly inspected
+  executable; the only multi-item exception is exact `gh auth token`. Require
+  `sandbox_argv_prefix` to name one directly inspected wrapper with its policy
+  embedded. Existing configurations that pass helper scripts, interpreter
+  flags, or sandbox policy paths as later argv items must move that behavior
+  into an operator-owned executable wrapper.
+- Validate a GitHub Action config, exact workspace root, and contained input
+  folder before translation or model work. Enabled semantic-review sidecars now
+  fail publication when any batch, locale task, or provider setup is incomplete;
+  that state remains independently blocking when generic pipeline warnings are
+  non-blocking.
 
 ## [0.1.19] - 2026-09-01
 

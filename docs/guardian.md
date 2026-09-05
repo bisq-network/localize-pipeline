@@ -1,9 +1,10 @@
 # Localize Guardian
 
 Localize Guardian is an optional, self-hosted review loop for translation pull
-requests. It revisits open PRs, records new authorized reviewer feedback
-revisions, asks Codex CLI for a structured assessment, and applies only
-corrections that pass deterministic localization policy.
+requests. It revisits open PRs and, when explicitly configured, a bounded set of
+closed PRs; records new authorized reviewer feedback revisions; asks Codex CLI
+for a structured assessment; and applies only corrections that pass
+deterministic localization policy.
 
 This is not a hosted service. The operator runs the Guardian on infrastructure
 they control, supplies their own Codex/ChatGPT plan or explicitly opts into API
@@ -12,8 +13,8 @@ allowlists, credentials, logs, updates, plan allowance or API charges, and
 recovery. Operating it does not grant the translation pipeline maintainers
 credentials or private access to the consuming project.
 
-Start with `observe`. Treat every broader mode as a production change that needs
-review in the operator's environment.
+Start with `observe`. Treat every broader mode as a local write-authority change
+that needs review on the operator-controlled Guardian host.
 
 ## Authority modes
 
@@ -24,8 +25,8 @@ authority granted by the operator-owned config.
 | --- | --- |
 | `observe` | Report-only intake, assessment, audit records, and local status. It creates no commits, pushes, comments, or other GitHub writes. This is the default. |
 | `prepare` | Everything in `observe`, plus validation of eligible value-only replacements in a disposable local checkout. It stores the outcome and a changed-key count in private action state, but retains no patch or reviewable plan. It cannot push or comment. |
-| `apply-owned-translations` | Advance an allowed, Guardian-owned translation PR with validated value replacements, then post one concise status reply. |
-| `propose-prevention` | Everything above, plus at most the configured number of draft prevention PRs per poll, shared across repositories, for recurring pipeline defects. It never merges them. |
+| `apply-owned-translations` | Advance an allowed, Guardian-owned translation PR with validated value replacements, then post one concise status reply. An independently configured closed-PR remediation policy may also create bounded current-base correction drafts. |
+| `propose-prevention` | Everything above, plus at most the configured number of draft prevention PRs per poll, shared across repositories, for recurring pipeline defects. It never merges either kind of draft. |
 
 The Guardian does not merge pull requests, approve reviews, resolve review
 threads, delete or edit reviewer comments, overwrite an existing remote ref, or
@@ -157,8 +158,8 @@ descendant-cgroup count are both zero, so a child cannot leave empty nested
 cgroups behind. This includes a descendant that calls `setsid()` or `setpgid()`
 and escapes the original process group.
 
-The current Linux service or container cgroup must be delegated to the Guardian
-operator so it can create those transient leaves. `guardian doctor` performs a
+The operator's Linux service or container cgroup must be delegated so Guardian
+can create those transient leaves. `guardian doctor` performs a
 real create/join/kill/remove canary and fails closed when cgroup v2, delegation,
 or `cgroup.kill` is unavailable. The cgroup is a lifecycle boundary, not a
 filesystem sandbox: the Codex and prevention-test sandbox canaries also require
@@ -258,8 +259,8 @@ receive neither the subscription credential directory nor a model API key.
 
 API-key mode is an explicit opt-in. Set `codex_auth_mode: api-key`, remove
 `codex_home`, configure `runtime.codex_api_key_command`, and configure both USD
-limits. The production Guardian does not accept an ambient API key. Instead it
-invokes the configured operator-owned helper just in time, injects
+limits. In API-key mode, the self-hosted Guardian does not accept an ambient API
+key. Instead it invokes the configured operator-owned helper just in time, injects
 `CODEX_API_KEY` only into the bounded Codex process, and uses an ephemeral Codex
 home. The helper must print one API key to stdout and nothing else. Keep it
 outside monitored repositories and backed by an OS secret store.
@@ -271,9 +272,12 @@ token to stdout and nothing else; prefer a short-lived token when the provider
 supports one. It is invoked as an argv array with `shell=False`, a timeout, and
 redacted errors. The token is retained only in memory for the bounded Guardian
 operation; temporary Git askpass material is removed afterward. Write scopes
-are used only for an authorized translation branch update and status reply, or
-for the explicitly configured prevention branch and draft PR in
-`propose-prevention` mode.
+are used only for an authorized translation branch update and status reply, an
+explicitly configured prevention branch and draft PR, or an explicitly
+configured current-base remediation branch and draft PR. Historical remediation
+publication is available in `apply-owned-translations` or
+`propose-prevention`; prevention publication is available only in
+`propose-prevention`.
 
 On macOS, either helper can retrieve its credential from Keychain. Keep helpers
 outside monitored repositories, owned by the operator, and executable only by
@@ -337,8 +341,17 @@ non-symlink, operator- or root-owned executables with trusted parent directories
 interpreted helpers must use an absolute interpreter in their shebang. In
 particular, an npm shim or script using `#!/usr/bin/env node` is rejected: point
 `codex_executable` at the package's platform-native Codex binary instead.
-`guardian doctor` reports any incompatible path before installation. Every due
-scheduled run checks the executable and its interpreter chain again before
+Every custom credential command must contain exactly one argv item naming the
+inspected helper. The sole multi-item exception is the exact GitHub CLI command
+`gh auth token`. Python, Node, shells, `nice`, `nohup`, and other interpreter or
+dispatcher programs are not accepted as `argv[0]` with an unchecked helper
+script in a later argument. A credential helper may itself be an executable
+script, because Guardian inspects that script and its absolute shebang
+interpreter chain; the shebang itself must contain only the interpreter path,
+without flags or other arguments. `guardian doctor` resolves interactive
+command names and validates each resulting executable before invoking any of
+them. `guardian install` additionally requires absolute configured paths. Every
+due scheduled run checks the executable and its interpreter chain again before
 credentials or repository data are used, so a background process cannot
 silently pick up a replaced binary from a changed `PATH`.
 
@@ -371,6 +384,25 @@ the dedicated ChatGPT login or API-key helper, GitHub credential helper,
 GitHub identity, repository visibility, signing setup, and built-in adapters
 registered in the isolated Guardian process. Target-project adapter
 compatibility is checked later from the exact base checkout during a run.
+
+In either write mode, every repository must name a top-level
+`publication_actor`, and the same read-only probe resolves `/user` once. That
+credential's immutable numeric ID and API type must match every repository's
+actor. If a positive publication cap enables nested remediation or prevention
+draft creation, each enabled nested actor must be the same identity;
+configurations that would require different actors fail closed. Neither the
+token nor mutable login is printed.
+
+The publication actor must have GitHub API type `User`. Use a narrowly scoped
+personal access token for a dedicated machine user, or another user token that
+GitHub supports on
+[`GET /user`](https://docs.github.com/en/rest/users/users#get-the-authenticated-user).
+A GitHub App installation access token writes as a `Bot` but cannot satisfy
+this user-identity proof, so installation-token publication is intentionally
+rejected. Supporting it would require a separate installation-identity
+protocol. This restriction applies only to publication; review feedback from
+explicitly configured bots remains supported.
+
 For `apply-owned-translations` and `propose-prevention`, set
 `runtime.signing_key` explicitly (and `runtime.signing_public_key` for SSH).
 The doctor creates an ephemeral local commit and proves that exact key can sign
@@ -378,11 +410,55 @@ and verify with global and system Git config disabled—the same isolation
 boundary used for Guardian commits. For SSH it also uses the private one-key
 allowed-signers snapshot and withholds the agent socket from verification. A
 global `user.signingkey` is deliberately not accepted.
-`run` performs one finite poll. `status` shows the last completed feedback run,
-component health, pending feedback revisions, actions, and current UTC daily
-model calls (completed plus active or unknown reservations) without printing raw
+Each operator-run `guardian run` executes one finite poll.
+`limits.run_timeout_seconds` is one elapsed-time budget measured against a
+monotonic deadline for active work, not a fresh timeout for each repository,
+request, page, retry, or subprocess. Setup snapshots and recursive workspace
+scans check the same deadline; GitHub streaming and pagination recheck it between
+chunks and pages; credential helpers, Codex, prevention tests, signing inspection,
+and Git subprocesses receive no more than the remaining budget. Expiry stops new
+work and prevents later remote mutations. Bounded SQLite finalization, recovery
+bookkeeping, process teardown, temporary-file cleanup, and lease release may
+finish after expiry so timeout handling cannot strand unsafe or misleading state.
+
+`status` shows the last completed feedback run,
+component health, pending feedback revisions and historical hydration retries,
+aggregate action and remediation lifecycle counts, and current UTC daily model
+calls (completed plus active or unknown reservations) without printing raw
 review bodies or secrets. In API-key mode it additionally shows committed API
 cost (settled cost plus active or unknown reservations).
+
+Two bounded, redacted operator worklists expose durable recovery state under
+the same exclusive poll lock:
+
+```bash
+localize guardian remediation list --config "$GUARDIAN_CONFIG" --limit 100
+localize guardian history-retry list --config "$GUARDIAN_CONFIG" --limit 100
+```
+
+`remediation list` is the detailed provenance and lifecycle surface. It orders
+active attempts before terminal local history and explicitly reports when the
+requested attempt bound or the per-draft coverage bound truncates output. For
+each bounded result it prints the draft key and branch-identity version; exact
+target, push, ref, and commit identities; local publication phase; PR number
+and canonical URL when present; terminal resolution; the latest remote
+observation and its state/draft/merged/base/time fields; and the exact source
+PR, policy, revision, coverage reason, linked draft keys, and whether that
+coverage is currently effective. It never prints review-comment bodies.
+`status` intentionally keeps this information aggregated.
+
+`remediation quarantine` requires
+`--acknowledge-terminal-local-skip` and atomically appends an
+`operator_quarantined` resolution plus terminal coverage for every exact source
+linked to the listed local attempt. It is an explicit terminal local skip, not
+an inference from remote absence, and does not change its remote branch or pull
+request.
+`history-retry quarantine` requires the exact repository name and numeric ID,
+policy digest, pull ID, PR number, and the same acknowledgement. It is a
+deliberately permanent source-PR veto under that policy digest: later comments
+on that PR are ignored while the policy is unchanged, and changing the policy
+makes the PR eligible again. Neither command edits, closes, reopens, comments
+on, or otherwise changes GitHub state.
 
 Review at least one real report-only run before moving to `prepare`. The
 `status` command shows aggregate action state, not the prepared key count or a
@@ -399,14 +475,245 @@ descendant commit and advances the existing head without force. It never creates
 an unrelated project runner or commits project-specific policy to this pipeline
 repository.
 
-After the new head is confirmed, it may post one idempotent, bot-labelled,
+Every repository in either write mode must configure a top-level
+`publication_actor`. It is the exact GitHub actor that publishes ordinary
+translation commits and authors status comments, identified authoritatively by
+numeric ID and API type `User`; its login is display-only audit metadata. This actor
+is deliberately independent of `allowed_pr_authors`, which controls which
+existing PR owners may have their branches advanced, so the publication actor
+does not gain PR-ownership authority by being configured. The write broker
+authenticates the credential against the actor before repository and
+pull-request access, then checks it again around the commit push and
+status-reply write boundaries. An identity mismatch or mid-operation rotation
+fails closed.
+
+After the new head is confirmed, it may post one idempotent, bot-marked,
 commit-linked reply. The shape is deliberately modest:
 
 > 🤖 **Localize Guardian:** Applied a validated translation-only correction in
 > the linked commit. The review thread remains open for reviewer confirmation.
 
-The hidden idempotency marker prevents duplicate replies after a crash. A reply
-claims only what the deterministic checks and confirmed commit establish.
+The hidden idempotency marker prevents duplicate replies after a crash, but the
+marker alone is never trusted. Recovery accepts it only when the numeric actor
+ID/type, full canonical body, comment ID-derived URL, publication evidence, and
+current PR authority all match. A foreign, altered, or duplicate marker fails
+closed instead of suppressing a genuine reply. A reply claims only what the
+deterministic checks and confirmed commit establish.
+
+## Closed pull-request backfill and remediation
+
+Closed-PR processing is disabled unless a repository has an explicit
+`closed_pr_backfill` block. Each poll finishes the open-PR phase across the
+configured repositories first. Closed history is then traversed newest first in
+durable scan cycles. A cycle freezes both its UTC start as an upper bound and
+its `lookback_days` cutoff as a lower bound. Every later poll restarts at GitHub
+page 1 and skips exact pull ID/number pairs in an append-only per-cycle seen set;
+it does not persist a mutable pagination position as discovery progress. Before
+reporting the cycle complete, the reader performs a second identity-only
+traversal and requires it to contain no uncovered eligible pull. This catches
+page shrink, insertion, and equal-timestamp reordering that the two traversals
+actually observe.
+
+GitHub's REST listing is not an atomic snapshot. Completion therefore requires
+a quiescent, bounded discovery-and-confirmation pass; it is not a claim that no
+concurrent mutation could occur outside the two observed traversals. A later
+cycle rechecks the window and can discover such a change.
+
+Each discovery or confirmation traversal is limited to 100 numeric pages and
+10,000 list entries. If either traversal cannot reach the frozen cutoff or the
+end of the list within that ceiling, the poll fails visibly and keeps the cycle
+incomplete; narrow `lookback_days` before retrying such a high-volume window.
+Within that ceiling, while its dependencies succeed, and once the listing is
+quiescent long enough for confirmation, repeated polls cover the full frozen
+window even when earlier entries are ineligible or already complete. Hydration
+remains separately bounded to `max_prs_per_poll` eligible pull requests for that
+repository. The strict configuration ranges are 1–3650 days and 1–100 pull
+requests per poll.
+
+A non-authentication GitHub failure while hydrating one pull is retried up to
+three times immediately. After the third failure, the error is recorded and the
+identity is skipped for the rest of the current cycle, so one persistently
+malformed pull cannot starve older history. The durable pending retry is
+prioritized on later polls independently of the discovery window until it
+succeeds or an operator explicitly vetoes it. Authentication failures abort the
+poll and do not advance the affected work.
+
+The frozen upper bound and lookback cutoff govern discovery of new closed-PR
+evidence only. At most one durable pending branch-only remediation batch is
+selected for direct reconciliation in a repository poll. Its exact source pull
+identities must fit within `max_prs_per_poll`, but reconciliation uses immutable
+stored evidence and the exact remote branch/PR identity; it does not claim to
+rehydrate every source before inspecting an already-created remote artifact.
+Direct recovery ignores the discovery window, so durable pending work or an
+already-published branch cannot age out before reconciliation. When a fresh
+candidate is required, the whole source group enters the durable priority
+hydration path ahead of ordinary discovery, even when those sources are now
+older than `lookback_days`; each source must still match its exact identity,
+remain closed, and satisfy current policy and trust eligibility.
+
+If any recovery source cannot be hydrated after its three immediate attempts,
+the whole group is deferred for the rest of the current cycle and no partial
+candidate is published. This temporary deferral is not the explicit,
+terminal-local-skip `remediation quarantine` action. A persistent operator-only
+conflict likewise gets only this bounded recovery path before its sources
+advance for the current cycle, allowing older history to continue. A later
+cycle can reconsider the batch. Malformed,
+ambiguous, duplicate, or mismatching remote PR metadata fails closed and remains
+visible to the operator. This deliberately favors publication safety and
+backlog fairness over automatic liveness.
+
+After a cycle reaches the cutoff or end of the closed list, the next poll starts
+a fresh cycle at the newest page. This periodic rescan can discover an edit or
+deletion of exact authorized feedback even when the closed pull request's head
+SHA and top-level `updated_at` did not change. Feedback authority is a
+point-in-time poll snapshot: an edit or deletion observed by a later scan causes
+a recheck, but cannot retroactively revoke a remote mutation that has already
+begun. Untrusted comment churn and other unrelated update noise do not
+invalidate a completed assessment. Both eligible merged and unmerged closed
+pull requests are covered; the same configured PR, head-repository, head-owner,
+branch, reviewer/bot, and locale authorization still applies.
+
+A historical pull request and its review feedback are evidence only. The
+Guardian materializes historical revisions through a read-only checkout and
+never applies or publishes a historical branch. It separately captures the
+configured repository's exact current base SHA and builds fresh current source
+and target evidence. A historical correction is actionable only when the
+reported defect independently exists on that current base and the proposed
+value passes today's deterministic localization policy. This rule is the same
+for merged and unmerged history: an old comment cannot authorize a stale or
+unrelated change. If the finding is already fixed or otherwise obsolete on the
+configured current base branch, the Guardian records a terminal no-action
+checkpoint and publishes nothing. Compatible current-base fixes may share one
+batch; conflicting proposals for the same target, ambiguous evidence, and
+other unsafe cases remain deferred.
+
+An authorized, still-valid finding that is uncovered and selected for
+remediation is published only through a new bot-marked draft correction PR
+against the configured current base. That draft contains a signed commit and
+links to the closed source PR and validated feedback. The Guardian leaves the
+historical PR and its branch untouched. This translation correction is separate
+from any optional pipeline-prevention draft.
+
+`observe` and `prepare` perform no GitHub writes for closed-PR work. `observe`
+records the bounded assessment and completion checkpoint. `prepare` may also
+validate eligible replacements in the disposable current-base checkout, with
+the same non-reviewable local outcome described above. Historical recurrence
+candidates may contribute to prevention analysis in `propose-prevention`, but
+that remains subject to the separate `prevention` policy and publication cap.
+A nested remediation policy may remain configured while either read-only mode
+keeps it dormant; changing mode is the authority ceiling and does not require
+editing the repository policy.
+
+Publishing a historical correction requires all of the following: mode
+`apply-owned-translations` or `propose-prevention`; an explicit nested
+`closed_pr_backfill.remediation` policy; a positive
+`max_remediation_drafts_per_run`; and the write-mode signing and credential
+setup. No `prevention` block is required in `apply-owned-translations`. Keep
+`max_remediation_drafts_per_run: 0` as the report-only and remediation
+kill-switch setting; zero is also the schema default. The Guardian combines
+compatible current findings into at most one remediation batch per repository
+per poll.
+`max_remediation_drafts_per_run` is a separate global per-poll cap shared across
+repositories; it does not increase model-call demand because the history
+assessment already produced the candidate.
+
+The remediation policy names one exact numeric-ID `push_repository`, a
+`push_branch_prefix`, and one typed numeric-ID `publication_actor`. The
+publication actor must have API type `User` and must be the same identity as the
+repository's top-level ordinary publication actor. It is independent of
+`allowed_pr_authors`, which grants authority to advance existing PR branches.
+The push repository must already appear in
+`allowed_head_repositories`, and `allowed_branch_globs` must contain the
+literal `push_branch_prefix` followed by `*`; a broader pattern alone is not
+enough.
+The actual generated branch—the prefix followed by a deterministic 64-character
+lowercase hexadecimal identity—is checked against the allowlist again at
+publication time. Use a dedicated ordinary Guardian-owned head scope such as
+`localization/guardian-remediation-*`, and ensure the GitHub credential can
+create the resulting pull request. An unexpected existing ref, repository
+identity, or branch fails closed.
+
+Every remediation broker session resolves the credential's authenticated
+GitHub actor. Its immutable numeric ID and API type must match the configured
+`publication_actor`, and any created or recovered pull request must name that
+same actor as its author and retain the exact generated title and body. The
+publication actor's login is a display and audit label only; an actor change,
+rewritten draft text, or a different allowlisted author fails closed.
+
+For an actionable batch, the Guardian revalidates the exact current target base
+and push repository, creates a signed commit on the deterministic new branch,
+and opens a new bot-marked draft pull request for human review. The exact
+`[Localize Guardian bot]` title prefix and body text identify it as
+bot-generated; this marker is not a GitHub label. Before creation it performs a
+coherent sequential pass: after local preparation it rechecks the destination
+actor, repository IDs, base SHA, candidate branch, and duplicate-PR state, then
+revalidates exact source authority as the final remote observation before the
+POST. GitHub's independent REST resources cannot provide an atomic snapshot;
+later changes are detected by the next bounded poll and never make an earlier
+observation retroactively atomic. It never reopens, edits, or comments on a
+closed pull request, never advances its branch, and never merges the remediation
+draft.
+
+Append-only publication phases, the deterministic branch, an embedded evidence
+marker, and preserved private durable state provide crash recovery without
+creating a duplicate branch or draft. Recovery requires the canonical GitHub
+URL, publication actor, head and base identities, candidate commit,
+`maintainer_can_modify: false`, exact generated title, and full generated body
+including the embedded marker. Current open-draft, open-ready, closed-unmerged,
+and merged states are accepted when all of that metadata remains exact;
+malformed or rewritten metadata and ambiguous or duplicate remote identities
+fail closed. The Guardian never rewrites or reopens the PR.
+
+Each reconciliation appends an `exact`, `not_found`, or `conflict` remote
+observation to the private ledger. An exact merged observation and its terminal
+`merged` resolution are recorded atomically so lifecycle and coverage cannot
+disagree. `not_found` means the bounded exact lookup completed without a match;
+authentication, transport, and malformed-response failures remain failures and
+never manufacture absence.
+
+An already-created exact PR remains recoverable after ordinary target-base
+advancement. A correction PR that a maintainer closes without merging is a
+human veto and continues to cover its exact edits, so the Guardian records the
+closed lifecycle and does not recreate the same correction unchanged. When a
+correction is merged, its draft-backed source coverage becomes ineffective. If
+the same defect later recurs on a newly validated current base, a new coverage
+generation and a distinct remediation attempt may be created.
+
+New remediation branch identities use version 2 and bind the exact remediation
+policy digest as well as the attempt's immutable inputs. This prevents a policy
+change from colliding with a branch left by an older attempt. Rows migrated
+from version 1 retain their original identity calculation and remain
+recoverable. If evidence or the target base moves before a branch-only attempt
+has an exact PR, the Guardian marks that local attempt abandoned, leaves any
+remote branch untouched, and durably retries its source group. Fresh validation
+can then create a distinct attempt; no overwrite or branch deletion is used.
+Unexpected remote content or identity still defers instead of being adopted.
+
+Deduplication is semantic rather than tied to a comment revision. An exact edit
+is identified by path, key, current source value, expected target value, and
+proposed target value; its target identity is the path-and-key pair. An exact
+edit covered by an open or human-closed-unmerged Guardian correction PR is
+removed from a mixed batch, while uncovered edits may proceed. Merging that PR
+ends its draft-backed suppression, allowing a later independently revalidated
+recurrence to receive a new coverage generation. A different edit aimed at the
+same target identity conflicts and is deferred instead of opening a competing
+PR. Pending exact edits proceed only through their grouped, bounded recovery
+path.
+
+Discovery progress is also append-only and compare-and-swap protected for the
+exact repository identity and policy digest. A stale concurrent progress writer
+fails closed. A crash before an exact pull identity is marked seen safely
+rehydrates it on the next restart-from-page-one pass; immutable completion
+checkpoints keep already-finished model work idempotent. Completion binds the
+pull identity, relevant pull and changed-file
+evidence, canonical current source and target content, exact authorized feedback
+revisions, authority scope, and policy digest. Editing or deleting an authorized
+reviewer/bot item causes a recheck after a later scan observes that revision,
+while unrelated or untrusted comment noise does not. Changes to the Guardian
+policy or to the trusted pipeline config-and-glossary bundle—whether sourced
+from the exact current base or the private operator snapshot—also start an
+independent scan and make prior work eligible for reassessment. Unchanged
+completed work is skipped within a cycle.
 
 ## Recurrence and prevention
 
@@ -420,8 +727,11 @@ eligible only when it is within the configured pipeline paths, cites immutable
 feedback evidence, and includes a focused regression test that is failing on the
 base revision and passing with the draft. The controller runs each configured
 test argv with a minimal, credential-free environment and prepends the exact
-operator-supplied `sandbox_argv_prefix`; its executable must be an absolute
-path. Before every focused command, a runtime probe must be able to read and
+operator-supplied `sandbox_argv_prefix`. This field is deliberately a one-item
+argv containing one absolute, directly invoked sandbox-wrapper executable. Put
+the confinement policy inside that inspected wrapper; a policy or helper-script
+path supplied as another unchecked prefix argument is rejected. Before every
+focused command, a runtime probe must be able to read and
 write generated paths inside the test workspace
 while reads and writes of generated paths outside it are denied. It also
 requires denial of an AF_INET loopback bind and a connection to a live parent
@@ -459,16 +769,46 @@ that mode still retains the translation-write authority described above.
 The prevention target may be a different repository from the monitored
 translation project. The prevention block pins target and push repositories by
 full name and numeric ID, the exact target base branch, the push branch prefix,
-code/test path allowlists, and focused test commands. Every block must state
-`private_target_model_opt_in`. If the exact target base is private, its code is
-sent to the authoring model only when that field is `true`; use `false` for a
-public target. The monitored translation repository's
+a typed numeric-ID `publication_actor`, code/test path allowlists, and focused
+test commands. The actor login is mutable, human-readable audit metadata; the
+exact numeric ID and GitHub `User` type grant authority. Every prevention REST session
+authenticates `GET /user` and fails closed unless that identity matches, and a
+created or recovered pull request must have the same author identity. The
+nested actor must also match the repository's top-level ordinary publication
+actor so one poll never changes GitHub identity between write paths. Every
+block must state `private_target_model_opt_in`. If the exact target base is
+private, its code is sent to the authoring model only when that field is `true`;
+use `false` for a public target. The monitored translation repository's
 `private_repo_model_opt_in` governs its review evidence and does not grant
 consent for a different private prevention target. If both are private, both
 opt-ins are required.
 
+Prevention policy collections have finite parser and runtime bounds: at most
+100 code globs, 100 test globs, 64 focused commands, 256 arguments in each
+focused command, and exactly one sandbox-wrapper executable in the sandbox
+prefix. Every string in those collections is at
+most 4096 UTF-8 bytes, `max_changed_files` is at most 100, and
+`push_branch_prefix` must leave 77 characters for the generated
+`<base-prefix>-<evidence-hash>` identity inside a 255-character branch name.
+The canonical source-policy and maximum test-result attestations must each also
+fit 512 KiB, so a configuration that combines many individually maximal strings
+can still fail closed before a model or test starts.
+Codex output may contain at most 100 recurrence candidates with at most 100
+evidence feedback IDs each. Newly generated prevention titles are at most 120
+Unicode characters and 256 UTF-8 bytes; bodies are at most 60 KiB. When a
+human-facing evidence, path, or command list would exceed its section budget,
+the body includes a deterministic omitted-item count and full-list fingerprint
+instead of cutting through a Unicode character or Markdown item.
+
 Do not use prevention PRs for project terminology or locale style that belongs
 in the consuming project's own config or glossary.
+
+Prevention recovery also requires the canonical GitHub URL; exact generated
+title and full body including its marker; exact head, base, and candidate; and
+`maintainer_can_modify: false`. Only an untouched open draft, its one-way
+draft-to-ready transition, and a terminal close-unmerged from either draft or
+ready state are accepted. A reopen, redraft, rewritten metadata, or over-bound
+event history fails closed and is never adopted as Guardian-owned state.
 
 ## Durable state, budgets, and recovery
 
@@ -602,8 +942,9 @@ policy changes. If the ChatGPT session expires or is revoked, run
 - Private-repository model access is either disabled or deliberately approved.
 - `observe` evidence and `prepare` audit outcomes were reviewed before enabling
   writes; `prepare` was not mistaken for a retained diff preview.
-- The operator-supplied prevention sandbox prefix and policy were tested outside
-  the Guardian, and the Guardian's focused runtime confinement probe passes.
+- The directly invoked prevention sandbox wrapper embeds and enforces its policy,
+  was tested outside the Guardian, and passes Guardian's focused confinement
+  probe.
 - Linux deployments provide a delegated cgroup-v2 parent, and `doctor` proves
   that detached descendants are included in its cleanup scope.
 - Every prevention test command uses an absolute operator-controlled executable
@@ -613,5 +954,5 @@ policy changes. If the ChatGPT session expires or is revoked, run
 - Daily model-call limits, retries, timeouts, edit caps, retention, logs, and
   backups are appropriate for the operator. API-key operators additionally
   reviewed the USD reservations and provider billing.
-- Signed commits and the bot-labelled status reply were verified on a test PR.
+- Signed commits and the bot-marked status reply were verified on a test PR.
 - No workflow expects the Guardian to merge or resolve a review thread.

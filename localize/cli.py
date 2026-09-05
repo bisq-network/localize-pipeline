@@ -16,10 +16,12 @@ import yaml
 
 from localize.app_config import (
     ConfigIssue,
+    DEFAULT_TRANSLATION_MODEL,
     _compute_project_root,
     _load_dotenv_files,
     _non_empty_env,
     _scrub_blank_env,
+    resolve_semantic_review_model,
     resolve_runtime_dir,
     validate_config,
 )
@@ -84,6 +86,18 @@ def _print_config_issues(issues: Sequence[ConfigIssue]) -> None:
         print(f"{issue.level}: {issue.message}", file=sys.stderr)
 
 
+def _apply_model_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
+    """Apply the same non-empty model overrides used by the runtime loader."""
+    overrides = {}
+    review_model_override = _non_empty_env("REVIEW_MODEL_NAME")
+    if review_model_override is not None:
+        overrides["review_model_name"] = review_model_override
+    review_effort_override = _non_empty_env("REVIEW_REASONING_EFFORT")
+    if review_effort_override is not None:
+        overrides["review_reasoning_effort"] = review_effort_override
+    return {**config, **overrides} if overrides else config
+
+
 def _cmd_formats(_args: argparse.Namespace) -> int:
     adapters = list_localization_adapters()
     for format_id, localization_format in sorted(list_localization_formats().items()):
@@ -107,9 +121,7 @@ def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> i
         print(f"error: could not read configuration: {exc}", file=sys.stderr)
         return 1
 
-    review_model_override = os.environ.get("REVIEW_MODEL_NAME")
-    if review_model_override:
-        config = {**config, "review_model_name": review_model_override}
+    config = _apply_model_env_overrides(config)
     issues = validate_config(
         config,
         effective_api_base_url=_effective_api_base_url(config),
@@ -182,9 +194,7 @@ def _queue_dir(config: dict[str, Any], key: str, default_name: str, *, config_pa
 def _load_checked_config(config_path: Path) -> tuple[dict[str, Any], list[ConfigIssue]]:
     _load_cli_dotenv()
     config = _load_config_file(config_path)
-    review_model_override = os.environ.get("REVIEW_MODEL_NAME")
-    if review_model_override:
-        config = {**config, "review_model_name": review_model_override}
+    config = _apply_model_env_overrides(config)
     issues = validate_config(
         config,
         effective_api_base_url=_effective_api_base_url(config),
@@ -203,6 +213,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     try:
         config, issues = _load_checked_config(config_path)
         profiles = load_localization_profiles(config)
+        model_name = config.get("model_name") or DEFAULT_TRANSLATION_MODEL
+        review_model_name = config.get("review_model_name") or model_name
+        semantic_review_enabled, _semantic_review_model = (
+            resolve_semantic_review_model(
+                config,
+                review_model_name=str(review_model_name),
+            )
+        )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"error: could not inspect configuration: {exc}", file=sys.stderr)
         return 1
@@ -210,8 +228,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     profile = os.environ.get("TRANSLATOR_PROFILE") or "default"
     target_root = _config_relative_path(config.get("target_project_root"), config_path=config_path)
     input_folder = _resolve_input_folder_for_config(config, config_path=config_path)
-    semantic_review = config.get("semantic_review", {}) or {}
-    semantic_status = "enabled" if bool(semantic_review.get("enabled", False)) else "disabled"
+    semantic_status = "enabled" if semantic_review_enabled else "disabled"
     raw_api_base_url = _effective_api_base_url(config)
     api_base_url = _redact_url_userinfo(raw_api_base_url) if raw_api_base_url else "default"
     model_provider = str(config.get("model_provider", "aisuite"))
@@ -231,8 +248,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"translated_queue_folder: {translated}")
     print(f"localization_profiles: {formats}")
     print(f"model_provider: {model_provider}")
-    print(f"model_name: {config.get('model_name', 'gpt-4')}")
-    print(f"review_model_name: {config.get('review_model_name', config.get('model_name', 'gpt-4'))}")
+    print(f"model_name: {model_name}")
+    print(f"review_model_name: {review_model_name}")
     print(f"api_base_url: {api_base_url}")
     print(f"semantic_review: {semantic_status}")
     print(f"OPENAI_API_KEY: {'set' if _non_empty_env('OPENAI_API_KEY') else 'unset'}")

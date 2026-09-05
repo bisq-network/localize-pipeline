@@ -10,8 +10,10 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 import yaml
 
+from localize.guardian.executable_trust import is_supported_direct_helper_command
 from localize.guardian.models import (
     AllowedHeadRepository,
+    ClosedPrBackfillPolicy,
     CodexAuthMode,
     ExactRepository,
     GuardianConfig,
@@ -19,6 +21,7 @@ from localize.guardian.models import (
     GuardianMode,
     GuardianRuntime,
     GuardianSchedule,
+    HistoricalRemediationPolicy,
     PipelineConfigSource,
     PreventionPolicy,
     RepositoryPolicy,
@@ -35,7 +38,18 @@ class GuardianConfigError(ValueError):
     """Raised when guardian configuration is malformed or unsafe."""
 
 
-_NON_EMPTY_STRING = {"type": "string", "minLength": 1}
+_MAX_CONFIG_STRING_BYTES = 4096
+_MAX_PREVENTION_PATH_GLOBS = 100
+_MAX_PREVENTION_TEST_COMMANDS = 64
+_MAX_PREVENTION_ARGV_ITEMS = 256
+_MAX_PREVENTION_CHANGED_FILES = 100
+_PREVENTION_BRANCH_SUFFIX_CHARS = 77
+
+_NON_EMPTY_STRING = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": _MAX_CONFIG_STRING_BYTES,
+}
 _NON_EMPTY_UNIQUE_STRINGS = {
     "type": "array",
     "minItems": 1,
@@ -64,10 +78,31 @@ def _exact_repository_schema(*, ref_field: str) -> dict[str, Any]:
     }
 
 
+def _repository_identity_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["full_name", "id"],
+        "properties": {
+            "full_name": {
+                "type": "string",
+                "pattern": _REPOSITORY_NAME_PATTERN,
+            },
+            "id": {"type": "integer", "minimum": 1},
+        },
+    }
+
+
 _ARGV_SCHEMA = {
     "type": "array",
     "minItems": 1,
-    "maxItems": 64,
+    "maxItems": _MAX_PREVENTION_ARGV_ITEMS,
+    "items": _NON_EMPTY_STRING,
+}
+_DIRECT_WRAPPER_ARGV_SCHEMA = {
+    "type": "array",
+    "minItems": 1,
+    "maxItems": 1,
     "items": _NON_EMPTY_STRING,
 }
 
@@ -77,6 +112,7 @@ _PREVENTION_SCHEMA: dict[str, Any] = {
     "required": [
         "target_repository",
         "push_repository",
+        "publication_actor",
         "allowed_code_path_globs",
         "allowed_test_path_globs",
         "focused_test_argv",
@@ -88,17 +124,79 @@ _PREVENTION_SCHEMA: dict[str, Any] = {
     "properties": {
         "target_repository": _exact_repository_schema(ref_field="base_branch"),
         "push_repository": _exact_repository_schema(ref_field="branch_prefix"),
-        "allowed_code_path_globs": _NON_EMPTY_UNIQUE_STRINGS,
-        "allowed_test_path_globs": _NON_EMPTY_UNIQUE_STRINGS,
+        "publication_actor": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["login", "id", "type"],
+            "properties": {
+                "login": _NON_EMPTY_STRING,
+                "id": {"type": "integer", "minimum": 1},
+                "type": {"const": "User"},
+            },
+        },
+        "allowed_code_path_globs": {
+            **_NON_EMPTY_UNIQUE_STRINGS,
+            "maxItems": _MAX_PREVENTION_PATH_GLOBS,
+        },
+        "allowed_test_path_globs": {
+            **_NON_EMPTY_UNIQUE_STRINGS,
+            "maxItems": _MAX_PREVENTION_PATH_GLOBS,
+        },
         "focused_test_argv": {
             "type": "array",
             "minItems": 1,
+            "maxItems": _MAX_PREVENTION_TEST_COMMANDS,
             "items": _ARGV_SCHEMA,
         },
-        "sandbox_argv_prefix": _ARGV_SCHEMA,
-        "max_changed_files": {"type": "integer", "minimum": 1},
+        "sandbox_argv_prefix": _DIRECT_WRAPPER_ARGV_SCHEMA,
+        "max_changed_files": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": _MAX_PREVENTION_CHANGED_FILES,
+        },
         "max_changed_bytes": {"type": "integer", "minimum": 1},
         "private_target_model_opt_in": {"type": "boolean"},
+    },
+}
+
+_CLOSED_PR_BACKFILL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["lookback_days", "max_prs_per_poll"],
+    "properties": {
+        "lookback_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": ClosedPrBackfillPolicy.MAX_LOOKBACK_DAYS,
+        },
+        "max_prs_per_poll": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": ClosedPrBackfillPolicy.MAX_PRS_PER_POLL,
+        },
+        "remediation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "push_repository",
+                "push_branch_prefix",
+                "publication_actor",
+            ],
+            "properties": {
+                "push_repository": _repository_identity_schema(),
+                "push_branch_prefix": _NON_EMPTY_STRING,
+                "publication_actor": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["login", "id", "type"],
+                    "properties": {
+                        "login": _NON_EMPTY_STRING,
+                        "id": {"type": "integer", "minimum": 1},
+                        "type": {"const": "User"},
+                    },
+                },
+            },
+        },
     },
 }
 
@@ -179,8 +277,16 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                     "minimum": 1,
                     "maximum": 2,
                 },
-                "max_value_edits_per_run": {"type": "integer", "minimum": 0},
+                "max_value_edits_per_run": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                },
                 "max_prevention_drafts_per_run": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "max_remediation_drafts_per_run": {
                     "type": "integer",
                     "minimum": 0,
                 },
@@ -232,6 +338,16 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                     "base_repo_id": {"type": "integer", "minimum": 1},
                     "base_branch": _NON_EMPTY_STRING,
                     "private_repo_model_opt_in": {"type": "boolean"},
+                    "publication_actor": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["login", "id", "type"],
+                        "properties": {
+                            "login": _NON_EMPTY_STRING,
+                            "id": {"type": "integer", "minimum": 1},
+                            "type": {"const": "User"},
+                        },
+                    },
                     "allowed_pr_authors": _actor_list_schema(("User", "Bot")),
                     "allowed_head_owners": _actor_list_schema(
                         ("User", "Bot", "Organization")
@@ -278,6 +394,7 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                             "pattern": r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
                         },
                     },
+                    "closed_pr_backfill": _CLOSED_PR_BACKFILL_SCHEMA,
                     "prevention": _PREVENTION_SCHEMA,
                 },
             },
@@ -426,6 +543,8 @@ def _validate_argv(
     *,
     field: str,
     absolute_executable: bool | None,
+    direct_executable: bool = False,
+    allow_github_cli: bool = False,
 ) -> tuple[str, ...]:
     argv = tuple(raw_argv)
     for index, argument in enumerate(argv):
@@ -470,13 +589,22 @@ def _validate_argv(
         raise GuardianConfigError(
             f"{field} must not contain an interpreter command string."
         )
+    if direct_executable and not is_supported_direct_helper_command(
+        argv,
+        allow_github_cli=allow_github_cli,
+    ):
+        raise GuardianConfigError(
+            f"{field} must invoke one dedicated helper executable directly; "
+            "arguments are not accepted, and the executable must not be an "
+            "interpreter or command dispatcher."
+        )
     return argv
 
 
 def _validate_single_line(value: str, *, field: str) -> None:
     if (
         not value
-        or len(value) > 4096
+        or len(value.encode("utf-8")) > _MAX_CONFIG_STRING_BYTES
         or not value.isprintable()
     ):
         raise GuardianConfigError(f"{field} must be a non-empty single-line value.")
@@ -494,6 +622,8 @@ def _runtime_command(
         raw_command,
         field=f"runtime.{field}",
         absolute_executable=None,
+        direct_executable=True,
+        allow_github_cli=field == "github_token_command",
     )
 
 
@@ -529,6 +659,7 @@ def _parse_prevention_policy(
     field = f"repositories.{repository_index}.prevention"
     target = raw_prevention["target_repository"]
     push = raw_prevention["push_repository"]
+    actor = raw_prevention["publication_actor"]
     _validate_single_line(
         target["full_name"],
         field=f"{field}.target_repository.full_name",
@@ -536,6 +667,10 @@ def _parse_prevention_policy(
     _validate_single_line(
         push["full_name"],
         field=f"{field}.push_repository.full_name",
+    )
+    _validate_single_line(
+        actor["login"],
+        field=f"{field}.publication_actor.login",
     )
     _validate_branch_scope(
         target["base_branch"],
@@ -547,6 +682,11 @@ def _parse_prevention_policy(
         field=f"{field}.push_repository.branch_prefix",
         prefix=True,
     )
+    if len(push["branch_prefix"]) + _PREVENTION_BRANCH_SUFFIX_CHARS > 255:
+        raise GuardianConfigError(
+            f"{field}.push_repository.branch_prefix must leave room for the "
+            f"{_PREVENTION_BRANCH_SUFFIX_CHARS}-character generated identity."
+        )
 
     code_globs = tuple(raw_prevention["allowed_code_path_globs"])
     test_globs = tuple(raw_prevention["allowed_test_path_globs"])
@@ -579,6 +719,7 @@ def _parse_prevention_policy(
         raw_prevention["sandbox_argv_prefix"],
         field=f"{field}.sandbox_argv_prefix",
         absolute_executable=True,
+        direct_executable=True,
     )
 
     target_name = target["full_name"].casefold()
@@ -602,6 +743,11 @@ def _parse_prevention_policy(
             id=push["id"],
         ),
         push_branch_prefix=push["branch_prefix"],
+        publication_actor=TrustedActor(
+            login=actor["login"],
+            id=actor["id"],
+            type=actor["type"],
+        ),
         allowed_code_path_globs=code_globs,
         allowed_test_path_globs=test_globs,
         focused_test_argv=focused_test_argv,
@@ -611,6 +757,83 @@ def _parse_prevention_policy(
         private_target_model_opt_in=raw_prevention[
             "private_target_model_opt_in"
         ],
+    )
+
+
+def _parse_closed_pr_backfill_policy(
+    raw_policy: Mapping[str, Any],
+    *,
+    repository_index: int,
+) -> ClosedPrBackfillPolicy | None:
+    raw_backfill = raw_policy.get("closed_pr_backfill")
+    if raw_backfill is None:
+        return None
+
+    remediation: HistoricalRemediationPolicy | None = None
+    raw_remediation = raw_backfill.get("remediation")
+    if raw_remediation is not None:
+        field = f"repositories.{repository_index}.closed_pr_backfill.remediation"
+        push = raw_remediation["push_repository"]
+        _validate_single_line(
+            push["full_name"],
+            field=f"{field}.push_repository.full_name",
+        )
+        _validate_branch_scope(
+            raw_remediation["push_branch_prefix"],
+            field=f"{field}.push_branch_prefix",
+            prefix=True,
+        )
+        if len(raw_remediation["push_branch_prefix"]) + 64 > 255:
+            raise GuardianConfigError(
+                f"{field}.push_branch_prefix must leave room for the 64-character "
+                "remediation identity."
+            )
+
+        same_name = push["full_name"].casefold() == raw_policy["base_repo"].casefold()
+        same_id = push["id"] == raw_policy["base_repo_id"]
+        if same_name != same_id:
+            raise GuardianConfigError(
+                f"{field} has an ambiguous repository identity: a numeric ID and "
+                "full name must identify the same repository."
+            )
+        if not any(
+            repository["id"] == push["id"]
+            and repository["full_name"].casefold() == push["full_name"].casefold()
+            for repository in raw_policy["allowed_head_repositories"]
+        ):
+            raise GuardianConfigError(
+                f"{field}.push_repository must be listed exactly in "
+                f"repositories.{repository_index}.allowed_head_repositories."
+            )
+        generated_namespace = f"{raw_remediation['push_branch_prefix']}*"
+        if generated_namespace not in raw_policy["allowed_branch_globs"]:
+            raise GuardianConfigError(
+                f"{field}.push_branch_prefix requires the literal "
+                f"{generated_namespace!r} entry in "
+                f"repositories.{repository_index}.allowed_branch_globs."
+            )
+        actor = raw_remediation["publication_actor"]
+        _validate_single_line(
+            actor["login"],
+            field=f"{field}.publication_actor.login",
+        )
+        remediation = HistoricalRemediationPolicy(
+            push_repository=ExactRepository(
+                full_name=push["full_name"],
+                id=push["id"],
+            ),
+            push_branch_prefix=raw_remediation["push_branch_prefix"],
+            publication_actor=TrustedActor(
+                login=actor["login"],
+                id=actor["id"],
+                type=actor["type"],
+            ),
+        )
+
+    return ClosedPrBackfillPolicy(
+        lookback_days=raw_backfill["lookback_days"],
+        max_prs_per_poll=raw_backfill["max_prs_per_poll"],
+        remediation=remediation,
     )
 
 
@@ -665,6 +888,12 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
             raw_policy["source_locale"],
             field=f"repositories.{index}.source_locale",
         )
+        raw_publication_actor = raw_policy.get("publication_actor")
+        if raw_publication_actor is not None:
+            _validate_single_line(
+                raw_publication_actor["login"],
+                field=f"repositories.{index}.publication_actor.login",
+            )
         for branch_index, branch_glob in enumerate(
             raw_policy["allowed_branch_globs"]
         ):
@@ -744,10 +973,21 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
                 "repository identity."
             )
 
-        prevention = _parse_prevention_policy(
-            raw_policy,
-            repository_index=index,
-        )
+        try:
+            prevention = _parse_prevention_policy(
+                raw_policy,
+                repository_index=index,
+            )
+            closed_pr_backfill = _parse_closed_pr_backfill_policy(
+                raw_policy,
+                repository_index=index,
+            )
+        except GuardianConfigError:
+            raise
+        except ValueError as exc:
+            raise GuardianConfigError(
+                f"Invalid guardian configuration at repositories.{index}: {exc}"
+            ) from None
         if mode is GuardianMode.PROPOSE_PREVENTION and prevention is None:
             raise GuardianConfigError(
                 f"repositories.{index}.prevention is required in "
@@ -778,8 +1018,8 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
                 for locale, actors in raw_policy[category].items()
             }
 
-        repositories.append(
-            RepositoryPolicy(
+        try:
+            repository_policy = RepositoryPolicy(
                 base_repo=base_repo,
                 base_repo_id=raw_policy["base_repo_id"],
                 base_branch=raw_policy["base_branch"],
@@ -809,8 +1049,22 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
                     False,
                 ),
                 prevention=prevention,
+                closed_pr_backfill=closed_pr_backfill,
+                publication_actor=(
+                    None
+                    if raw_publication_actor is None
+                    else TrustedActor(
+                        login=raw_publication_actor["login"],
+                        id=raw_publication_actor["id"],
+                        type=raw_publication_actor["type"],
+                    )
+                ),
             )
-        )
+        except ValueError as exc:
+            raise GuardianConfigError(
+                f"Invalid guardian configuration at repositories.{index}: {exc}"
+            ) from None
+        repositories.append(repository_policy)
 
     raw_runtime = raw_config.get("runtime", {})
     runtime_defaults = GuardianRuntime()
@@ -901,36 +1155,41 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
             "runtime.codex_auth_mode: chatgpt."
         )
 
-    runtime = GuardianRuntime(
-        codex_model=raw_runtime.get("codex_model", runtime_defaults.codex_model),
-        codex_reasoning_effort=raw_runtime.get(
-            "codex_reasoning_effort",
-            runtime_defaults.codex_reasoning_effort,
-        ),
-        codex_auth_mode=auth_mode,
-        codex_home=codex_home,
-        codex_executable=raw_runtime.get(
-            "codex_executable",
-            runtime_defaults.codex_executable,
-        ),
-        git_executable=raw_runtime.get(
-            "git_executable",
-            runtime_defaults.git_executable,
-        ),
-        signing_program=raw_runtime.get(
-            "signing_program",
-            runtime_defaults.signing_program,
-        ),
-        github_token_command=_runtime_command(
-            raw_runtime,
-            "github_token_command",
-            runtime_defaults.github_token_command,
-        ),
-        codex_api_key_command=codex_api_key_command,
-        signing_key=raw_signing_key,
-        signing_format=signing_format,
-        signing_public_key=raw_signing_public_key,
-    )
+    try:
+        runtime = GuardianRuntime(
+            codex_model=raw_runtime.get("codex_model", runtime_defaults.codex_model),
+            codex_reasoning_effort=raw_runtime.get(
+                "codex_reasoning_effort",
+                runtime_defaults.codex_reasoning_effort,
+            ),
+            codex_auth_mode=auth_mode,
+            codex_home=codex_home,
+            codex_executable=raw_runtime.get(
+                "codex_executable",
+                runtime_defaults.codex_executable,
+            ),
+            git_executable=raw_runtime.get(
+                "git_executable",
+                runtime_defaults.git_executable,
+            ),
+            signing_program=raw_runtime.get(
+                "signing_program",
+                runtime_defaults.signing_program,
+            ),
+            github_token_command=_runtime_command(
+                raw_runtime,
+                "github_token_command",
+                runtime_defaults.github_token_command,
+            ),
+            codex_api_key_command=codex_api_key_command,
+            signing_key=raw_signing_key,
+            signing_format=signing_format,
+            signing_public_key=raw_signing_public_key,
+        )
+    except ValueError as exc:
+        raise GuardianConfigError(
+            f"Invalid guardian configuration at runtime: {exc}"
+        ) from None
 
     raw_limits = raw_config.get("limits", {})
     defaults = GuardianLimits()
@@ -954,42 +1213,51 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
             "runtime.codex_auth_mode: api-key."
         )
 
-    limits = GuardianLimits(
-        run_timeout_seconds=raw_limits.get(
-            "run_timeout_seconds",
-            defaults.run_timeout_seconds,
-        ),
-        max_attempts=raw_limits.get("max_attempts", defaults.max_attempts),
-        max_value_edits_per_run=raw_limits.get(
-            "max_value_edits_per_run",
-            defaults.max_value_edits_per_run,
-        ),
-        max_prevention_drafts_per_run=raw_limits.get(
-            "max_prevention_drafts_per_run",
-            defaults.max_prevention_drafts_per_run,
-        ),
-        max_model_calls_per_day=raw_limits.get(
-            "max_model_calls_per_day",
-            defaults.max_model_calls_per_day,
-        ),
-        daily_cost_limit_usd=(
-            float(raw_limits["daily_cost_limit_usd"])
-            if has_daily_cost
-            else None
-        ),
-        model_call_reservation_usd=(
-            float(raw_limits["model_call_reservation_usd"])
-            if has_reservation
-            else None
-        ),
-        min_apply_confidence=float(
-            raw_limits.get("min_apply_confidence", defaults.min_apply_confidence)
-        ),
-        raw_retention_days=raw_limits.get(
-            "raw_retention_days",
-            defaults.raw_retention_days,
-        ),
-    )
+    try:
+        limits = GuardianLimits(
+            run_timeout_seconds=raw_limits.get(
+                "run_timeout_seconds",
+                defaults.run_timeout_seconds,
+            ),
+            max_attempts=raw_limits.get("max_attempts", defaults.max_attempts),
+            max_value_edits_per_run=raw_limits.get(
+                "max_value_edits_per_run",
+                defaults.max_value_edits_per_run,
+            ),
+            max_prevention_drafts_per_run=raw_limits.get(
+                "max_prevention_drafts_per_run",
+                defaults.max_prevention_drafts_per_run,
+            ),
+            max_remediation_drafts_per_run=raw_limits.get(
+                "max_remediation_drafts_per_run",
+                defaults.max_remediation_drafts_per_run,
+            ),
+            max_model_calls_per_day=raw_limits.get(
+                "max_model_calls_per_day",
+                defaults.max_model_calls_per_day,
+            ),
+            daily_cost_limit_usd=(
+                float(raw_limits["daily_cost_limit_usd"])
+                if has_daily_cost
+                else None
+            ),
+            model_call_reservation_usd=(
+                float(raw_limits["model_call_reservation_usd"])
+                if has_reservation
+                else None
+            ),
+            min_apply_confidence=float(
+                raw_limits.get("min_apply_confidence", defaults.min_apply_confidence)
+            ),
+            raw_retention_days=raw_limits.get(
+                "raw_retention_days",
+                defaults.raw_retention_days,
+            ),
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise GuardianConfigError(
+            f"Invalid guardian configuration at limits: {exc}"
+        ) from None
     required_calls = limits.max_attempts * (
         1
         + (
@@ -1034,13 +1302,18 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
         )
     except ValueError as exc:
         raise GuardianConfigError(f"Invalid guardian configuration at schedule: {exc}") from None
-    return GuardianConfig(
-        repositories=tuple(repositories),
-        mode=mode,
-        limits=limits,
-        runtime=runtime,
-        schedule=schedule,
-    )
+    try:
+        return GuardianConfig(
+            repositories=tuple(repositories),
+            mode=mode,
+            limits=limits,
+            runtime=runtime,
+            schedule=schedule,
+        )
+    except ValueError as exc:
+        raise GuardianConfigError(
+            f"Invalid guardian configuration: {exc}"
+        ) from None
 
 
 def parse_guardian_config_yaml(raw_text: str) -> GuardianConfig:

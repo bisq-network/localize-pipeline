@@ -18,9 +18,16 @@ from typing import Any, Dict, Optional
 
 from localize.atomic_io import write_json_atomic
 
-# USD per 1,000,000 tokens. GPT-5.6 rates verified against OpenAI's model
-# documentation on 2026-08-28; Sol pricing is promotional through 2026-11-21.
+# USD per 1,000,000 tokens. GPT-6 Astra and GPT-5.6 rates were verified against
+# OpenAI's model documentation on 2026-09-04; Sol pricing is promotional at
+# least through 2026-11-21.
 DEFAULT_PRICES: Dict[str, Dict[str, float]] = {
+    "gpt-6-astra": {
+        "input": 10.00, "cached_input": 1.00, "cache_write": 12.50, "output": 50.00,
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    },
     "gpt-5.6": {
         "input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00,
         "long_context_threshold": 272_000,

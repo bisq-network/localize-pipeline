@@ -271,6 +271,86 @@ default is `gpt-5.6-terra` with reasoning effort `high`. The dedicated Guardian
 login is kept outside monitored repositories; inherited API keys are not used
 in the default subscription mode.
 
+Each repository in a write mode must separately pin the exact
+`publication_actor` that pushes ordinary translation commits and authors status
+replies. Publication currently requires a `User` identity (normally a dedicated
+machine user with a narrowly scoped PAT); GitHub App installation-token `Bot`
+publication is not supported by the `/user` identity proof. Numeric ID and type
+are checked before and around remote writes. This authority is independent of
+`allowed_pr_authors`, which restricts the existing PR owners whose branches the
+Guardian may advance; enabled remediation and prevention actors must use the
+same credential identity. Reviewer bots remain supported through `trusted_bots`.
+
+An optional `closed_pr_backfill` runs durable, bounded scan cycles only after
+open-PR processing. Each frozen window restarts at page 1 with an append-only
+seen-identity set and a second identity-only confirmation traversal. GitHub's
+listing is not an atomic snapshot, so completion requires a quiescent pass. A
+discovery or confirmation pass that cannot reach the cutoff or list end within
+100 pages or 10,000 entries fails visibly and leaves the cycle incomplete; use
+a narrower lookback for a larger history. Each selected PR gets up to three
+immediate hydration attempts. A failed identity is skipped for the rest of that
+cycle, retained in a durable retry ledger, and prioritized on later polls even
+after it leaves the discovery window. Eligible merged or unmerged source PRs
+are read-only evidence sources. Every observed review revision is stored
+immutably, and later edits or deletions are detected before a write; the
+Guardian never modifies those PRs or comments and rechecks every finding
+against the exact current base.
+Already-fixed or obsolete findings become terminal no-ops, while ambiguous or
+conflicting evidence defers without a write.
+
+`observe` and `prepare` perform no GitHub writes; only an explicit remediation policy in
+`apply-owned-translations` or `propose-prevention` can publish a bot-marked new
+draft correction PR containing a signed commit for human review, subject to an
+exact publication actor, head-repository, and branch allowlists plus a separate
+global publication cap. The draft links the still-valid closed feedback,
+including its source PR; the Guardian never writes to the closed PR or merges
+the draft. Exact edits are deduplicated, same-target alternatives defer, and
+every multi-source recovery batch remains bounded and all-or-nothing in local
+state; the final destination and source observations are necessarily sequential.
+
+A generated correction PR that a maintainer closes without merging is a human
+veto and durable deduplication evidence: the Guardian does not recreate the
+same correction unchanged. A merged correction stops suppressing a later exact
+recurrence. After fresh current-base validation, that recurrence may use a new
+policy-digest-bound v2 branch identity; state migrated from the earlier v1
+identity remains recoverable. Recovery requires the canonical PR URL, author,
+head, base, candidate commit, exact generated title, and full generated body
+including its marker to remain unchanged. Accepted human lifecycle states and
+fail-closed cases are detailed in the Guardian guide.
+
+The discovery window admits new evidence only. Direct recovery of a durable
+pending attempt ignores that window, so a published branch cannot age out
+before reconciliation. If a branch-only attempt's evidence or target base moves
+before it has an exact PR, the Guardian abandons the local attempt without
+deleting or overwriting its remote branch; a durable source retry can then
+build a distinct, freshly validated attempt.
+
+The marker is the `[Localize Guardian bot]` title prefix plus explicit
+bot-generated text in the draft body; it is not a GitHub label.
+
+Prevention intake is bounded at 100 code globs, 100 test globs, 64 focused test
+commands, 256 arguments per command, one direct sandbox-wrapper executable,
+4096 UTF-8 bytes per listed string, 100 changed files, 100 recurrence candidates, and 100 evidence
+IDs per candidate. Generated prevention titles fit both 120 characters and 256
+UTF-8 bytes; generated bodies fit 60 KiB and deterministically summarize any
+oversized human-facing lists. See the Guardian guide for the exact policy and
+branch-prefix bounds.
+
+Operators can inspect bounded durable worklists with
+`guardian remediation list` and `guardian history-retry list`. Their
+`quarantine` subcommands require an explicit terminal-local-skip
+acknowledgement and only append to the private local ledger. Remediation
+quarantine is an explicit terminal skip for the listed attempt, not a remote PR
+action. Historical retry quarantine is a permanent source-PR veto for the exact
+policy digest, so later comments remain ignored until that policy changes; no
+quarantine command changes remote GitHub state.
+
+The remediation list orders active attempts before terminal local history and
+shows the current remote lifecycle, canonical PR URL, terminal resolution,
+branch-identity version, and exact source-to-draft coverage provenance. It
+explicitly reports when its bounded attempt or per-draft coverage output is
+truncated; `guardian status` keeps those details aggregated.
+
 Write modes support the backward-compatible OpenPGP signer or an opt-in,
 agent-backed SSH signing key. The SSH path stores only an exact public-key
 fingerprint and public-key file; the agent socket reaches only the commit
@@ -392,6 +472,8 @@ Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Docker Server Deployment
 
+This section covers the translation runner, not Localize Guardian. Guardian is
+installed and scheduled separately on infrastructure controlled by its operator.
 Most projects should use the GitHub Action. The Docker path is for scheduled
 server jobs that pull from Transifex and push signed translation PRs.
 

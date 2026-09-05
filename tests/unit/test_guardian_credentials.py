@@ -126,6 +126,38 @@ def test_git_credential_provider_keeps_token_out_of_script_and_cleans_up(
     assert not helper_path.parent.exists()
 
 
+def test_credential_snapshot_prevents_alternating_helper_issuances(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    command = credentials.SecretCommand(("helper",))
+    issued = iter(("publication-actor-token", "different-actor-token"))
+    reads = 0
+
+    def read_secret(_command: credentials.SecretCommand) -> str:
+        nonlocal reads
+        reads += 1
+        return next(issued)
+
+    monkeypatch.setattr(credentials.SecretCommand, "read", read_secret)
+
+    with credentials.credential_snapshot(command) as snapshot:
+        assert snapshot.read() == "publication-actor-token"
+        with credentials.git_credential_environment(
+            snapshot,
+            temporary_root=tmp_path,
+        ) as git_environment:
+            assert git_environment()["LOCALIZE_GUARDIAN_GIT_TOKEN"] == (
+                "publication-actor-token"
+            )
+        assert snapshot.read() == "publication-actor-token"
+        assert "publication-actor-token" not in repr(snapshot)
+
+    assert reads == 1
+    with pytest.raises(credentials.CredentialError, match="no longer active"):
+        snapshot.read()
+
+
 def test_runtime_command_arguments_reject_control_characters() -> None:
     with pytest.raises(ValueError, match="argv"):
         credentials.SecretCommand(("helper", "bad\nargument"))

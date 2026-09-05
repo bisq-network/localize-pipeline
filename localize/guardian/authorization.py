@@ -14,7 +14,7 @@ from localize.guardian.github import (
 from localize.guardian.models import FeedbackEvent, RepositoryPolicy
 
 
-_FULL_SHA = re.compile(r"^[0-9a-fA-F]{40,64}$")
+_FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _GUARDIAN_MARKER = "<!-- localize-guardian:v1 "
 
 
@@ -81,6 +81,8 @@ def _actor_locales(
 def _authorize_pull(
     policy: RepositoryPolicy,
     snapshot: PullRequestFeedbackSnapshot,
+    *,
+    required_state: str,
 ) -> None:
     identity = snapshot.repository_identity
     pull = snapshot.pull_request
@@ -111,7 +113,7 @@ def _authorize_pull(
         else None
     )
     if (
-        pull.state.casefold() != "open"
+        pull.state.casefold() != required_state
         or pull.base_ref != policy.base_branch
         or author is None
         or author.type != pull.author_type
@@ -134,20 +136,15 @@ def _skip(revision: FeedbackRevision, reason: str) -> SkippedFeedback:
     )
 
 
-def authorize_feedback(
+def _authorize_feedback_for_state(
     *,
     policy: RepositoryPolicy,
     snapshot: PullRequestFeedbackSnapshot,
     path_locales: Mapping[str, str],
     changed_locales: Sequence[str],
+    required_pull_state: str,
 ) -> AuthorizedFeedback:
-    """Bind visible GitHub feedback to a trusted actor and target locale.
-
-    Login names are retained only for display. Numeric actor, repository, and
-    pull-request identities plus actor types are the authorization boundary.
-    """
-
-    _authorize_pull(policy, snapshot)
+    _authorize_pull(policy, snapshot, required_state=required_pull_state)
     locale_scope = set(changed_locales)
     if not locale_scope:
         raise IntakePolicyError("Owned pull request has no changed target locales.")
@@ -225,9 +222,56 @@ def authorize_feedback(
     return AuthorizedFeedback(events=tuple(events), skipped=tuple(skipped))
 
 
+def authorize_feedback(
+    *,
+    policy: RepositoryPolicy,
+    snapshot: PullRequestFeedbackSnapshot,
+    path_locales: Mapping[str, str],
+    changed_locales: Sequence[str],
+) -> AuthorizedFeedback:
+    """Bind visible GitHub feedback to a trusted actor and target locale.
+
+    Login names are retained only for display. Numeric actor, repository, and
+    pull-request identities plus actor types are the authorization boundary.
+    """
+
+    return _authorize_feedback_for_state(
+        policy=policy,
+        snapshot=snapshot,
+        path_locales=path_locales,
+        changed_locales=changed_locales,
+        required_pull_state="open",
+    )
+
+
+def authorize_historical_feedback(
+    *,
+    policy: RepositoryPolicy,
+    snapshot: PullRequestFeedbackSnapshot,
+    path_locales: Mapping[str, str],
+    changed_locales: Sequence[str],
+) -> AuthorizedFeedback:
+    """Bind trusted feedback from an owned pull request that is closed."""
+
+    # GitHub's canonical REST representation is exactly ``closed``. Historical
+    # intake is a new security boundary, so reject synthetic or malformed case
+    # variants instead of inheriting the legacy open-path normalization.
+    if snapshot.pull_request.state != "closed":
+        raise IntakePolicyError("Pull request does not match the owned pull-request policy.")
+
+    return _authorize_feedback_for_state(
+        policy=policy,
+        snapshot=snapshot,
+        path_locales=path_locales,
+        changed_locales=changed_locales,
+        required_pull_state="closed",
+    )
+
+
 __all__ = (
     "AuthorizedFeedback",
     "IntakePolicyError",
     "SkippedFeedback",
     "authorize_feedback",
+    "authorize_historical_feedback",
 )

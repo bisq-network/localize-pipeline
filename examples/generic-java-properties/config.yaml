@@ -10,7 +10,8 @@ translation_source: "git"
 
 model_provider: "aisuite"
 model_name: "gpt-4o-mini"
-review_model_name: "gpt-4o"
+review_model_name: "gpt-5.6-terra"
+review_reasoning_effort: "none"
 
 glossary_file_path: "glossary.json"
 brand_technical_glossary:

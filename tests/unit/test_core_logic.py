@@ -18,6 +18,7 @@ from localize.translate_localization_files import (
     build_context,
     apply_ignored_source_values,
     normalize_value,
+    prefer_existing_translation_on_failure,
     compute_ledger_hash,
     extract_texts_to_translate,
     filter_git_changed_keys_by_source,
@@ -1602,6 +1603,109 @@ class TestFilterGitChangedKeys(unittest.TestCase):
         )
 
         self.assertIn("key.orphan", result)
+
+
+class TestPreferExistingTranslationOnFailure(unittest.TestCase):
+    """Model failures may reuse only a ledger-attested current translation."""
+
+    def test_preserves_existing_translation_when_both_hashes_match(self):
+        source_value = "Open trade chat"
+        existing_value = "Открыть чат сделки"
+        repaired = prefer_existing_translation_on_failure(
+            [(0, source_value, False)],
+            ["key.chat"],
+            {"key.chat": source_value},
+            {"key.chat": existing_value},
+            {
+                "key.chat": {
+                    "source_hash": compute_ledger_hash(source_value),
+                    "target_hash": compute_ledger_hash(existing_value),
+                    "status": "failed",
+                }
+            },
+        )
+
+        self.assertEqual(repaired, [(0, existing_value, False)])
+
+    def test_does_not_restore_translation_after_source_changed(self):
+        current_source = "Open the new trade chat"
+        old_source = "Open trade chat"
+        existing_value = "Открыть чат сделки"
+
+        repaired = prefer_existing_translation_on_failure(
+            [(0, current_source, False)],
+            ["key.chat"],
+            {"key.chat": current_source},
+            {"key.chat": existing_value},
+            {
+                "key.chat": {
+                    "source_hash": compute_ledger_hash(old_source),
+                    "target_hash": compute_ledger_hash(existing_value),
+                }
+            },
+        )
+
+        self.assertEqual(repaired, [(0, current_source, False)])
+
+    def test_does_not_restore_target_changed_outside_ledger(self):
+        source_value = "Open trade chat"
+        recorded_target = "Открыть торговый чат"
+        current_target = "Открыть чат сделки"
+
+        repaired = prefer_existing_translation_on_failure(
+            [(0, source_value, False)],
+            ["key.chat"],
+            {"key.chat": source_value},
+            {"key.chat": current_target},
+            {
+                "key.chat": {
+                    "source_hash": compute_ledger_hash(source_value),
+                    "target_hash": compute_ledger_hash(recorded_target),
+                }
+            },
+        )
+
+        self.assertEqual(repaired, [(0, source_value, False)])
+
+    def test_requires_a_usable_non_source_existing_value(self):
+        source_value = "Open trade chat"
+        source_hash = compute_ledger_hash(source_value)
+        for existing_value in (None, "", "   ", source_value):
+            with self.subTest(existing_value=existing_value):
+                existing = (
+                    {}
+                    if existing_value is None
+                    else {"key.chat": existing_value}
+                )
+                repaired = prefer_existing_translation_on_failure(
+                    [(0, source_value, False)],
+                    ["key.chat"],
+                    {"key.chat": source_value},
+                    existing,
+                    {
+                        "key.chat": {
+                            "source_hash": source_hash,
+                            "target_hash": compute_ledger_hash(existing_value),
+                        }
+                    },
+                )
+                self.assertEqual(repaired, [(0, source_value, False)])
+
+    def test_leaves_success_and_unknown_positions_untouched(self):
+        results = [
+            (0, "Otevřít obchodní chat", True),
+            (2, "outside scope", False),
+        ]
+
+        repaired = prefer_existing_translation_on_failure(
+            results,
+            ["key.chat"],
+            {"key.chat": "Open trade chat"},
+            {"key.chat": "stale"},
+            {},
+        )
+
+        self.assertEqual(repaired, results)
 
 
 if __name__ == '__main__':
