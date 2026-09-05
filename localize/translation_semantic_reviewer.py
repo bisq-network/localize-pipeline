@@ -12,7 +12,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import jsonschema
 import yaml
-from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam
+from openai.types.chat import (
+    ChatCompletionSystemMessageParam,
+    ChatCompletionUserMessageParam,
+)
 
 from localize.app_config import resolve_semantic_review_model
 from localize.json_response import (
@@ -33,6 +36,7 @@ from localize.placeholder_rules import (
     set_placeholder_profile,
     validate_placeholder_profile,
 )
+from localize.plugins import load_plugins
 from localize.semantic_quality import (
     TranslationChange,
     iter_translation_changes_from_diff,
@@ -42,11 +46,18 @@ from localize.semantic_remediation import (
     apply_semantic_review_suggestions,
     semantic_review_finding_signature,
 )
-from localize.translation_quality_gate import get_staged_diff, load_quality_gate_localization_profiles
+from localize.translation_quality_gate import (
+    get_staged_diff,
+    load_quality_gate_localization_profiles,
+)
 
 SEMANTIC_REVIEW_BATCH_SIZE = 50
 SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS = 1000
 _CORRUPT_SUMMARY_SENTINEL = "__corrupt_summary__"
+
+
+class SemanticReviewResponseError(ValueError):
+    """The semantic model returned output that cannot authorize publication."""
 
 
 SEMANTIC_REVIEW_SCHEMA = {
@@ -120,7 +131,10 @@ def build_semantic_review_messages(
     }
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, indent=2)},
+        {
+            "role": "user",
+            "content": json.dumps(user_payload, ensure_ascii=False, indent=2),
+        },
     ]
 
 
@@ -132,8 +146,9 @@ def normalize_review_response(
         parsed = loads_json_object(response_text)
         jsonschema.validate(instance=parsed, schema=SEMANTIC_REVIEW_SCHEMA)
     except (ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
-        logging.getLogger(__name__).warning("Semantic review returned invalid JSON: %s", exc)
-        return []
+        raise SemanticReviewResponseError(
+            "Semantic review response did not match the required JSON schema."
+        ) from exc
     changes_by_identity = {(change.file, change.key): change for change in changes}
     findings: List[Dict[str, str]] = []
     dropped_count = 0
@@ -146,7 +161,11 @@ def normalize_review_response(
         key = str(raw_finding.get("key") or "")
         severity = raw_finding.get("severity")
         reason = raw_finding.get("reason")
-        if severity not in {"error", "warning"} or not isinstance(reason, str) or not reason:
+        if (
+            severity not in {"error", "warning"}
+            or not isinstance(reason, str)
+            or not reason
+        ):
             dropped_count += 1
             continue
         if not key and file:
@@ -169,11 +188,15 @@ def normalize_review_response(
         }
         suggested_value = raw_finding.get("suggested_value")
         if isinstance(suggested_value, str) and suggested_value:
-            finding["suggested_value"] = suggested_value[:SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS]
+            finding["suggested_value"] = suggested_value[
+                :SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS
+            ]
         finding["finding_signature"] = semantic_review_finding_signature(finding)
         findings.append(finding)
     if dropped_count:
-        logging.getLogger(__name__).info("Dropped %d out-of-scope semantic review finding(s).", dropped_count)
+        logging.getLogger(__name__).info(
+            "Dropped %d out-of-scope semantic review finding(s).", dropped_count
+        )
     return findings
 
 
@@ -217,6 +240,7 @@ def append_semantic_review_status(
     attempted: bool,
     failed_batches: int = 0,
     failed_locales: Sequence[str] = (),
+    failed_run: bool = False,
 ) -> None:
     summary = _load_validation_summary(validation_summary_path)
     if summary.get(_CORRUPT_SUMMARY_SENTINEL):
@@ -228,7 +252,9 @@ def append_semantic_review_status(
         "failed_batches": failed_batches,
         "failed_locales": list(failed_locales),
     }
-    if failed_batches or failed_locales:
+    if failed_run:
+        summary["semantic_review"]["failed_run"] = True
+    if failed_run or failed_batches or failed_locales:
         summary["pipeline_warnings"].append(
             {
                 "file": "semantic-review",
@@ -236,7 +262,8 @@ def append_semantic_review_status(
                 "errors": [
                     (
                         "Semantic AI review did not complete for all batches "
-                        f"({failed_batches} failed batch(es), {len(failed_locales)} failed locale task(s))."
+                        f"({failed_batches} failed batch(es), {len(failed_locales)} "
+                        f"failed locale task(s), run failure: {failed_run})."
                     )
                 ],
             }
@@ -270,11 +297,17 @@ def _load_validation_summary(validation_summary_path: str) -> Dict[str, Any]:
                 "Validation summary JSON is corrupt; leaving existing file untouched: %s",
                 validation_summary_path,
             )
-            return {"files": {}, "pipeline_warnings": [], _CORRUPT_SUMMARY_SENTINEL: True}
+            return {
+                "files": {},
+                "pipeline_warnings": [],
+                _CORRUPT_SUMMARY_SENTINEL: True,
+            }
     return {"files": {}, "pipeline_warnings": []}
 
 
-def _write_validation_summary(validation_summary_path: str, summary: Dict[str, Any]) -> None:
+def _write_validation_summary(
+    validation_summary_path: str, summary: Dict[str, Any]
+) -> None:
     summary_path = Path(validation_summary_path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = summary_path.with_name(f".{summary_path.name}.tmp")
@@ -314,7 +347,7 @@ async def review_translation_changes(
     )
     findings: List[Dict[str, str]] = []
     for start in range(0, len(changes), SEMANTIC_REVIEW_BATCH_SIZE):
-        batch = list(changes[start:start + SEMANTIC_REVIEW_BATCH_SIZE])
+        batch = list(changes[start : start + SEMANTIC_REVIEW_BATCH_SIZE])
         try:
             findings.extend(
                 await _review_translation_change_batch(
@@ -356,7 +389,9 @@ async def _review_translation_change_batch(
     response = await provider.create_chat_completion(
         model=model,
         messages=[
-            ChatCompletionSystemMessageParam(role="system", content=messages[0]["content"]),
+            ChatCompletionSystemMessageParam(
+                role="system", content=messages[0]["content"]
+            ),
             ChatCompletionUserMessageParam(role="user", content=messages[1]["content"]),
         ],
         temperature=0,
@@ -367,10 +402,9 @@ async def _review_translation_change_batch(
     )
     finish_reason = getattr(response.choices[0], "finish_reason", None)
     if finish_reason == "length":
-        logging.getLogger(__name__).warning(
-            "Semantic review response was truncated; ignoring findings for this batch."
+        raise SemanticReviewResponseError(
+            "Semantic review response was truncated before validation."
         )
-        return []
     response_text = response.choices[0].message.content or ""
     return normalize_review_response(response_text, changes)
 
@@ -400,14 +434,18 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
     try:
         validate_placeholder_profile(placeholder_profile)
     except ValueError as exc:
-        logging.getLogger(__name__).error("Semantic review configuration failed: %s", exc)
+        logging.getLogger(__name__).error(
+            "Semantic review configuration failed: %s", exc
+        )
         return 1
     set_placeholder_profile(placeholder_profile)
     logger = logging.getLogger(__name__)
     review_model_override = str(os.environ.get("REVIEW_MODEL_NAME") or "").strip()
     effective_review_model = (
         review_model_override
-        or str(config.get("review_model_name") or config.get("model_name") or "").strip()
+        or str(
+            config.get("review_model_name") or config.get("model_name") or ""
+        ).strip()
         or None
     )
     try:
@@ -421,11 +459,31 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
     semantic_review_config = dict(config.get("semantic_review") or {})
     if not semantic_review_enabled:
         return 0
-    if bool(config.get("dry_run", False)):
+    dry_run_override = os.environ.get("LOCALIZE_DRY_RUN", "").strip().casefold()
+    configured_dry_run = config.get("dry_run", False)
+    dry_run = (
+        configured_dry_run is True
+        or (
+            isinstance(configured_dry_run, str)
+            and configured_dry_run.strip().casefold() in {"1", "true", "yes", "on"}
+        )
+        or dry_run_override
+        in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    )
+    if dry_run:
         append_semantic_review_findings(args.validation_summary, [])
+        append_semantic_review_status(args.validation_summary, attempted=False)
         return 0
 
-    locales, language_names = _configured_locales(config.get("supported_locales", []) or [])
+    load_plugins()
+    locales, language_names = _configured_locales(
+        config.get("supported_locales", []) or []
+    )
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
     localization_profiles = load_quality_gate_localization_profiles(args.config)
     changes = []
@@ -451,7 +509,9 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
     reasoning_effort = normalize_reasoning_effort(
         semantic_review_config.get("reasoning_effort")
     )
-    provider_name = str(config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER)
+    provider_name = str(
+        config.get("model_provider", DEFAULT_MODEL_PROVIDER) or DEFAULT_MODEL_PROVIDER
+    )
     api_base_url = os.environ.get("OPENAI_BASE_URL") or config.get("api_base_url")
     aisuite_config = config.get("aisuite", {}) or {}
     try:
@@ -465,16 +525,27 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         )
     except ModelProviderConfigurationError as exc:
         logger.error("Semantic review model provider configuration failed: %s", exc)
+        append_semantic_review_status(
+            args.validation_summary,
+            attempted=True,
+            failed_run=True,
+        )
         return 1
     findings: List[Dict[str, str]] = []
     failed_batches: List[str] = []
-    locale_codes_to_review = sorted({change.locale_code for change in changes if change.locale_code})
-    max_concurrent_locales = max(1, int(semantic_review_config.get("max_concurrent_locales", 3)))
+    locale_codes_to_review = sorted(
+        {change.locale_code for change in changes if change.locale_code}
+    )
+    max_concurrent_locales = max(
+        1, int(semantic_review_config.get("max_concurrent_locales", 3))
+    )
     locale_semaphore = asyncio.Semaphore(max_concurrent_locales)
 
     async def review_locale(locale_code: str) -> List[Dict[str, str]]:
         async with locale_semaphore:
-            locale_changes = [change for change in changes if change.locale_code == locale_code]
+            locale_changes = [
+                change for change in changes if change.locale_code == locale_code
+            ]
             return await review_translation_changes(
                 client=provider.client,
                 model=model,
@@ -504,12 +575,10 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         failed_batches=len(failed_batches),
         failed_locales=failed_locales,
     )
+    semantic_review_incomplete = bool(failed_batches or failed_locales)
 
     if _auto_apply_suggestions_enabled(config, semantic_review_config):
-        changed_identities = {
-            (change.file, change.key)
-            for change in changes
-        }
+        changed_identities = {(change.file, change.key) for change in changes}
         remediation = apply_semantic_review_suggestions(
             repo_root=args.repo_root,
             input_folder=args.input_folder,
@@ -539,7 +608,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
                 "Failed to merge semantic review usage into %s",
                 args.token_usage_summary,
             )
-    return 0
+    return 1 if semantic_review_incomplete else 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

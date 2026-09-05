@@ -182,6 +182,17 @@ Only findings with `severity: error` and `suggested_value` are considered. The
 pipeline applies a suggestion only when the configured format adapter can find
 the file/key and deterministic checks confirm placeholder parity and control
 characters. Skipped suggestions stay in the quality report for manual review.
+If any enabled semantic-review batch or locale task fails, publication stops;
+this incomplete-review state is independently blocking even when generic
+pipeline warnings are configured as non-blocking.
+
+`localize run` itself performs the translation and holistic-review stages; it
+does not mutate the Git index or invoke publication sidecars. The GitHub Action
+and `update-translations.sh` stage their exact translation scope, run this
+optional semantic reviewer, and then run the quality gate. Custom local
+publication tooling must orchestrate those same post-translation stages. The
+pre-run cost estimate includes an enabled semantic-review pass because the
+standard publication orchestrators execute that pass immediately afterward.
 
 ## JSON Behavior
 

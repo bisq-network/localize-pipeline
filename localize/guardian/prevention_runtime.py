@@ -32,19 +32,24 @@ from localize.guardian.codex import (
     CodexTransientError,
     CodexUsage,
     _child_environment,
+    _diagnostic_detail,
     _extract_usage,
     _is_authentication_failure,
     _is_capacity_failure,
-    _redacted_detail,
     codex_auth_config,
 )
-from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.deadline import (
+    PollDeadline,
+    PollDeadlineExceeded,
+    deadline_httpx_timeout,
+)
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
     SecretCommand,
 )
 from localize.guardian.github import GitHubAuthenticationError
+from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.models import (
     CodexAuthMode,
     ExactRepository,
@@ -108,6 +113,7 @@ _MAX_PREVENTION_SOURCE_PULLS = 100
 _MAX_PREVENTION_SOURCE_REVISIONS = 50_000
 _MAX_ORPHAN_RECOVERY_CANDIDATES = 100
 _SQLITE_MAX_INTEGER = 9_223_372_036_854_775_807
+_CREDENTIAL_SAFETY_ERROR = "Prevention candidate failed credential safety validation."
 _RECOVERY_PROVENANCE_EVENTS = frozenset(
     {
         "ready_for_review",
@@ -495,7 +501,7 @@ def _prevention_policy_from_attestation(value: str) -> PreventionPolicy:
     """Rehydrate only the immutable publication authority needed for recovery."""
 
     try:
-        raw = json.loads(value)
+        raw = loads_bounded_json(value)
         if (
             not isinstance(raw, Mapping)
             or set(raw) != {"attestation_version", "repository_policy"}
@@ -614,7 +620,7 @@ def _prevention_policy_from_attestation(value: str) -> PreventionPolicy:
             focused_test_argv=commands,
             sandbox_argv_prefix=bounded_strings(
                 raw_prevention["sandbox_argv_prefix"],
-                maximum=256,
+                maximum=1,
             ),
             max_changed_files=max_changed_files,
             max_changed_bytes=max_changed_bytes,
@@ -666,7 +672,7 @@ def _validate_authoring_policy_bounds(policy: RepositoryPolicy) -> None:
         or prevention.max_changed_bytes <= 0
         or not 1 <= len(prevention.allowed_code_path_globs) <= 100
         or not 1 <= len(prevention.allowed_test_path_globs) <= 100
-        or not 1 <= len(prevention.sandbox_argv_prefix) <= 256
+        or len(prevention.sandbox_argv_prefix) != 1
         or any(
             not isinstance(value, str)
             or not value
@@ -893,7 +899,7 @@ class PreventionGitHubBroker:
         payload: Mapping[str, object] | None = None,
         allow_missing: bool = False,
     ) -> object | None:
-        request_timeout = _operation_timeout(
+        request_timeout = deadline_httpx_timeout(
             self.deadline,
             self.timeout_seconds,
         )
@@ -934,7 +940,7 @@ class PreventionGitHubBroker:
         except httpx.HTTPError:
             raise PreventionRuntimeError("GitHub prevention request failed.") from None
         try:
-            return json.loads(content)
+            return loads_bounded_json(content)
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError, RecursionError):
             raise _MalformedGitHubResponseError(
                 "GitHub prevention request returned invalid JSON."
@@ -1688,11 +1694,14 @@ class PreventionGitHubBroker:
         title: str,
         body: str,
         before_create: Callable[[], None],
+        before_post: Callable[[], None] | None = None,
     ) -> PreventionDraftResult:
         """Find an exact prior Guardian draft or create one with ``draft=true``."""
 
         if not callable(before_create):
             raise TypeError("before_create must be callable")
+        if before_post is not None and not callable(before_post):
+            raise TypeError("before_post must be callable")
         branch = _safe_branch(branch, prefix=self.policy.push_branch_prefix)
         _full_sha(expected_base_sha, label="expected base SHA")
         _full_sha(candidate_sha, label="candidate SHA")
@@ -1743,10 +1752,13 @@ class PreventionGitHubBroker:
                     "Prevention branch is not the candidate commit."
                 )
 
-            # Consume/check the local publication authority before the final
-            # remote revalidation. The callback is idempotent for one
-            # candidate, so it can check the lease again immediately pre-POST.
+            # Consume/check local source authority before refreshing the
+            # destination. The callback is idempotent for one candidate.
             before_create()
+            if self._assert_authenticated_actor(client) != actor:
+                raise GitHubAuthenticationError(
+                    "GitHub prevention actor changed before draft creation."
+                )
             self._assert_identities(client)
             if self._base_sha(client) != expected_base_sha:
                 raise PreventionRuntimeError(
@@ -1773,7 +1785,6 @@ class PreventionGitHubBroker:
                 raise PreventionRuntimeError(
                     "Prevention branch moved before draft creation."
                 )
-            before_create()
             existing = self._find_draft(
                 client,
                 expected_author=(
@@ -1789,9 +1800,14 @@ class PreventionGitHubBroker:
             )
             if existing is not None:
                 return existing
-            # The stable recovery lookup above performs network reads. Recheck
-            # every remote publication identity it could have raced with, then
-            # recheck the source/lease immediately before the irreversible POST.
+            # The stable duplicate lookup above performs network reads. Refresh
+            # source authority after it, then re-read the destination identities
+            # that could have changed during that callback.
+            before_create()
+            if self._assert_authenticated_actor(client) != actor:
+                raise GitHubAuthenticationError(
+                    "GitHub prevention actor changed before draft creation."
+                )
             self._assert_identities(client)
             if self._base_sha(client) != expected_base_sha:
                 raise PreventionRuntimeError(
@@ -1818,7 +1834,11 @@ class PreventionGitHubBroker:
                 raise PreventionRuntimeError(
                     "Prevention branch moved before draft creation."
                 )
-            before_create()
+            if before_post is not None:
+                # Keep exact source authority as the final remote observation.
+                # The destination checks immediately above cannot be made
+                # atomic with GitHub's independent source resources.
+                before_post()
             push_owner = self.policy.push_repository.full_name.split("/", 1)[0]
             created = self._request(
                 client,
@@ -1977,8 +1997,7 @@ class PreventionCodexAuthor:
                 self.timeout_seconds,
             )
             deadline_bound_timeout = (
-                self.deadline is not None
-                and process_timeout < self.timeout_seconds
+                self.deadline is not None and process_timeout < self.timeout_seconds
             )
             process_limits = ProcessLimits.for_timeout(
                 process_timeout,
@@ -2000,10 +2019,14 @@ class PreventionCodexAuthor:
                     workspace_quota=workspace_quota,
                 )
             except FileNotFoundError as exc:
+                environment.pop("CODEX_API_KEY", None)
+                api_key = None
                 raise CodexExecutableError(
                     "Prevention Codex executable was not found."
                 ) from exc
             except subprocess.TimeoutExpired:
+                environment.pop("CODEX_API_KEY", None)
+                api_key = None
                 if deadline_bound_timeout:
                     raise PollDeadlineExceeded(
                         "Guardian poll deadline was exceeded."
@@ -2012,20 +2035,38 @@ class PreventionCodexAuthor:
                     self.deadline.require_remaining()
                 raise CodexTimeoutError("Prevention Codex author timed out.") from None
             except ProcessResourceError as exc:
+                environment.pop("CODEX_API_KEY", None)
+                api_key = None
                 raise CodexOutputError(
                     "Prevention Codex exceeded a Guardian resource boundary."
                 ) from exc
+            except Exception:
+                environment.pop("CODEX_API_KEY", None)
+                api_key = None
+                raise
             if completed.returncode == 0:
+                unsafe_diagnostic = api_key is not None and any(
+                    api_key in output
+                    for output in (completed.stdout or "", completed.stderr or "")
+                )
+                environment.pop("CODEX_API_KEY", None)
+                api_key = None
+                if unsafe_diagnostic:
+                    raise CodexOutputError(
+                        "Prevention Codex output failed credential safety validation."
+                    )
                 return PreventionAuthorResult(
                     attempts=1,
                     usage=_extract_usage(completed.stdout),
                 )
-            detail = _redacted_detail(completed, environment)
-            if _is_authentication_failure(detail):
+            diagnostic = _diagnostic_detail(completed)
+            environment.pop("CODEX_API_KEY", None)
+            api_key = None
+            if _is_authentication_failure(diagnostic):
                 raise CodexAuthenticationError(
                     "Prevention Codex failed to authenticate."
                 )
-            if _is_capacity_failure(detail):
+            if _is_capacity_failure(diagnostic):
                 raise CodexCapacityError("Prevention Codex capacity is unavailable.")
             raise CodexTransientError("Prevention Codex author attempt failed.")
 
@@ -2095,8 +2136,7 @@ class SandboxedTestRunner:
             with _network_canaries() as (tcp_host, tcp_port, unix_socket_path):
                 process_timeout = self._remaining_timeout()
                 deadline_bound_timeout = (
-                    self.deadline is not None
-                    and process_timeout < self.timeout_seconds
+                    self.deadline is not None and process_timeout < self.timeout_seconds
                 )
                 process_limits = ProcessLimits.for_timeout(
                     process_timeout,
@@ -2185,8 +2225,7 @@ class SandboxedTestRunner:
             )
             process_timeout = self._remaining_timeout()
             deadline_bound_timeout = (
-                self.deadline is not None
-                and process_timeout < self.timeout_seconds
+                self.deadline is not None and process_timeout < self.timeout_seconds
             )
             process_limits = ProcessLimits.for_timeout(
                 process_timeout,
@@ -2235,11 +2274,11 @@ class SandboxedTestRunner:
         test_overlay_hash: str,
     ) -> tuple[TestCommandResult, ...]:
         if (
-            not policy.sandbox_argv_prefix
+            len(policy.sandbox_argv_prefix) != 1
             or not Path(policy.sandbox_argv_prefix[0]).is_absolute()
         ):
             raise PreventionPolicyError(
-                "configured sandbox executable must be absolute"
+                "configured sandbox prefix must contain one absolute wrapper executable"
             )
         if any(
             not argv or not Path(argv[0]).is_absolute()
@@ -2347,6 +2386,170 @@ def _copy_file_contents(
     if deadline is not None:
         deadline.require_remaining()
     return str(destination_path)
+
+
+def _regular_file_contains_credential(
+    path: Path,
+    expected_metadata: os.stat_result,
+    credential: bytearray,
+    *,
+    deadline: PollDeadline | None,
+) -> bool:
+    """Search one untrusted regular file without following a replacement link."""
+
+    if deadline is not None:
+        deadline.require_remaining()
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_metadata.st_mode)
+            or opened_metadata.st_dev != expected_metadata.st_dev
+            or opened_metadata.st_ino != expected_metadata.st_ino
+            or opened_metadata.st_size != expected_metadata.st_size
+        ):
+            raise OSError("candidate file changed during credential scan")
+        overlap = b""
+        overlap_size = max(0, len(credential) - 1)
+        while chunk := os.read(descriptor, 64 * 1024):
+            if deadline is not None:
+                deadline.require_remaining()
+            window = overlap + chunk
+            if credential in window:
+                return True
+            overlap = window[-overlap_size:] if overlap_size else b""
+        final_metadata = os.fstat(descriptor)
+        if (
+            final_metadata.st_dev != opened_metadata.st_dev
+            or final_metadata.st_ino != opened_metadata.st_ino
+            or final_metadata.st_size != opened_metadata.st_size
+        ):
+            raise OSError("candidate file changed during credential scan")
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _tree_contains_credential(
+    root: Path,
+    credential: bytearray,
+    *,
+    scan_contents: bool,
+    deadline: PollDeadline | None,
+) -> bool:
+    """Search bounded repository names, link targets, and optional file bytes."""
+
+    root_metadata = root.lstat()
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        raise OSError("credential scan root is not a real directory")
+    pending: list[tuple[Path, tuple[str, ...]]] = [(root, ())]
+    entries_seen = 0
+    bytes_seen = 0
+    while pending:
+        if deadline is not None:
+            deadline.require_remaining()
+        directory, parent_parts = pending.pop()
+        with os.scandir(directory) as scanner:
+            entries = list(scanner)
+        for entry in entries:
+            if deadline is not None:
+                deadline.require_remaining()
+            if not parent_parts and entry.name == ".git":
+                continue
+            entries_seen += 1
+            if entries_seen > _MAX_SNAPSHOT_ENTRIES:
+                raise OSError("credential scan entry bound exceeded")
+            parts = (*parent_parts, entry.name)
+            relative_bytes = b"/".join(os.fsencode(part) for part in parts)
+            if credential in relative_bytes:
+                return True
+            metadata = entry.stat(follow_symlinks=False)
+            entry_path = Path(entry.path)
+            if stat.S_ISDIR(metadata.st_mode):
+                pending.append((entry_path, parts))
+                continue
+            if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                bytes_seen += metadata.st_size
+            if (
+                bytes_seen > _MAX_SNAPSHOT_BYTES
+                or stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size > _MAX_SNAPSHOT_FILE_BYTES
+            ):
+                raise OSError("credential scan byte bound exceeded")
+            if stat.S_ISREG(metadata.st_mode) and scan_contents:
+                if _regular_file_contains_credential(
+                    entry_path,
+                    metadata,
+                    credential,
+                    deadline=deadline,
+                ):
+                    return True
+            elif stat.S_ISLNK(metadata.st_mode):
+                if credential in os.fsencode(os.readlink(entry_path)):
+                    return True
+    return False
+
+
+def _reject_model_credential_in_candidate_delta(
+    *,
+    base_workspace: Path,
+    candidate_workspace: Path,
+    credential: str,
+    deadline: PollDeadline | None,
+) -> None:
+    """Fail closed before diagnostics can expose model credentials from a patch."""
+
+    encoded = bytearray()
+    try:
+        encoded.extend(credential.encode("utf-8"))
+        unsafe = not encoded or _tree_contains_credential(
+            candidate_workspace,
+            encoded,
+            scan_contents=True,
+            deadline=deadline,
+        )
+        # Base names cover deleted and renamed paths that a later validator could
+        # otherwise repeat in diagnostics. Base contents are never publishable.
+        if not unsafe:
+            unsafe = _tree_contains_credential(
+                base_workspace,
+                encoded,
+                scan_contents=False,
+                deadline=deadline,
+            )
+    except PollDeadlineExceeded:
+        raise
+    except (OSError, UnicodeError):
+        raise PreventionRuntimeError(_CREDENTIAL_SAFETY_ERROR) from None
+    finally:
+        credential = ""
+        for index in range(len(encoded)):
+            encoded[index] = 0
+    if unsafe:
+        raise PreventionRuntimeError(_CREDENTIAL_SAFETY_ERROR)
+
+
+def _reject_model_credentials_in_candidate_delta(
+    *,
+    base_workspace: Path,
+    candidate_workspace: Path,
+    credentials: Sequence[str],
+    deadline: PollDeadline | None,
+) -> None:
+    """Scan one candidate against every credential issued during authoring."""
+
+    for credential in credentials:
+        _reject_model_credential_in_candidate_delta(
+            base_workspace=base_workspace,
+            candidate_workspace=candidate_workspace,
+            credential=credential,
+            deadline=deadline,
+        )
 
 
 def _snapshot_repository(
@@ -3316,6 +3519,7 @@ class PreventionCoordinator:
                     title=record.title,
                     body=record.body,
                     before_create=before_create,
+                    before_post=before_create,
                 )
             except _PublicationCapacityError:
                 deferred += 1
@@ -3740,14 +3944,26 @@ class PreventionCoordinator:
         self,
         *,
         run_id: str,
+        base_workspace: Path,
         workspace: Path,
         candidate: RecurrenceCandidate,
         evidence_ids: Sequence[str],
         policy: PreventionPolicy,
         require_live_lease: Callable[[], None],
         require_cleanup_lease: Callable[[], None],
-    ) -> None:
+    ) -> tuple[Path, tuple[str, ...]]:
+        issued_credentials: list[str] = []
         for attempt in range(1, self.author.max_attempts + 1):
+            attempt_workspace = workspace
+            if attempt > 1:
+                attempt_workspace = (
+                    workspace.parent / f"{workspace.name}-attempt-{attempt}"
+                )
+                _snapshot_repository(
+                    base_workspace,
+                    attempt_workspace,
+                    deadline=self.deadline,
+                )
             self._require_remaining()
             reserved_at = _as_utc(self.now())
             _require_live_prevention_lease(require_live_lease)
@@ -3786,6 +4002,7 @@ class PreventionCoordinator:
                 try:
                     self._require_remaining()
                     api_key = self.model_credential_provider()
+                    issued_credentials.append(api_key)
                 except PollDeadlineExceeded:
                     _require_live_prevention_lease(require_cleanup_lease)
                     self.state.finalize_model_call(
@@ -3822,12 +4039,18 @@ class PreventionCoordinator:
                 _require_live_prevention_lease(require_live_lease)
                 self._require_remaining()
                 result = self.author.run(
-                    workspace=workspace,
+                    workspace=attempt_workspace,
                     scope=candidate.scope,
                     summary=candidate.summary,
                     evidence_feedback_ids=evidence_ids,
                     policy=policy,
                     api_key=api_key,
+                )
+                _reject_model_credentials_in_candidate_delta(
+                    base_workspace=base_workspace,
+                    candidate_workspace=attempt_workspace,
+                    credentials=issued_credentials,
+                    deadline=self.deadline,
                 )
             except CodexTransientError:
                 failed_at = _as_utc(self.now())
@@ -3843,6 +4066,12 @@ class PreventionCoordinator:
                         reservation,
                         marked_at=failed_at,
                     )
+                _reject_model_credentials_in_candidate_delta(
+                    base_workspace=base_workspace,
+                    candidate_workspace=attempt_workspace,
+                    credentials=issued_credentials,
+                    deadline=self.deadline,
+                )
                 if attempt == self.author.max_attempts:
                     raise
                 continue
@@ -3876,6 +4105,8 @@ class PreventionCoordinator:
                         marked_at=failed_at,
                     )
                 raise
+            finally:
+                api_key = None
             completed_at = _as_utc(self.now())
             _require_live_prevention_lease(require_cleanup_lease)
             self.state.finalize_model_call(
@@ -3903,7 +4134,7 @@ class PreventionCoordinator:
                     marked_at=completed_at,
                 )
             self._require_remaining()
-            return
+            return attempt_workspace, tuple(issued_credentials)
         raise CodexTransientError(  # pragma: no cover - bounded loop is non-empty
             "Prevention Codex author did not complete."
         )
@@ -3955,8 +4186,9 @@ class PreventionCoordinator:
                     author_workspace,
                     **deadline_kwargs,
                 )
-                self._reserve_and_author(
+                author_workspace, issued_credentials = self._reserve_and_author(
                     run_id=run_id,
+                    base_workspace=base_workspace.path,
                     workspace=author_workspace,
                     candidate=candidate,
                     evidence_ids=evidence_ids,
@@ -3995,6 +4227,15 @@ class PreventionCoordinator:
                         raise PreventionPolicyError(
                             "candidate bytes changed before signing"
                         )
+                    try:
+                        _reject_model_credentials_in_candidate_delta(
+                            base_workspace=base_workspace.path,
+                            candidate_workspace=signing_workspace.path,
+                            credentials=issued_credentials,
+                            deadline=self.deadline,
+                        )
+                    finally:
+                        issued_credentials = ()
                     self._require_remaining()
                     commit = signing_workspace.commit_prevention_changes(
                         expected_paths=patch.paths,
@@ -4118,6 +4359,11 @@ class PreventionCoordinator:
                         )
                         consume_publication_slot()
 
+                    def before_post() -> None:
+                        require_sources()
+                        _require_live_prevention_lease(require_live_lease)
+                        self._require_pending_candidate(draft_key)
+
                     ledger = {
                         "run_id": run_id,
                         "source_repository": source_policy.base_repo,
@@ -4218,6 +4464,7 @@ class PreventionCoordinator:
                         title=plan.title,
                         body=plan.body,
                         before_create=consume_publication_slot,
+                        before_post=before_post,
                     )
                     self.state.record_prevention_draft_event(
                         **ledger,

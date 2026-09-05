@@ -298,14 +298,15 @@ against the exact current base.
 Already-fixed or obsolete findings become terminal no-ops, while ambiguous or
 conflicting evidence defers without a write.
 
-`observe` and `prepare` remain write-free; only an explicit remediation policy in
+`observe` and `prepare` perform no GitHub writes; only an explicit remediation policy in
 `apply-owned-translations` or `propose-prevention` can publish a bot-marked new
 draft correction PR containing a signed commit for human review, subject to an
 exact publication actor, head-repository, and branch allowlists plus a separate
 global publication cap. The draft links the still-valid closed feedback,
 including its source PR; the Guardian never writes to the closed PR or merges
 the draft. Exact edits are deduplicated, same-target alternatives defer, and
-every multi-source recovery batch remains atomic and bounded.
+every multi-source recovery batch remains bounded and all-or-nothing in local
+state; the final destination and source observations are necessarily sequential.
 
 A generated correction PR that a maintainer closes without merging is a human
 veto and durable deduplication evidence: the Guardian does not recreate the
@@ -328,8 +329,8 @@ The marker is the `[Localize Guardian bot]` title prefix plus explicit
 bot-generated text in the draft body; it is not a GitHub label.
 
 Prevention intake is bounded at 100 code globs, 100 test globs, 64 focused test
-commands, 256 arguments per command or sandbox prefix, 4096 UTF-8 bytes per
-listed string, 100 changed files, 100 recurrence candidates, and 100 evidence
+commands, 256 arguments per command, one direct sandbox-wrapper executable,
+4096 UTF-8 bytes per listed string, 100 changed files, 100 recurrence candidates, and 100 evidence
 IDs per candidate. Generated prevention titles fit both 120 characters and 256
 UTF-8 bytes; generated bodies fit 60 KiB and deterministically summarize any
 oversized human-facing lists. See the Guardian guide for the exact policy and

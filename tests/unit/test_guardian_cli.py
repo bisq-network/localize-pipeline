@@ -49,6 +49,7 @@ from localize.guardian.state import (
 UTC = timezone.utc
 _REAL_CODEX_CAPABILITY_PROBE = cli._codex_capability_probe
 _REAL_CODEX_CHATGPT_LOGIN_READY = cli._codex_chatgpt_login_ready
+_REAL_DOCTOR_EXECUTABLES_TRUSTED = cli._doctor_executables_trusted
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +66,7 @@ def _successful_codex_capability_probe(
         "_codex_chatgpt_login_ready",
         lambda _config: True,
     )
+    monkeypatch.setattr(cli, "_doctor_executables_trusted", lambda _config: True)
 
 
 def _init_config(tmp_path: Path) -> Path:
@@ -296,7 +298,7 @@ def _prevention_doctor_config(
             allowed_code_path_globs=("localize/**/*.py",),
             allowed_test_path_globs=("tests/**/*.py",),
             focused_test_argv=(("/usr/bin/true",),),
-            sandbox_argv_prefix=("/usr/bin/sandbox-exec", "--"),
+            sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
             max_changed_files=4,
             max_changed_bytes=262_144,
         ),
@@ -756,6 +758,43 @@ def test_doctor_fails_when_codex_permission_canary_is_unavailable(
 
     assert exit_code == 1
     assert "Codex capability canary: error" in capsys.readouterr().out
+
+
+def test_doctor_stops_before_external_probes_when_executable_trust_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    codex_probe = Mock()
+    github_probe = Mock()
+    credential_probe = Mock()
+    monkeypatch.setattr(cli, "_doctor_executables_trusted", lambda _config: False)
+    monkeypatch.setattr(cli, "_codex_capability_probe", codex_probe)
+    monkeypatch.setattr(cli, "_probe_github", github_probe)
+    monkeypatch.setattr(cli, "_credential_helper_works", credential_probe)
+
+    exit_code = cli.main(["doctor", "--config", str(config_path)])
+
+    assert exit_code == 1
+    assert "executable trust: error" in capsys.readouterr().out
+    codex_probe.assert_not_called()
+    github_probe.assert_not_called()
+    credential_probe.assert_not_called()
+
+
+def test_doctor_real_trust_preflight_rejects_shebang_arguments(
+    tmp_path: Path,
+) -> None:
+    config_path = _init_config(tmp_path)
+    codex, _github_helper, _model_helper = _configure_scheduled_runtime(
+        config_path,
+        tmp_path,
+    )
+    codex.write_text("#!/bin/sh -e\nexit 0\n", encoding="utf-8")
+
+    assert not _REAL_DOCTOR_EXECUTABLES_TRUSTED(load_guardian_config(config_path))
 
 
 @pytest.mark.parametrize(
@@ -1355,6 +1394,7 @@ def test_signing_probe_signs_and_verifies_with_exact_key_in_isolated_context(
 ) -> None:
     gnupg_home = tmp_path / "gnupg"
     gnupg_home.mkdir()
+    gnupg_home.chmod(0o700)
     monkeypatch.setenv("GNUPGHOME", str(gnupg_home))
     monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(cli, "_command_available", lambda _command: True)
@@ -1391,6 +1431,7 @@ def test_signing_probe_fails_closed_when_exact_key_cannot_sign(
 ) -> None:
     gnupg_home = tmp_path / "gnupg"
     gnupg_home.mkdir()
+    gnupg_home.chmod(0o700)
     monkeypatch.setenv("GNUPGHOME", str(gnupg_home))
     monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/git")
     monkeypatch.setattr(cli, "_command_available", lambda _command: True)
@@ -1409,6 +1450,30 @@ def test_signing_probe_fails_closed_when_exact_key_cannot_sign(
         signing_program="/usr/bin/gpg",
     ) is False
     assert calls == 2
+
+
+def test_signing_probe_rejects_an_untrusted_openpgp_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gnupg_home = tmp_path / "gnupg"
+    gnupg_home.mkdir(mode=0o700)
+    gnupg_home.chmod(0o777)
+    monkeypatch.setenv("GNUPGHOME", str(gnupg_home))
+    monkeypatch.setattr(cli, "_command_available", lambda _command: True)
+    monkeypatch.setattr(
+        cli,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an unsafe OpenPGP home must be rejected before invoking Git"
+        ),
+    )
+
+    assert cli._signing_key_configured(
+        "B" * 40,
+        git_executable="/usr/bin/git",
+        signing_program="/usr/bin/gpg",
+    ) is False
 
 
 def test_ssh_signing_probe_uses_frozen_key_and_agent_only_for_commit(
@@ -2741,6 +2806,38 @@ def test_install_requires_absolute_executables_for_unattended_runs(
     assert not paths.plist_path.exists()
 
 
+def test_install_rejects_unchecked_sandbox_policy_arguments_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    _configure_scheduled_runtime(config_path, tmp_path)
+    config = _prevention_doctor_config(config_path)
+    prevention = config.repositories[0].prevention
+    assert prevention is not None
+    object.__setattr__(
+        prevention,
+        "sandbox_argv_prefix",
+        ("/usr/bin/sandbox-exec", "-f", "/mutable/policy.sb"),
+    )
+    monkeypatch.setattr(cli, "_load_config_or_raise", lambda _path: config)
+    executable = tmp_path / "localize"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    exit_code = cli.main(
+        ["install", "--config", str(config_path), "--executable", str(executable)]
+    )
+
+    assert exit_code == 1
+    assert "exactly one direct wrapper" in capsys.readouterr().err
+    paths = cli.guardian_install_paths(config_path)
+    assert not paths.runner_path.exists()
+    assert not paths.plist_path.exists()
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "group-writable"])
 def test_install_rejects_mutable_or_redirected_scheduled_executables(
     tmp_path: Path,
@@ -2751,8 +2848,12 @@ def test_install_rejects_mutable_or_redirected_scheduled_executables(
     config_path = _init_config(tmp_path)
     capsys.readouterr()
     codex, _github_helper, _model_helper = _configure_scheduled_runtime(
-        config_path, tmp_path
+        config_path,
+        tmp_path,
+        api_key=False,
     )
+    login_probe = Mock(return_value=True)
+    monkeypatch.setattr(cli, "_codex_chatgpt_login_ready", login_probe)
     if unsafe_kind == "symlink":
         target = codex.with_name("codex-target")
         codex.rename(target)
@@ -2774,6 +2875,7 @@ def test_install_rejects_mutable_or_redirected_scheduled_executables(
 
     assert exit_code == 1
     assert "runtime.codex_executable" in capsys.readouterr().err
+    login_probe.assert_not_called()
     paths = cli.guardian_install_paths(config_path)
     assert not paths.runner_path.exists()
     assert not paths.plist_path.exists()

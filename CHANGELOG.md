@@ -7,7 +7,7 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
-## [0.1.20] - 2026-09-04
+## [0.1.20] - 2026-09-05
 
 ### Added
 
@@ -28,9 +28,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   Each eligible repository can produce at most one new Guardian-marked draft per
   poll, subject to a separate global cap that defaults to zero and publication
   recovery backed by the Guardian's private durable state. Multi-source recovery
-  batches remain grouped and atomic, exact edits are deduplicated across
-  historical evidence, and same-target conflicts or incompatible remote state
-  defer rather than being overwritten. If evidence or the target base moves
+  batches remain grouped and all-or-nothing in local state, while final remote
+  destination and source observations remain sequential. Exact edits are
+  deduplicated across historical evidence, and same-target conflicts or
+  incompatible remote state defer rather than being overwritten. If evidence
+  or the target base moves
   before a branch-only attempt acquires an exact PR, the local attempt is
   abandoned, any remote branch is left untouched, and its durable source retry
   can create a distinct attempt. Unexpected remote identity or content still
@@ -126,6 +128,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   Compose runtime key mounts, host-level cron, and root-safe Compose commands.
 - Remove obsolete dummy credential files and unused secret-related build
   arguments from the CI image build.
+- Require custom Guardian credential commands to name one directly inspected
+  executable; the only multi-item exception is exact `gh auth token`. Require
+  `sandbox_argv_prefix` to name one directly inspected wrapper with its policy
+  embedded. Existing configurations that pass helper scripts, interpreter
+  flags, or sandbox policy paths as later argv items must move that behavior
+  into an operator-owned executable wrapper.
+- Validate a GitHub Action config, exact workspace root, and contained input
+  folder before translation or model work. Enabled semantic-review sidecars now
+  fail publication when any batch, locale task, or provider setup is incomplete;
+  that state remains independently blocking when generic pipeline warnings are
+  non-blocking.
 
 ## [0.1.19] - 2026-09-01
 

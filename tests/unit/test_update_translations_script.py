@@ -240,6 +240,38 @@ def test_generated_prs_publish_translation_quality_gate_status():
     assert "QUALITY_REPORT_MD" in script
 
 
+def test_generated_prs_abort_when_enabled_semantic_review_fails():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    stage = script[
+        script.index("stage_and_submit_batch()") : script.index(
+            "publish_translation_changes()"
+        )
+    ]
+
+    failure = stage[stage.index('if [ "$SEMANTIC_REVIEW_EXIT" -ne 0 ]; then') :]
+    assert 'log "Semantic AI review failed; refusing publication." "ERROR"' in failure
+    assert "return 1" in failure[: failure.index('log "Re-staging translation files')]
+
+
+def test_each_batch_resets_and_verifies_its_exact_staged_paths():
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    stage = script[
+        script.index("stage_and_submit_batch()") : script.index(
+            "publish_translation_changes()"
+        )
+    ]
+
+    checkout_index = stage.index('git checkout -B "$branch"')
+    reset_index = stage.index("git reset -q")
+    first_stage_index = stage.index('for bf in "${BATCH_FILES[@]}"')
+    exact_index = stage.index(
+        "staged paths do not exactly match the current translation batch"
+    )
+    commit_index = stage.index('commit_staged_changes "$commit_msg"')
+    assert checkout_index < reset_index < first_stage_index < exact_index < commit_index
+    assert '["git", "diff", "--cached", "--name-only"' in stage
+
+
 def test_fork_repo_name_short_strips_git_suffix_before_status_api():
     script = (REPO_ROOT / "update-translations.sh").read_text()
 

@@ -29,6 +29,13 @@ from localize.guardian.state import (
 UTC = timezone.utc
 
 
+def _overdeep_json_value() -> object:
+    value: object = 0
+    for _ in range(65):
+        value = [value]
+    return value
+
+
 # Frozen schema shipped by Guardian state version 1. Migration tests must start
 # from this fixture, not from a newer database with selected objects dropped.
 _V1_SCHEMA_SQL = """
@@ -1152,6 +1159,40 @@ def test_runs_actions_costs_and_health_are_persisted(tmp_path: Path) -> None:
         assert state.pending_event_revisions() == ()
 
 
+@pytest.mark.parametrize(
+    "details_json",
+    (
+        pytest.param("{malformed", id="malformed-syntax"),
+        pytest.param(
+            json.dumps({"nested": _overdeep_json_value()}, separators=(",", ":")),
+            id="over-depth",
+        ),
+        pytest.param("[]", id="wrong-shape"),
+        pytest.param('{"events": 1}', id="non-canonical"),
+    ),
+)
+def test_latest_health_rejects_malformed_details_json(
+    tmp_path: Path,
+    details_json: str,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        health_id = state.record_health(
+            component="github-intake",
+            status="healthy",
+            message="Intake completed.",
+            details={"events": 1},
+            checked_at=now,
+        )
+        state._connection.execute(  # noqa: SLF001 - frozen corruption fixture
+            "UPDATE health SET details_json = ? WHERE health_id = ?",
+            (details_json, health_id),
+        )
+
+        with pytest.raises(RuntimeError, match="Health ledger contains malformed data"):
+            state.latest_health("github-intake")
+
+
 def test_raw_event_body_can_expire_without_deleting_immutable_revision(
     tmp_path: Path,
 ) -> None:
@@ -2121,7 +2162,7 @@ def test_state_migrates_v1_database_to_historical_completion_schema(
         )
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 def test_populated_v1_event_remains_idempotent_after_migration(
@@ -2242,7 +2283,7 @@ def test_v2_remediation_edit_table_gains_target_mapping_column(
         assert "target_hash" in columns
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
@@ -2266,7 +2307,7 @@ def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
         )
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM historical_pull_retry_events"
@@ -2281,7 +2322,7 @@ def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
         )
 
 
-def test_empty_v0_database_upgrades_to_v8(tmp_path: Path) -> None:
+def test_empty_v0_database_upgrades_to_v9(tmp_path: Path) -> None:
     database = tmp_path / "guardian.sqlite3"
     with sqlite3.connect(database):
         pass
@@ -2291,7 +2332,7 @@ def test_empty_v0_database_upgrades_to_v8(tmp_path: Path) -> None:
         assert state.status_snapshot(mode=GuardianMode.OBSERVE).pending_revisions == 0
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 def test_assessment_cache_and_cost_settlement_are_one_transaction(
@@ -2730,6 +2771,7 @@ def test_publication_ledger_is_append_only_recoverable_and_idempotent(
         assert pending[0].phase == "prepared"
         assert pending[0].publication_actor_id == 303
         assert pending[0].publication_actor_type == "Bot"
+        assert pending[0].repository_id == 42
         assert pending[0].event_revision_ids == (revision.revision_id,)
         assert pending[0].open_source == metadata["open_source"]
         plan_actor = state._connection.execute(  # noqa: SLF001
@@ -2772,6 +2814,28 @@ def test_publication_ledger_is_append_only_recoverable_and_idempotent(
         assert replied.open_source == metadata["open_source"]
         assert (
             state.replied_publication_for_head(
+                repository="acme/renamed-widgets",
+                repository_id=42,
+                pr_number=123,
+                head_sha="c" * 40,
+                publication_actor_id=303,
+                publication_actor_type="Bot",
+            )
+            == replied
+        )
+        assert (
+            state.replied_publication_for_head(
+                repository="acme/widgets",
+                repository_id=43,
+                pr_number=123,
+                head_sha="c" * 40,
+                publication_actor_id=303,
+                publication_actor_type="Bot",
+            )
+            is None
+        )
+        assert (
+            state.replied_publication_for_head(
                 repository="acme/widgets",
                 pr_number=123,
                 head_sha="c" * 40,
@@ -2810,6 +2874,273 @@ def test_publication_ledger_is_append_only_recoverable_and_idempotent(
             state._connection.execute(  # noqa: SLF001 - DB immutability assertion
                 "UPDATE publication_events SET phase = 'abandoned'"
             )
+
+
+def test_publication_id_filter_survives_rename_without_foreign_starvation(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        foreign_run = state.start_run(
+            repository="acme/current-name",
+            locale="ru",
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            started_at=now,
+        )
+        for index in range(101):
+            revision = state.record_feedback_event(
+                _event(
+                    repository="acme/current-name",
+                    pr_number=123,
+                    event_id=str(20_000 + index),
+                ),
+                observed_at=now,
+            )
+            state.record_publication_event(
+                run_id=foreign_run,
+                repository="acme/current-name",
+                pr_number=123,
+                original_head_sha="a" * 40,
+                base_sha="b" * 40,
+                commit_sha=f"{index + 1:040x}",
+                publication_actor_id=303,
+                publication_actor_type="Bot",
+                event_revision_ids=(revision.revision_id,),
+                open_source=OpenPullAuthorityReference(
+                    repository="acme/current-name",
+                    repository_id=99,
+                    pull_id=900,
+                    pr_number=123,
+                    authority_digest=f"{index + 1:064x}",
+                    head_sha="a" * 40,
+                    base_sha="b" * 40,
+                    feedback_digest=f"{index + 102:064x}",
+                ),
+                phase="prepared",
+                completion_actions=(
+                    (revision.revision_id, "completed", {"outcome": "applied"}),
+                ),
+                occurred_at=now,
+            )
+
+        renamed_revision = state.record_feedback_event(
+            _event(
+                repository="acme/old-name",
+                pr_number=123,
+                event_id="30000",
+            ),
+            observed_at=now,
+        )
+        renamed_run = state.start_run(
+            repository="acme/old-name",
+            locale="ru",
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            started_at=now,
+        )
+        renamed_key = state.record_publication_event(
+            run_id=renamed_run,
+            repository="acme/old-name",
+            pr_number=123,
+            original_head_sha="a" * 40,
+            base_sha="b" * 40,
+            commit_sha="f" * 40,
+            publication_actor_id=303,
+            publication_actor_type="Bot",
+            event_revision_ids=(renamed_revision.revision_id,),
+            open_source=OpenPullAuthorityReference(
+                repository="acme/old-name",
+                repository_id=42,
+                pull_id=901,
+                pr_number=123,
+                authority_digest="d" * 64,
+                head_sha="a" * 40,
+                base_sha="b" * 40,
+                feedback_digest="e" * 64,
+            ),
+            phase="prepared",
+            completion_actions=(
+                (
+                    renamed_revision.revision_id,
+                    "completed",
+                    {"outcome": "applied"},
+                ),
+            ),
+            occurred_at=now,
+        )
+
+        selected = state.pending_publications(
+            repository="acme/current-name",
+            repository_id=42,
+            limit=1,
+        )
+        assert tuple(item.publication_key for item in selected) == (renamed_key,)
+
+
+def test_publication_id_filter_detects_legacy_ambiguity_beyond_workset(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        revision = state.record_feedback_event(_event(), observed_at=now)
+        run_id = state.start_run(
+            repository="acme/widgets",
+            locale="ru",
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            started_at=now,
+        )
+        publication_keys: list[str] = []
+        for index in range(102):
+            publication_keys.append(
+                state.record_publication_event(
+                    run_id=run_id,
+                    repository="acme/widgets",
+                    pr_number=123,
+                    original_head_sha="a" * 40,
+                    base_sha="b" * 40,
+                    commit_sha=f"{index + 1:040x}",
+                    publication_actor_id=303,
+                    publication_actor_type="Bot",
+                    event_revision_ids=(revision.revision_id,),
+                    open_source=OpenPullAuthorityReference(
+                        repository="acme/widgets",
+                        repository_id=42,
+                        pull_id=456,
+                        pr_number=123,
+                        authority_digest=f"{index + 1:064x}",
+                        head_sha="a" * 40,
+                        base_sha="b" * 40,
+                        feedback_digest=f"{index + 200:064x}",
+                    ),
+                    phase="prepared",
+                    completion_actions=(
+                        (revision.revision_id, "completed", {"outcome": "applied"}),
+                    ),
+                    occurred_at=now,
+                )
+            )
+
+        state._connection.execute(  # noqa: SLF001
+            "DROP TRIGGER publication_events_no_update"
+        )
+        state._connection.execute(  # noqa: SLF001
+            "UPDATE publication_events "
+            "SET repository = 'acme/old-widgets', repository_id = NULL "
+            "WHERE publication_key = ?",
+            (publication_keys[-1],),
+        )
+
+        with pytest.raises(RuntimeError, match="durable repository authority"):
+            state.pending_publications(
+                repository="acme/widgets",
+                repository_id=42,
+                limit=100,
+            )
+
+
+@pytest.mark.parametrize("repository_id", (True, 0, 9_223_372_036_854_775_808))
+def test_repository_id_recovery_filters_reject_non_normalized_values(
+    tmp_path: Path,
+    repository_id: object,
+) -> None:
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        with pytest.raises(ValueError, match="repository_id must be a positive"):
+            state.pending_publications(repository_id=repository_id)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="repository_id must be a positive"):
+            state.replied_publication_for_head(
+                repository="acme/widgets",
+                repository_id=repository_id,  # type: ignore[arg-type]
+                pr_number=123,
+                head_sha="a" * 40,
+                publication_actor_id=303,
+                publication_actor_type="Bot",
+            )
+        with pytest.raises(ValueError, match="repository_id must be a positive"):
+            state.pending_remediation_drafts_for_recovery(
+                repository_id=repository_id,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="repository_id must be a positive"):
+            state.opened_remediation_drafts_for_reconciliation(
+                repository_id=repository_id,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="repository_id must be a positive"):
+            state.pending_merged_remediation_revalidations(
+                repository_id=repository_id,  # type: ignore[arg-type]
+            )
+
+
+def test_publication_recovery_rejects_overdeep_completion_details(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        revision = state.record_feedback_event(
+            _event(pr_number=123, head_sha="a" * 40, base_sha="b" * 40),
+            observed_at=now,
+        )
+        run_id = state.start_run(
+            repository="acme/widgets",
+            locale="ru",
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            started_at=now,
+        )
+        metadata = {
+            "run_id": run_id,
+            "repository": "acme/widgets",
+            "pr_number": 123,
+            "original_head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+            "commit_sha": "c" * 40,
+            "publication_actor_id": 303,
+            "publication_actor_type": "Bot",
+            "event_revision_ids": (revision.revision_id,),
+            "open_source": OpenPullAuthorityReference(
+                repository="acme/widgets",
+                repository_id=42,
+                pull_id=456,
+                pr_number=123,
+                authority_digest="d" * 64,
+                head_sha="a" * 40,
+                base_sha="b" * 40,
+                feedback_digest="f" * 64,
+            ),
+        }
+        publication_key = state.record_publication_event(
+            **metadata,
+            phase="prepared",
+            completion_actions=(
+                (revision.revision_id, "completed", {"outcome": "applied"}),
+            ),
+            occurred_at=now,
+        )
+        state.record_publication_event(
+            **metadata,
+            phase="published",
+            occurred_at=now + timedelta(seconds=1),
+        )
+
+        corrupted_details = json.dumps(
+            {"nested": _overdeep_json_value(), "outcome": "applied"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        state._connection.execute(  # noqa: SLF001 - frozen corruption fixture
+            "DROP TRIGGER publication_completion_plans_no_update"
+        )
+        state._connection.execute(  # noqa: SLF001 - frozen corruption fixture
+            "UPDATE publication_completion_plan_items SET details_json = ? "
+            "WHERE publication_key = ?",
+            (corrupted_details, publication_key),
+        )
+        state._connection.commit()  # noqa: SLF001 - frozen corruption fixture
+
+        with pytest.raises(RuntimeError, match="completion plan.*malformed"):
+            state.finalize_replied_publication(
+                publication_key=publication_key,
+                summary="Recovered exact publication.",
+                occurred_at=now + timedelta(minutes=1),
+            )
+        assert state.get_run(run_id).status == "running"
+        assert state.pending_publications()[0].phase == "published"
 
 
 @pytest.mark.parametrize(
@@ -2921,12 +3252,12 @@ def test_publication_actor_is_immutable_across_phases_and_plan_rows(
             state._connection.execute(  # noqa: SLF001
                 """
                 INSERT INTO publication_events (
-                    publication_key, run_id, repository, pr_number,
+                    publication_key, run_id, repository, repository_id, pr_number,
                     original_head_sha, base_sha, commit_sha,
                     publication_actor_id, publication_actor_type,
                     event_revision_ids_json, open_source_json, phase, occurred_at
                 )
-                SELECT publication_key, run_id, repository, pr_number,
+                SELECT publication_key, run_id, repository, repository_id, pr_number,
                        original_head_sha, base_sha, commit_sha, 304, 'Bot',
                        event_revision_ids_json, open_source_json, 'published',
                        occurred_at
@@ -3358,12 +3689,12 @@ def test_publication_phase_machine_is_enforced_by_api_and_sql(
                 state._connection.execute(  # noqa: SLF001
                     """
                     INSERT INTO publication_events (
-                        publication_key, run_id, repository, pr_number,
+                        publication_key, run_id, repository, repository_id, pr_number,
                         original_head_sha, base_sha, commit_sha,
                         publication_actor_id, publication_actor_type,
                         event_revision_ids_json, open_source_json,
                         phase, occurred_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 303, 'Bot', ?, NULL, 'prepared', ?)
+                    ) VALUES (?, ?, ?, 42, ?, ?, ?, ?, 303, 'Bot', ?, NULL, 'prepared', ?)
                     """,
                     (
                         key,
@@ -3448,11 +3779,11 @@ def test_publication_phase_machine_is_enforced_by_api_and_sql(
             state._connection.execute(  # noqa: SLF001
                 """
                 INSERT INTO publication_events (
-                    publication_key, run_id, repository, pr_number,
+                    publication_key, run_id, repository, repository_id, pr_number,
                     original_head_sha, base_sha, commit_sha,
                     publication_actor_id, publication_actor_type,
                     event_revision_ids_json, open_source_json, phase, occurred_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'replied', ?)
+                ) VALUES (?, ?, ?, 42, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'replied', ?)
                 """,
                 (
                     publication_key,
@@ -3471,11 +3802,11 @@ def test_publication_phase_machine_is_enforced_by_api_and_sql(
             state._connection.execute(  # noqa: SLF001
                 """
                 INSERT INTO publication_events (
-                    publication_key, run_id, repository, pr_number,
+                    publication_key, run_id, repository, repository_id, pr_number,
                     original_head_sha, base_sha, commit_sha,
                     publication_actor_id, publication_actor_type,
                     event_revision_ids_json, open_source_json, phase, occurred_at
-                ) VALUES (?, ?, 'other/widgets', ?, ?, ?, ?, 303, 'Bot', ?, ?, 'published', ?)
+                ) VALUES (?, ?, 'other/widgets', 42, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'published', ?)
                 """,
                 (
                     publication_key,
@@ -3506,11 +3837,11 @@ def test_publication_phase_machine_is_enforced_by_api_and_sql(
             state._connection.execute(  # noqa: SLF001
                 """
                 INSERT INTO publication_events (
-                    publication_key, run_id, repository, pr_number,
+                    publication_key, run_id, repository, repository_id, pr_number,
                     original_head_sha, base_sha, commit_sha,
                     publication_actor_id, publication_actor_type,
                     event_revision_ids_json, open_source_json, phase, occurred_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'replied', ?)
+                ) VALUES (?, ?, ?, 42, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'replied', ?)
                 """,
                 (
                     "9" * 64,
@@ -3535,11 +3866,11 @@ def test_publication_phase_machine_is_enforced_by_api_and_sql(
             state._connection.execute(  # noqa: SLF001
                 """
                 INSERT INTO publication_events (
-                    publication_key, run_id, repository, pr_number,
+                    publication_key, run_id, repository, repository_id, pr_number,
                     original_head_sha, base_sha, commit_sha,
                     publication_actor_id, publication_actor_type,
                     event_revision_ids_json, open_source_json, phase, occurred_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'abandoned', ?)
+                ) VALUES (?, ?, ?, 42, ?, ?, ?, ?, 303, 'Bot', ?, ?, 'abandoned', ?)
                 """,
                 (
                     publication_key,
@@ -3995,6 +4326,7 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
         for trigger in (
             "publication_events_identity",
             "publication_events_actor_safe",
+            "publication_events_repository_id_safe",
             "publication_completion_plans_prepared",
             "remediation_successor_intents_prepared",
             "prevention_draft_events_run_authority",
@@ -4007,6 +4339,8 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
             "remediation_draft_events_resolved_terminal",
         ):
             connection.execute(f"DROP TRIGGER {trigger}")  # noqa: S608
+        connection.execute("DROP INDEX publication_events_pending_by_repository_id")
+        connection.execute("DROP INDEX publication_events_replied_by_repository_id")
         connection.execute(
             "ALTER TABLE publication_completion_plan_items "
             "DROP COLUMN publication_actor_type"
@@ -4021,6 +4355,7 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
         connection.execute(
             "ALTER TABLE publication_events DROP COLUMN publication_actor_id"
         )
+        connection.execute("ALTER TABLE publication_events DROP COLUMN repository_id")
         connection.execute("PRAGMA user_version = 7")
 
     with GuardianState(database) as state:
@@ -4028,7 +4363,7 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 8
+            == 9
         )
         for table in (
             "publication_events",
@@ -4055,6 +4390,7 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
         }
         assert {
             "publication_events_actor_safe",
+            "publication_events_repository_id_safe",
             "publication_completion_plans_prepared",
             "prevention_draft_events_run_authority",
             "prevention_draft_events_identity",
@@ -4071,6 +4407,7 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
             (publication_key,),
         ).fetchone()
         publication = state._publication_from_row(row)  # noqa: SLF001
+        assert publication.repository_id == 42
         assert publication.publication_actor_id is None
         assert publication.publication_actor_type is None
         with pytest.raises(RuntimeError, match="durable publication-actor"):
@@ -4080,11 +4417,11 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
             state._connection.execute(  # noqa: SLF001
                 """
                 INSERT INTO publication_events (
-                    publication_key, run_id, repository, pr_number,
+                    publication_key, run_id, repository, repository_id, pr_number,
                     original_head_sha, base_sha, commit_sha,
                     event_revision_ids_json, open_source_json, phase, occurred_at
                 )
-                SELECT publication_key, run_id, repository, pr_number,
+                SELECT publication_key, run_id, repository, repository_id, pr_number,
                        original_head_sha, base_sha, commit_sha,
                        event_revision_ids_json, open_source_json, 'published', ?
                 FROM publication_events
@@ -4110,6 +4447,133 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
         ).fetchone()
         with pytest.raises(RuntimeError, match="malformed data"):
             state._publication_from_row(malformed_row)  # noqa: SLF001
+
+
+def test_v8_publication_repository_id_migration_backfills_only_exact_authority(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "guardian.sqlite3"
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(database) as state:
+        revision = state.record_feedback_event(_event(), observed_at=now)
+        run_id = state.start_run(
+            repository="acme/widgets",
+            locale="ru",
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            started_at=now,
+        )
+
+        def record_publication(commit_sha: str, authority_digest: str) -> str:
+            return state.record_publication_event(
+                run_id=run_id,
+                repository="acme/widgets",
+                pr_number=123,
+                original_head_sha="a" * 40,
+                base_sha="b" * 40,
+                commit_sha=commit_sha,
+                publication_actor_id=303,
+                publication_actor_type="Bot",
+                event_revision_ids=(revision.revision_id,),
+                open_source=OpenPullAuthorityReference(
+                    repository="acme/widgets",
+                    repository_id=42,
+                    pull_id=456,
+                    pr_number=123,
+                    authority_digest=authority_digest,
+                    head_sha="a" * 40,
+                    base_sha="b" * 40,
+                    feedback_digest="f" * 64,
+                ),
+                phase="prepared",
+                completion_actions=(
+                    (revision.revision_id, "completed", {"outcome": "applied"}),
+                ),
+                occurred_at=now,
+            )
+
+        exact_key = record_publication("c" * 40, "d" * 64)
+        malformed_key = record_publication("e" * 40, "9" * 64)
+        state.record_feedback_event(
+            _event(body="Feedback edited after the publication was prepared."),
+            observed_at=now + timedelta(minutes=1),
+        )
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER publication_events_no_update")
+        connection.execute(
+            "UPDATE publication_events SET open_source_json = '{malformed' "
+            "WHERE publication_key = ?",
+            (malformed_key,),
+        )
+        connection.execute("DROP TRIGGER publication_events_identity")
+        connection.execute("DROP TRIGGER publication_events_repository_id_safe")
+        connection.execute("DROP INDEX publication_events_pending_by_repository_id")
+        connection.execute("DROP INDEX publication_events_replied_by_repository_id")
+        connection.execute("ALTER TABLE publication_events DROP COLUMN repository_id")
+        connection.execute("PRAGMA user_version = 8")
+
+    with GuardianState(database) as state:
+        repository_id_column = next(
+            row
+            for row in state._connection.execute(  # noqa: SLF001
+                "PRAGMA table_info(publication_events)"
+            )
+            if row["name"] == "repository_id"
+        )
+        assert repository_id_column["notnull"] == 0
+        migrated_ids = {
+            row["publication_key"]: row["repository_id"]
+            for row in state._connection.execute(  # noqa: SLF001
+                "SELECT publication_key, repository_id FROM publication_events"
+            )
+        }
+        assert migrated_ids == {exact_key: 42, malformed_key: None}
+        assert tuple(
+            publication.publication_key
+            for publication in state.pending_publications(repository_id=42)
+        ) == (exact_key,)
+        with pytest.raises(
+            RuntimeError,
+            match="Pending publication lacks durable repository authority",
+        ):
+            state.pending_publications(
+                repository="acme/widgets",
+                repository_id=42,
+            )
+        with pytest.raises(RuntimeError, match="Publication ledger contains malformed"):
+            state.pending_publications(repository="acme/widgets")
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="publication repository id is unsafe",
+        ):
+            state._connection.execute(  # noqa: SLF001
+                """
+                INSERT INTO publication_events (
+                    publication_key, run_id, repository, pr_number,
+                    original_head_sha, base_sha, commit_sha,
+                    publication_actor_id, publication_actor_type,
+                    event_revision_ids_json, open_source_json, phase, occurred_at
+                )
+                SELECT ?, run_id, repository, pr_number,
+                       original_head_sha, base_sha, commit_sha,
+                       publication_actor_id, publication_actor_type,
+                       event_revision_ids_json, open_source_json, phase, occurred_at
+                FROM publication_events
+                WHERE publication_key = ? AND phase = 'prepared'
+                """,
+                ("8" * 64, exact_key),
+            )
+
+    with GuardianState(database) as state:
+        assert (
+            state._connection.execute(  # noqa: SLF001
+                "SELECT repository_id FROM publication_events "
+                "WHERE publication_key = ?",
+                (exact_key,),
+            ).fetchone()["repository_id"]
+            == 42
+        )
 
 
 def test_prevention_draft_ledger_recovers_pushes_and_deduplicates_opened_evidence(
@@ -5401,7 +5865,7 @@ def test_migration_accepts_each_remediation_write_run_mode(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 8
+            == 9
         )
 
 
@@ -6372,6 +6836,146 @@ def test_remediation_draft_ledger_is_append_only_recoverable_and_typed(
             )
 
 
+def test_remediation_recovery_selectors_use_immutable_repository_id(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        current_name_wrong_id = _remediation_metadata(
+            state,
+            now=now,
+            repository="acme/current-name",
+            repository_id=99,
+        )
+        old_name_same_id = _remediation_metadata(
+            state,
+            now=now,
+            repository="acme/old-name",
+            repository_id=42,
+        )
+
+        def attempt(metadata: dict[str, object], index: int) -> dict[str, object]:
+            edit_hashes = (f"{index:064x}",)
+            return {
+                **metadata,
+                "branch": f"guardian/remediation-{index:064x}",
+                "candidate_sha": f"{index:040x}",
+                "batch_hash": guardian_state.remediation_batch_hash(edit_hashes),
+                "edit_hashes": edit_hashes,
+                "edit_target_hashes": _remediation_target_mappings(edit_hashes),
+            }
+
+        for index in range(1, 102):
+            state.record_remediation_draft_event(
+                **attempt(current_name_wrong_id, index),
+                phase="validated",
+            )
+        renamed_pending = state.record_remediation_draft_event(
+            **attempt(old_name_same_id, 200),
+            phase="validated",
+        )
+
+        wrong_opened = _open_remediation_draft(
+            state,
+            attempt(current_name_wrong_id, 300),
+            draft_number=91,
+        )
+        renamed_opened = _open_remediation_draft(
+            state,
+            attempt(old_name_same_id, 301),
+            draft_number=91,
+        )
+
+        wrong_merged = _open_remediation_draft(
+            state,
+            attempt(current_name_wrong_id, 400),
+            draft_number=92,
+        )
+        _record_merged_observation(
+            state,
+            draft_key=wrong_merged,
+            observed_at=now + timedelta(minutes=1),
+        )
+        renamed_merged = _open_remediation_draft(
+            state,
+            attempt(old_name_same_id, 401),
+            draft_number=92,
+        )
+        _record_merged_observation(
+            state,
+            draft_key=renamed_merged,
+            observed_at=now + timedelta(minutes=1),
+        )
+
+        assert tuple(
+            item.draft_key
+            for item in state.pending_remediation_drafts_for_recovery(
+                repository="acme/current-name",
+                repository_id=42,
+                limit=1,
+            )
+        ) == (renamed_pending,)
+        assert tuple(
+            item.draft_key
+            for item in state.opened_remediation_drafts_for_reconciliation(
+                repository="acme/current-name",
+                repository_id=42,
+            )
+        ) == (renamed_opened,)
+        assert {
+            item.draft_key
+            for item in state.pending_merged_remediation_revalidations(
+                repository="acme/current-name",
+                repository_id=42,
+            )
+        } == {renamed_merged}
+        recovered = state.remediation_draft_for_pull(
+            repository="acme/current-name",
+            repository_id=42,
+            pr_number=91,
+        )
+        assert recovered is not None
+        assert recovered.draft_key == renamed_opened
+        assert recovered.draft_key != wrong_opened
+
+
+def test_remediation_recovery_rejects_overdeep_source_metadata(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        metadata = _remediation_metadata(state, now=now)
+        draft_key = state.record_remediation_draft_event(
+            **metadata,
+            phase="validated",
+        )
+        row = state._connection.execute(  # noqa: SLF001 - corruption fixture
+            "SELECT source_pulls_json FROM remediation_draft_events "
+            "WHERE draft_key = ?",
+            (draft_key,),
+        ).fetchone()
+        assert row is not None
+        source_pulls = json.loads(row["source_pulls_json"])
+        source_pulls[0]["unexpected"] = _overdeep_json_value()
+        corrupted_source_pulls = json.dumps(
+            source_pulls,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        state._connection.execute(  # noqa: SLF001 - frozen corruption fixture
+            "DROP TRIGGER remediation_draft_events_no_update"
+        )
+        state._connection.execute(  # noqa: SLF001 - frozen corruption fixture
+            "UPDATE remediation_draft_events SET source_pulls_json = ? "
+            "WHERE draft_key = ?",
+            (corrupted_source_pulls, draft_key),
+        )
+        state._connection.commit()  # noqa: SLF001 - frozen corruption fixture
+
+        with pytest.raises(RuntimeError, match="ledger contains malformed data"):
+            state.pending_remediation_drafts(repository="acme/widgets")
+
+
 @pytest.mark.parametrize(
     ("initial_phase", "resolution"),
     [
@@ -6982,7 +7586,7 @@ def test_state_migrates_v1_database_to_remediation_ledger(tmp_path: Path) -> Non
         assert len(state.pending_remediation_drafts()) == 1
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
 
 
 def test_state_migrates_successor_publication_actor_columns_fail_closed(
@@ -9377,7 +9981,7 @@ def test_v4_migration_keeps_unattested_completion_upgradeable_and_is_idempotent(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 8
+            == 9
         )
         assert "branch_identity_version" in {
             row["name"]

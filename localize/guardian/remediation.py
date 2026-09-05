@@ -19,18 +19,20 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from localize.guardian.deadline import PollDeadline
+from localize.guardian.deadline import PollDeadline, deadline_httpx_timeout
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
     SecretCommand,
 )
 from localize.guardian.github import GitHubAuthenticationError, OpenPullPathIdentity
+from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.models import (
     HistoricalRemediationPolicy,
     ProposedReplacement,
     RepositoryPolicy,
 )
+from localize.guardian.path_globs import matches_any_path_glob
 from localize.guardian.policy import PatchResult
 from localize.guardian.state import (
     GuardianState,
@@ -92,17 +94,6 @@ class RemediationSourceAuthorityError(RemediationRuntimeError):
 
 class RemediationOpenPullAuthorityError(RemediationRuntimeError):
     """Complete open-PR path authority is unavailable or overlaps a draft."""
-
-
-def _operation_timeout(
-    deadline: PollDeadline | None,
-    operation_limit: float,
-) -> float:
-    """Clamp an operation timeout to the poll's remaining wall-clock budget."""
-
-    if deadline is None:
-        return float(operation_limit)
-    return deadline.remaining(operation_limit)
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +368,7 @@ class RemediationGitHubBroker:
         payload: Mapping[str, object] | None = None,
         allow_missing: bool = False,
     ) -> object | None:
-        request_timeout = _operation_timeout(
+        request_timeout = deadline_httpx_timeout(
             self.deadline,
             self.timeout_seconds,
         )
@@ -436,8 +427,8 @@ class RemediationGitHubBroker:
                 "GitHub remediation request failed."
             ) from None
         try:
-            return json.loads(content)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            return loads_bounded_json(content)
+        except (UnicodeDecodeError, ValueError, RecursionError):
             raise RemediationRuntimeError(
                 "GitHub remediation request returned invalid JSON."
             ) from None
@@ -1253,41 +1244,11 @@ class RemediationGitHubBroker:
                     expected_title=title,
                     expected_body=draft_body,
                 )
-            # Re-run exact source authority after the callback's slow remote
-            # identity reads. This is the last operation before the POST and
-            # therefore closes the source-side TOCTOU window.
+            # Source authority is the final explicit check before the POST.
+            # No finite REST sequence can make the source and destination
+            # observations atomic, but neither side relies on a value captured
+            # before slow local preparation.
             before_post()
-            # The final source check can itself be slow. Nothing learned before
-            # it is safe to use for a write, so repeat the complete destination,
-            # actor, base, branch, and duplicate-PR check immediately before the
-            # POST.
-            if self._assert_authenticated_actor(client) != actor:
-                raise GitHubAuthenticationError(
-                    "GitHub remediation actor changed before draft creation."
-                )
-            self._assert_identities(client)
-            if self._base_sha(client) != expected_base_sha:
-                raise RemediationRuntimeError(
-                    "Remediation target base moved before draft creation."
-                )
-            self._require_branch_candidate(
-                client,
-                branch=branch,
-                candidate_sha=candidate_sha,
-            )
-            concurrent = self._matching_pulls(client, branch=branch)
-            if concurrent:
-                return self._stable_recovered_pull(
-                    client,
-                    concurrent[0],
-                    branch=branch,
-                    expected_base_sha=expected_base_sha,
-                    candidate_sha=candidate_sha,
-                    marker=marker,
-                    expected_author=actor,
-                    expected_title=title,
-                    expected_body=draft_body,
-                )
             created = self._request(
                 client,
                 "POST",
@@ -1470,6 +1431,7 @@ def _normalized_changed_paths(values: Sequence[str]) -> tuple[str, ...]:
 def _opened_pull_identity(
     record: RemediationDraftRecord,
     *,
+    policy: RepositoryPolicy | None = None,
     head_sha: str | None = None,
 ) -> OpenPullPathIdentity:
     """Build an exclusion only from a fully attested opened-draft ledger row."""
@@ -1483,12 +1445,26 @@ def _opened_pull_identity(
         raise RemediationOpenPullAuthorityError(
             "Exact opened remediation pull identity is unavailable."
         )
+    if policy is not None:
+        remediation = _remediation_policy(policy)
+        if (
+            record.target_repository_id != policy.base_repo_id
+            or record.push_repository_id != remediation.push_repository.id
+        ):
+            raise RemediationOpenPullAuthorityError(
+                "Exact opened remediation repository identity is unavailable."
+            )
+        target_repository = policy.base_repo
+        push_repository = remediation.push_repository.full_name
+    else:
+        target_repository = record.target_repository
+        push_repository = record.push_repository
     return OpenPullPathIdentity(
-        repository=record.target_repository,
+        repository=target_repository,
         repository_id=record.target_repository_id,
         pull_id=record.draft_pull_id,
         number=record.draft_number,
-        head_repository=record.push_repository,
+        head_repository=push_repository,
         head_repository_id=record.push_repository_id,
         head_ref=record.branch,
         head_sha=record.candidate_sha if head_sha is None else head_sha,
@@ -1845,7 +1821,11 @@ class RemediationCoordinator:
             require_live_lease()
             require_no_open_translation_overlap(
                 intent.changed_paths,
-                _opened_pull_identity(record, head_sha=expected_remote_head_sha),
+                _opened_pull_identity(
+                    record,
+                    policy=policy,
+                    head_sha=expected_remote_head_sha,
+                ),
             )
             require_live_lease()
             # The overlap refresh is a slow remote authority read. Re-read the
@@ -1986,10 +1966,8 @@ class RemediationCoordinator:
         except ValueError:
             return False
         return bool(
-            record.target_repository == policy.base_repo
-            and record.target_repository_id == policy.base_repo_id
+            record.target_repository_id == policy.base_repo_id
             and record.target_base_branch == policy.base_branch
-            and record.push_repository == remediation.push_repository.full_name
             and record.push_repository_id == remediation.push_repository.id
             and record.branch.startswith(remediation.push_branch_prefix)
             and record.branch != remediation.push_branch_prefix
@@ -2001,12 +1979,11 @@ class RemediationCoordinator:
             and record.changed_paths is not None
             and bool(record.changed_paths)
             and all(
-                any(fnmatchcase(path, pattern) for pattern in policy.allowed_path_globs)
+                matches_any_path_glob(path, policy.allowed_path_globs)
                 for path in record.changed_paths
             )
             and all(
-                item.repository == policy.base_repo
-                and item.repository_id == policy.base_repo_id
+                item.repository_id == policy.base_repo_id
                 for item in record.source_pulls
             )
         )
@@ -2840,15 +2817,15 @@ class RemediationCoordinator:
         observed_at = _as_utc(observed_at)
         require_live_lease()
         all_pending = self.state.pending_remediation_drafts_for_recovery(
-            repository=policy.base_repo,
+            repository_id=policy.base_repo_id,
             limit=_MAX_PENDING_RECOVERIES_PER_REPOSITORY,
         )
         opened_records = self.state.opened_remediation_drafts_for_reconciliation(
-            repository=policy.base_repo,
+            repository_id=policy.base_repo_id,
             limit=_MAX_PENDING_RECOVERIES_PER_REPOSITORY,
         )
         merged_revalidations = self.state.pending_merged_remediation_revalidations(
-            repository=policy.base_repo,
+            repository_id=policy.base_repo_id,
             limit=_MAX_PENDING_RECOVERIES_PER_REPOSITORY,
         )
         if not all_pending and not opened_records and not merged_revalidations:

@@ -124,9 +124,8 @@ def test_guardian_example_includes_only_commented_closed_pr_backfill_authority()
     assert "#   publication_actor:" in example
     assert "numeric id + github user type grant" in normalized
     assert "github app installation-token bot identities are not supported" in normalized
-    assert (
-        "multi-source remediation batch is recovered as one atomic group" in normalized
-    )
+    assert "all-or-nothing local-state group" in normalized
+    assert "final remote checks are sequential" in normalized
     assert "time window admits new evidence only" in normalized
     assert "durable pending group cannot age out" in normalized
     assert "new human-review correction draft" in normalized
@@ -150,7 +149,8 @@ def test_closed_pr_backfill_is_recorded_in_the_v020_release_notes():
     assert "window admits new evidence only" in release
     assert "durable pending recovery groups cannot age out" in release
     assert "current-base remediation" in release
-    assert "multi-source recovery batches remain grouped and atomic" in release
+    assert "multi-source recovery batches remain grouped and all-or-nothing" in release
+    assert "destination and source observations remain sequential" in release
     assert "same-target conflicts" in release
     assert "operator cleanup" in release
     assert "automatic liveness" in release
@@ -284,7 +284,8 @@ def test_guardian_docs_publish_exact_prevention_collection_and_text_bounds():
         assert "100 code globs" in text
         assert "100 test globs" in text
         assert "64 focused commands" in text
-        assert "256" in text and "sandbox prefix" in text
+        assert "256" in text and "focused" in text
+        assert "exactly one" in text and "sandbox" in text
         assert "4096 utf-8 bytes" in text
         assert "max_changed_files" in text and "100" in text
         assert "77" in text and "branch" in text
@@ -357,7 +358,8 @@ def test_guardian_guide_documents_audit_cost_retention_and_safe_prevention():
     assert "failing on the base" in lowered
     assert "passing with the draft" in lowered
     assert "operator-supplied `sandbox_argv_prefix`" in lowered
-    assert "its executable must be an absolute path" in lowered
+    assert "one-item argv" in lowered
+    assert "unchecked prefix argument is rejected" in lowered
     assert "before every focused command, a runtime probe" in lowered
     assert "an af_inet loopback bind and a connection" in lowered
     assert "filesystem af_unix canary connection" in lowered
@@ -527,6 +529,7 @@ def test_guardian_guide_has_consistent_cli_and_launchd_catch_up_instructions():
     assert "runtime.codex_executable" in guide
     assert "runtime.github_token_command[0]" in guide
     assert "runtime.codex_api_key_command[0]" in guide
+    assert "interpreter or dispatcher programs are not accepted" in _normalized_guide()
     assert "executable absolute paths" in guide
     assert "removes only regular files created by that attempt" in guide
     assert "preserves pre-existing" in guide
@@ -536,6 +539,8 @@ def test_guardian_guide_has_consistent_cli_and_launchd_catch_up_instructions():
     assert "codex_executable: /absolute/path/to/codex" in example
     assert "github_token_command: [/absolute/path/to/github-token-helper]" in example
     assert "codex_api_key_command: [/absolute/path/to/model-key-helper]" in example
+    assert "git_executable: /absolute/path/to/git" in example
+    assert "- /absolute/path/to/guardian-sandbox-wrapper" in example
     assert "codex_auth_mode: chatgpt" in example
     assert "max_model_calls_per_day: 2" in example
 
@@ -563,7 +568,8 @@ def test_guardian_is_discoverable_without_implying_a_hosted_service():
     assert "completion requires a quiescent pass" in normalized_readme
     assert "100 pages or 10,000 entries fails visibly" in normalized_readme
     assert "three immediate hydration attempts" in normalized_readme
-    assert "multi-source recovery batch remains atomic and bounded" in normalized_readme
+    assert "multi-source recovery batch remains bounded and all-or-nothing" in normalized_readme
+    assert "destination and source observations are necessarily sequential" in normalized_readme
     assert "discovery window admits new evidence only" in normalized_readme
     assert "published branch cannot age out before reconciliation" in normalized_readme
 

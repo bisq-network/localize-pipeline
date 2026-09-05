@@ -13,6 +13,7 @@ from localize.guardian import filesystem_trust
 from localize.guardian.filesystem_trust import (
     create_or_wait_for_private_directory,
     is_trusted_directory,
+    resolve_trusted_private_directory,
 )
 
 
@@ -47,6 +48,64 @@ def test_non_directory_is_never_a_trusted_boundary() -> None:
     metadata = SimpleNamespace(st_mode=stat.S_IFREG | 0o0755, st_uid=0)
 
     assert not is_trusted_directory(metadata, trusted_owners={0, 1000})
+
+
+def test_resolves_current_user_owned_private_directory(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+
+    assert resolve_trusted_private_directory(private) == private.resolve(strict=True)
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o770, 0o777])
+def test_rejects_non_private_directory_modes(tmp_path: Path, mode: int) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(mode)
+
+    with pytest.raises(ValueError, match="private directory"):
+        resolve_trusted_private_directory(private)
+
+
+def test_rejects_private_directory_not_owned_by_current_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    original_stat = Path.stat
+
+    def stat_with_foreign_leaf(path: Path, *args, **kwargs):
+        metadata = original_stat(path, *args, **kwargs)
+        if path != private:
+            return metadata
+        fields = list(metadata)
+        fields[4] = os.getuid() + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "stat", stat_with_foreign_leaf)
+
+    with pytest.raises(ValueError, match="private directory"):
+        resolve_trusted_private_directory(private)
+
+
+def test_rejects_relative_private_directory(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="private directory"):
+        resolve_trusted_private_directory(Path(tmp_path.name))
+
+
+def test_rejects_private_directory_beneath_symlinked_ancestor(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir(mode=0o700)
+    private = real_parent / "private"
+    private.mkdir(mode=0o700)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="private directory"):
+        resolve_trusted_private_directory(alias / "private")
 
 
 def test_private_directory_wait_times_out_without_repairing_a_stale_inode(

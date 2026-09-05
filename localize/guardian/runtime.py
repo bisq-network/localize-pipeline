@@ -42,7 +42,9 @@ from localize.guardian.credentials import (
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.executable_trust import (
     ExecutableTrustError,
+    require_absolute_trusted_direct_executable,
     require_absolute_trusted_executable,
+    require_absolute_trusted_wrapper,
 )
 from localize.guardian.filesystem_trust import (
     create_or_wait_for_private_directory,
@@ -793,20 +795,31 @@ def _validate_scheduled_executables(config: GuardianConfig) -> None:
     commands: list[tuple[Sequence[str], str]] = [
         ((config.runtime.codex_executable,), "runtime.codex_executable"),
         ((config.runtime.git_executable,), "runtime.git_executable"),
-        (config.runtime.github_token_command, "runtime.github_token_command"),
     ]
+    direct_commands: list[tuple[Sequence[str], str, bool]] = [
+        (
+            config.runtime.github_token_command,
+            "runtime.github_token_command",
+            True,
+        ),
+    ]
+    sandbox_wrappers: list[tuple[Sequence[str], str]] = []
     if config.mode in _WRITE_MODES:
         commands.append(((config.runtime.signing_program,), "runtime.signing_program"))
     if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
-        commands.append(
-            (config.runtime.codex_api_key_command, "runtime.codex_api_key_command")
+        direct_commands.append(
+            (
+                config.runtime.codex_api_key_command,
+                "runtime.codex_api_key_command",
+                False,
+            )
         )
     if config.mode is GuardianMode.PROPOSE_PREVENTION:
         for policy_index, policy in enumerate(config.repositories):
             prevention = policy.prevention
             if prevention is None:
                 continue
-            commands.append(
+            sandbox_wrappers.append(
                 (
                     prevention.sandbox_argv_prefix,
                     f"repositories.{policy_index}.prevention.sandbox_argv_prefix",
@@ -819,6 +832,14 @@ def _validate_scheduled_executables(config: GuardianConfig) -> None:
     try:
         for command, field in commands:
             require_absolute_trusted_executable(command, field=field)
+        for command, field, allow_github_cli in direct_commands:
+            require_absolute_trusted_direct_executable(
+                command,
+                field=field,
+                allow_github_cli=allow_github_cli,
+            )
+        for command, field in sandbox_wrappers:
+            require_absolute_trusted_wrapper(command, field=field)
     except ExecutableTrustError:
         raise GuardianRuntimeError(
             "Guardian scheduled executable authority is unavailable or unsafe."

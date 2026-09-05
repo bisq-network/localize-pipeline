@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from localize.semantic_quality import TranslationChange
 from localize.app_config import resolve_semantic_review_model
+from localize.formats import unregister_localization_adapter
 from localize.model_provider import ModelProviderConfigurationError
 from localize.translation_semantic_reviewer import (
     _run,
@@ -16,6 +18,11 @@ from localize.translation_semantic_reviewer import (
     build_semantic_review_messages,
     normalize_review_response,
     review_translation_changes,
+)
+from localize.translation_quality_gate import (
+    QualityGateConfig,
+    SourceIdenticalStats,
+    build_quality_gate_report,
 )
 
 
@@ -32,7 +39,10 @@ def test_semantic_reviewer_prompt_is_json_only_and_context_rich():
                 new_value="Borrar dirección de red: {0}",
             )
         ],
-        style_rules=["Use formal tone.", "Do not translate clear as delete for clearnet labels."],
+        style_rules=[
+            "Use formal tone.",
+            "Do not translate clear as delete for clearnet labels.",
+        ],
         brand_glossary=["Bisq", "Tor"],
     )
 
@@ -292,6 +302,171 @@ async def test_semantic_reviewer_inherits_effective_review_model_override(
 
 
 @pytest.mark.asyncio
+async def test_semantic_reviewer_honors_dry_run_environment_override(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: gpt-4o",
+                "supported_locales:",
+                "  - de",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCALIZE_DRY_RUN", "true")
+
+    provider = MagicMock()
+    provider.client = object()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"findings": []}))
+                )
+            ]
+        )
+    )
+    with (
+        patch(
+            "localize.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ) as get_diff,
+        patch(
+            "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
+            return_value=[
+                TranslationChange(
+                    file="resources/messages_de.properties",
+                    locale_code="de",
+                    key="hello",
+                    source_value="Hello",
+                    old_value=None,
+                    new_value="Hallo",
+                )
+            ],
+        ),
+        patch(
+            "localize.translation_semantic_reviewer.create_model_provider",
+            return_value=provider,
+        ) as create_provider,
+    ):
+        exit_code = await _run(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "--input-folder",
+                "resources",
+                "--config",
+                str(config_path),
+                "--validation-summary",
+                str(validation_summary_path),
+                "--changed-files",
+                "resources/messages_de.properties",
+            ]
+        )
+
+    assert exit_code == 0
+    get_diff.assert_not_called()
+    create_provider.assert_not_called()
+    provider.create_chat_completion.assert_not_awaited()
+    summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
+    assert summary["semantic_review_findings"] == []
+
+
+@pytest.mark.asyncio
+async def test_direct_semantic_reviewer_loads_environment_plugin_modules(
+    tmp_path, monkeypatch
+):
+    module_name = "semantic_reviewer_test_plugin"
+    format_id = "semantic_reviewer_test_format"
+    plugin_path = tmp_path / f"{module_name}.py"
+    plugin_path.write_text(
+        f'''
+from localize.formats import LocalizationFileAdapter, LocalizationFormat, register_localization_adapter
+
+fmt = LocalizationFormat(
+    id="{format_id}",
+    display_name="Semantic reviewer test",
+    file_extension=".demo",
+    code_fence="text",
+    locale_suffix_regex=r"_(?P<locale>[A-Za-z]{{2}})\\.demo$",
+)
+
+adapter = LocalizationFileAdapter(
+    localization_format=fmt,
+    parse_file=lambda path: ([], {{}}),
+    reassemble_file=lambda lines: "",
+    synchronize_keys=lambda target, source: (set(), set()),
+    lint_file=lambda path: [],
+    extract_changed_key_from_diff_line=lambda line: None,
+    build_review_content=lambda translations, keys: "",
+    escape_translation=lambda source, value: value,
+)
+
+register_localization_adapter(adapter)
+'''.lstrip(),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    validation_summary_path = tmp_path / "translation_validation_summary.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dry_run: false",
+                "semantic_review:",
+                "  enabled: true",
+                "  model: gpt-4o",
+                f"localization_format: {format_id}",
+                "localization_layout: suffix",
+                "supported_locales:",
+                "  - de",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("LOCALIZE_PLUGIN_MODULES", module_name)
+    monkeypatch.setenv("LOCALIZE_DISABLE_ENTRY_POINT_PLUGINS", "true")
+
+    try:
+        with patch(
+            "localize.translation_semantic_reviewer.get_staged_diff",
+            return_value="",
+        ):
+            exit_code = await _run(
+                [
+                    "--repo-root",
+                    str(tmp_path),
+                    "--input-folder",
+                    "resources",
+                    "--config",
+                    str(config_path),
+                    "--validation-summary",
+                    str(validation_summary_path),
+                    "--changed-files",
+                    "resources/messages_de.demo",
+                ]
+            )
+    finally:
+        unregister_localization_adapter(format_id)
+        sys.modules.pop(module_name, None)
+
+    assert exit_code == 0
+    summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
+    assert summary["semantic_review"] == {
+        "attempted": False,
+        "failed_batches": 0,
+        "failed_locales": [],
+    }
+
+
+@pytest.mark.asyncio
 async def test_semantic_reviewer_uses_compatible_completion_token_limit():
     response = SimpleNamespace(
         choices=[
@@ -304,7 +479,9 @@ async def test_semantic_reviewer_uses_compatible_completion_token_limit():
     provider.create_chat_completion = AsyncMock(return_value=response)
     provider.capabilities_for_model.return_value = SimpleNamespace(
         supports_reasoning_effort=True,
-        supported_reasoning_efforts=frozenset({"none", "low", "medium", "high", "xhigh"}),
+        supported_reasoning_efforts=frozenset(
+            {"none", "low", "medium", "high", "xhigh"}
+        ),
     )
     changes = [
         TranslationChange(
@@ -379,7 +556,7 @@ async def test_semantic_reviewer_omits_json_mode_when_provider_does_not_support_
 
 
 @pytest.mark.asyncio
-async def test_semantic_reviewer_invalid_json_degrades_to_no_findings():
+async def test_semantic_reviewer_invalid_json_records_failed_batch():
     provider = MagicMock()
     provider.create_chat_completion = AsyncMock(
         return_value=SimpleNamespace(
@@ -395,6 +572,7 @@ async def test_semantic_reviewer_invalid_json_degrades_to_no_findings():
         new_value="Borrar",
     )
 
+    failed_batches = []
     findings = await review_translation_changes(
         client=object(),
         model="gpt-4o",
@@ -403,9 +581,51 @@ async def test_semantic_reviewer_invalid_json_degrades_to_no_findings():
         style_rules=[],
         brand_glossary=[],
         model_provider=provider,
+        failed_batches=failed_batches,
     )
 
     assert findings == []
+    assert len(failed_batches) == 1
+    assert "required JSON schema" in failed_batches[0]
+
+
+@pytest.mark.asyncio
+async def test_semantic_reviewer_truncated_response_records_failed_batch():
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length",
+                    message=SimpleNamespace(content='{"findings": []}'),
+                )
+            ]
+        )
+    )
+    change = TranslationChange(
+        file="resources/mobile_es.properties",
+        locale_code="es",
+        key="mobile.clear",
+        source_value="Clear",
+        old_value=None,
+        new_value="Borrar",
+    )
+
+    failed_batches = []
+    findings = await review_translation_changes(
+        client=object(),
+        model="gpt-4o",
+        target_language="Spanish",
+        changes=[change],
+        style_rules=[],
+        brand_glossary=[],
+        model_provider=provider,
+        failed_batches=failed_batches,
+    )
+
+    assert findings == []
+    assert len(failed_batches) == 1
+    assert "truncated" in failed_batches[0]
 
 
 @pytest.mark.asyncio
@@ -415,7 +635,11 @@ async def test_semantic_reviewer_chunks_and_survives_failed_batch():
         side_effect=[
             RuntimeError("provider unavailable"),
             SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"findings": []})))]
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps({"findings": []}))
+                    )
+                ]
             ),
         ]
     )
@@ -524,9 +748,12 @@ async def test_semantic_reviewer_defaults_to_aisuite_provider(tmp_path):
         merge_existing=True,
         stage_name="semantic_review",
     )
-    assert json.loads(validation_summary_path.read_text(encoding="utf-8"))[
-        "semantic_review_findings"
-    ] == []
+    assert (
+        json.loads(validation_summary_path.read_text(encoding="utf-8"))[
+            "semantic_review_findings"
+        ]
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -550,12 +777,19 @@ async def test_semantic_reviewer_accepts_string_supported_locales(tmp_path):
     provider.client = object()
     provider.create_chat_completion = AsyncMock(
         return_value=SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({"findings": []})))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps({"findings": []}))
+                )
+            ]
         )
     )
 
     with (
-        patch("localize.translation_semantic_reviewer.get_staged_diff", return_value="fake diff"),
+        patch(
+            "localize.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ),
         patch(
             "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
             return_value=[
@@ -569,7 +803,10 @@ async def test_semantic_reviewer_accepts_string_supported_locales(tmp_path):
                 )
             ],
         ) as iter_changes,
-        patch("localize.translation_semantic_reviewer.create_model_provider", return_value=provider),
+        patch(
+            "localize.translation_semantic_reviewer.create_model_provider",
+            return_value=provider,
+        ),
     ):
         exit_code = await _run(
             [
@@ -597,8 +834,38 @@ async def test_semantic_reviewer_accepts_string_supported_locales(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    "provider_outcome",
+    [
+        pytest.param(RuntimeError("review unavailable"), id="provider-error"),
+        pytest.param(
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content="not json"),
+                    )
+                ]
+            ),
+            id="malformed-json",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(content='{"findings": []}'),
+                    )
+                ]
+            ),
+            id="truncated",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_semantic_reviewer_records_failed_batches(tmp_path):
+async def test_semantic_reviewer_records_failed_batches_as_blocking_warnings(
+    tmp_path, provider_outcome
+):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"
     config_path.write_text(
@@ -616,10 +883,17 @@ async def test_semantic_reviewer_records_failed_batches(tmp_path):
     )
     provider = MagicMock()
     provider.client = object()
-    provider.create_chat_completion = AsyncMock(side_effect=RuntimeError("review unavailable"))
+    provider.create_chat_completion = AsyncMock()
+    if isinstance(provider_outcome, Exception):
+        provider.create_chat_completion.side_effect = provider_outcome
+    else:
+        provider.create_chat_completion.return_value = provider_outcome
 
     with (
-        patch("localize.translation_semantic_reviewer.get_staged_diff", return_value="fake diff"),
+        patch(
+            "localize.translation_semantic_reviewer.get_staged_diff",
+            return_value="fake diff",
+        ),
         patch(
             "localize.translation_semantic_reviewer.iter_translation_changes_from_diff",
             return_value=[
@@ -633,7 +907,10 @@ async def test_semantic_reviewer_records_failed_batches(tmp_path):
                 )
             ],
         ),
-        patch("localize.translation_semantic_reviewer.create_model_provider", return_value=provider),
+        patch(
+            "localize.translation_semantic_reviewer.create_model_provider",
+            return_value=provider,
+        ),
     ):
         exit_code = await _run(
             [
@@ -650,10 +927,24 @@ async def test_semantic_reviewer_records_failed_batches(tmp_path):
             ]
         )
 
-    assert exit_code == 0
+    assert exit_code == 1
     summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
     assert summary["semantic_review"]["failed_batches"] == 1
     assert summary["pipeline_warnings"][0]["scope"] == "run"
+    report = build_quality_gate_report(
+        source_stats=SourceIdenticalStats(),
+        semantic_stats=None,
+        validation_summary=summary,
+        changed_files=["resources/messages_de.properties"],
+        input_folder="resources",
+        config=QualityGateConfig(block_on_pipeline_warnings=False),
+    )
+    assert report["blocking"] is True
+    assert report["pipeline_warnings_count"] == 1
+    assert (
+        "Semantic AI review did not complete and requires manual resolution."
+        in report["blocking_reasons"]
+    )
 
 
 @pytest.mark.asyncio
@@ -709,7 +1000,7 @@ async def test_semantic_reviewer_auto_applies_safe_error_suggestions(tmp_path):
                                         "key": "hello",
                                         "severity": "warning",
                                         "reason": "Tone is informal.",
-                                    }
+                                    },
                                 ]
                             }
                         )
@@ -765,11 +1056,16 @@ async def test_semantic_reviewer_auto_applies_safe_error_suggestions(tmp_path):
         "Tone is informal.",
     ]
     assert summary["semantic_review_remediations"][0]["key"] == "hello"
-    assert summary["semantic_review_remediation_skips"][0]["reason"] == "duplicate finding for changed entry"
+    assert (
+        summary["semantic_review_remediation_skips"][0]["reason"]
+        == "duplicate finding for changed entry"
+    )
 
 
 @pytest.mark.asyncio
-async def test_semantic_reviewer_collects_changes_from_all_configured_profiles(tmp_path):
+async def test_semantic_reviewer_collects_changes_from_all_configured_profiles(
+    tmp_path,
+):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"
     config_path.write_text(
@@ -866,7 +1162,9 @@ async def test_semantic_reviewer_collects_changes_from_all_configured_profiles(t
 
 
 @pytest.mark.asyncio
-async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(tmp_path, caplog):
+async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(
+    tmp_path, caplog
+):
     config_path = tmp_path / "config.yaml"
     validation_summary_path = tmp_path / "translation_validation_summary.json"
     config_path.write_text(
@@ -924,4 +1222,29 @@ async def test_semantic_reviewer_fails_when_provider_configuration_is_invalid(tm
 
     assert exit_code == 1
     assert "Semantic review model provider configuration failed" in caplog.text
-    assert not validation_summary_path.exists()
+    summary = json.loads(validation_summary_path.read_text(encoding="utf-8"))
+    assert summary["semantic_review"] == {
+        "attempted": True,
+        "failed_batches": 0,
+        "failed_locales": [],
+        "failed_run": True,
+    }
+    assert summary["pipeline_warnings"][0]["scope"] == "run"
+
+    report = build_quality_gate_report(
+        source_stats=SourceIdenticalStats(),
+        semantic_stats=None,
+        validation_summary=summary,
+        changed_files=["resources/messages_de.properties"],
+        input_folder="resources",
+        config=QualityGateConfig(block_on_pipeline_warnings=False),
+    )
+    assert report["blocking"] is True
+    assert (
+        "Semantic AI review did not complete and requires manual resolution."
+        in report["blocking_reasons"]
+    )
+    assert (
+        "Translation pipeline warnings require manual resolution."
+        not in report["blocking_reasons"]
+    )

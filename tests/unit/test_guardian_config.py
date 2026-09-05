@@ -89,10 +89,7 @@ def _prevention_policy_yaml() -> str:
         - [/opt/localize-guardian/bin/pytest, tests/unit/test_rules.py, -q]
         - [/opt/localize-guardian/bin/ruff, check, localize, tests]
       sandbox_argv_prefix:
-        - /usr/bin/sandbox-exec
-        - -f
-        - /Users/operator/.config/localize-guardian/test.sb
-        - --
+        - /opt/localize-guardian/bin/sandbox-wrapper
       max_changed_files: 4
       max_changed_bytes: 262144
       private_target_model_opt_in: false
@@ -286,7 +283,7 @@ def test_repository_policy_preserves_legacy_positional_defaults() -> None:
         allowed_code_path_globs=("localize/*.py",),
         allowed_test_path_globs=("tests/**/*.py",),
         focused_test_argv=(("/opt/bin/pytest", "tests/unit/test_rules.py"),),
-        sandbox_argv_prefix=("/usr/bin/sandbox-exec", "--"),
+        sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=262_144,
     )
@@ -326,7 +323,7 @@ def test_prevention_publication_actor_must_be_a_user(actor_type: str) -> None:
             allowed_code_path_globs=("localize/*.py",),
             allowed_test_path_globs=("tests/**/*.py",),
             focused_test_argv=(("/opt/bin/pytest", "tests/unit/test_rules.py"),),
-            sandbox_argv_prefix=("/usr/bin/sandbox-exec", "--"),
+            sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
             max_changed_files=4,
             max_changed_bytes=262_144,
         )
@@ -1308,12 +1305,7 @@ limits:
             ),
             ("/opt/localize-guardian/bin/ruff", "check", "localize", "tests"),
         ),
-        sandbox_argv_prefix=(
-            "/usr/bin/sandbox-exec",
-            "-f",
-            "/Users/operator/.config/localize-guardian/test.sb",
-            "--",
-        ),
+        sandbox_argv_prefix=("/opt/localize-guardian/bin/sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=262144,
     )
@@ -1531,7 +1523,7 @@ def test_loads_secret_free_runtime_broker_and_codex_settings(tmp_path: Path) -> 
   git_executable: /opt/local/bin/git
   signing_program: /opt/local/bin/gpg
   github_token_command: [/opt/local/bin/gh, auth, token]
-  codex_api_key_command: [/usr/bin/security, find-generic-password, -w, -s, guardian]
+  codex_api_key_command: [/opt/local/bin/model-key-helper]
   signing_key: {fingerprint}
 limits:
   daily_cost_limit_usd: 20
@@ -1552,11 +1544,7 @@ limits:
         "token",
     )
     assert config.runtime.codex_api_key_command == (
-        "/usr/bin/security",
-        "find-generic-password",
-        "-w",
-        "-s",
-        "guardian",
+        "/opt/local/bin/model-key-helper",
     )
     assert config.runtime.signing_key == fingerprint
     assert config.runtime.signing_format is SigningFormat.OPENPGP
@@ -1624,6 +1612,33 @@ def test_typed_guardian_limits_enforce_parser_bounds(
         (
             {"github_token_command": ("python3", "-c", "read_secret()")},
             "interpreter command string",
+        ),
+        (
+            {"github_token_command": ("python3", "/opt/helpers/github.py")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("node", "/opt/helpers/github.js")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("nice", "/opt/helpers/github-token")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("nohup", "/opt/helpers/github-token")},
+            "interpreter or command dispatcher",
+        ),
+        (
+            {"github_token_command": ("helper", "read")},
+            "arguments",
+        ),
+        (
+            {
+                "codex_auth_mode": CodexAuthMode.API_KEY,
+                "codex_api_key_command": ("helper", "read"),
+            },
+            "arguments",
         ),
         ({"codex_auth_mode": CodexAuthMode.API_KEY}, "codex_api_key_command"),
         ({"codex_api_key_command": ("helper",)}, "only valid"),
@@ -1936,6 +1951,38 @@ def test_rejects_unknown_and_secret_fields(
             "command string",
         ),
         (
+            "github_token_command: [python3, /opt/helpers/github.py]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [node, /opt/helpers/github.js]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [nice, /opt/helpers/github-token]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [nohup, /opt/helpers/github-token]",
+            "interpreter or command dispatcher",
+        ),
+        (
+            "github_token_command: [helper, read]",
+            "arguments",
+        ),
+        (
+            "github_token_command: [awk, -f, /opt/helpers/github.awk]",
+            "arguments",
+        ),
+        (
+            "github_token_command: [tclsh, /opt/helpers/github.tcl]",
+            "arguments",
+        ),
+        (
+            "github_token_command: [uv, run, /opt/helpers/github.py]",
+            "arguments",
+        ),
+        (
             "github_token_command: [helper, TOKEN=committed-secret]",
             "credentials or environment assignments",
         ),
@@ -2024,8 +2071,7 @@ def test_accepts_exact_prevention_collection_and_utf8_byte_boundaries() -> None:
             ],
             "focused_test_argv": focused_commands,
             "sandbox_argv_prefix": [
-                "/usr/bin/sandbox-exec",
-                *("arg",) * 255,
+                "/opt/localize-guardian/bin/sandbox-wrapper",
             ],
             "max_changed_files": 100,
         }
@@ -2040,7 +2086,9 @@ def test_accepts_exact_prevention_collection_and_utf8_byte_boundaries() -> None:
     assert len(parsed.allowed_test_path_globs) == 100
     assert len(parsed.focused_test_argv) == 64
     assert all(len(argv) == 256 for argv in parsed.focused_test_argv)
-    assert len(parsed.sandbox_argv_prefix) == 256
+    assert parsed.sandbox_argv_prefix == (
+        "/opt/localize-guardian/bin/sandbox-wrapper",
+    )
     assert len(parsed.focused_test_argv[0][-1].encode("utf-8")) == 4096
     assert len(parsed.push_branch_prefix) + 77 == 255
     assert parsed.max_changed_files == 100
@@ -2083,8 +2131,8 @@ def test_rejects_prevention_values_above_durable_runtime_bounds(
         ]
     elif case == "sandbox_argv":
         prevention["sandbox_argv_prefix"] = [
-            "/usr/bin/sandbox-exec",
-            *("arg",) * 256,
+            "/opt/localize-guardian/bin/sandbox-wrapper",
+            "/unchecked/policy",
         ]
     elif case == "utf8_string":
         prevention["focused_test_argv"] = [
@@ -2133,17 +2181,17 @@ def test_rejects_prevention_values_above_durable_runtime_bounds(
             "focused_test_argv.0.0",
         ),
         (
-            "- /usr/bin/sandbox-exec",
+            "- /opt/localize-guardian/bin/sandbox-wrapper",
             "- sandbox-exec",
             "sandbox_argv_prefix.0",
         ),
         (
-            "- /usr/bin/sandbox-exec",
+            "- /opt/localize-guardian/bin/sandbox-wrapper",
             "- /bin/sh",
             "shell wrapper",
         ),
         (
-            "- /usr/bin/sandbox-exec",
+            "- /opt/localize-guardian/bin/sandbox-wrapper",
             "- TOKEN=not-allowed",
             "sandbox_argv_prefix.0",
         ),

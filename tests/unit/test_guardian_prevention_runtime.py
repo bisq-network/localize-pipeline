@@ -20,6 +20,7 @@ from localize.guardian import state as guardian_state
 from localize.guardian.codex import (
     CodexAuthenticationError,
     CodexCapacityError,
+    CodexOutputError,
     CodexTimeoutError,
     CodexUsage,
 )
@@ -199,7 +200,7 @@ def _prevention_policy(
         focused_test_argv=(
             ("/opt/localize-guardian/bin/pytest", "tests/unit/test_rules.py", "-q"),
         ),
-        sandbox_argv_prefix=("/usr/bin/sandbox-tool", "--profile", "/safe/profile"),
+        sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=16_384,
         private_target_model_opt_in=private_target_opt_in,
@@ -590,6 +591,7 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     def fake_run(argv, **kwargs):
         observed["argv"] = list(argv)
         observed["kwargs"] = kwargs
+        observed["launch_environment"] = dict(kwargs["env"])
         return subprocess.CompletedProcess(
             argv,
             0,
@@ -643,8 +645,11 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     assert "Preserve indexed placeholders" not in argv
     assert kwargs["timeout"] == 17
     assert kwargs["limits"].require_linux_cgroup is True
-    assert kwargs["env"]["CODEX_API_KEY"] == "explicit-model-key"
-    assert "OPENAI_API_KEY" not in kwargs["env"]
+    launch_environment = observed["launch_environment"]
+    assert isinstance(launch_environment, dict)
+    assert launch_environment["CODEX_API_KEY"] == "explicit-model-key"
+    assert "OPENAI_API_KEY" not in launch_environment
+    assert "CODEX_API_KEY" not in kwargs["env"]
     for forbidden in (
         "GITHUB_TOKEN",
         "GH_TOKEN",
@@ -686,6 +691,78 @@ def test_prevention_author_opens_auth_circuit_without_echoing_secret(
             api_key="explicit-secret-value",
         )
     assert "explicit-secret-value" not in str(failure.value)
+
+
+def test_prevention_author_rejects_and_clears_secret_from_success_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = "sk-guardian-diagnostic-regression-secret"
+    child_environment: dict[str, str] = {}
+
+    def fake_run(argv, **kwargs):
+        child_environment.update(kwargs["env"])
+        # Keep the exact mapping so the assertion also proves the caller clears it.
+        observed_mapping.append(kwargs["env"])
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"diagnostic accidentally repeated {secret}",
+            stderr="",
+        )
+
+    observed_mapping: list[dict[str, str]] = []
+    monkeypatch.setattr(prevention_runtime, "run_bounded_process", fake_run)
+
+    with pytest.raises(CodexOutputError) as failure:
+        PreventionCodexAuthor(
+            model="gpt-5.6-sol",
+            reasoning_effort="max",
+            auth_mode=CodexAuthMode.API_KEY,
+        ).run(
+            workspace=workspace,
+            scope="pipeline_code",
+            summary="Regression",
+            evidence_feedback_ids=("review:1:revision-1",),
+            policy=_prevention_policy(),
+            api_key=secret,
+        )
+
+    assert str(failure.value) == (
+        "Prevention Codex output failed credential safety validation."
+    )
+    assert secret not in str(failure.value)
+    assert child_environment["CODEX_API_KEY"] == secret
+    assert "CODEX_API_KEY" not in observed_mapping[0]
+
+
+def test_candidate_credential_scan_redacts_model_authored_filename(
+    tmp_path: Path,
+) -> None:
+    secret = "sk-guardian-filename-regression-secret"
+    base = tmp_path / "base"
+    candidate = tmp_path / "candidate"
+    (base / "localize").mkdir(parents=True)
+    (candidate / "localize").mkdir(parents=True)
+    (candidate / "localize" / f"diagnostic-{secret}.py").write_text(
+        "SAFE = True\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PreventionRuntimeError) as failure:
+        prevention_runtime._reject_model_credential_in_candidate_delta(  # noqa: SLF001
+            base_workspace=base,
+            candidate_workspace=candidate,
+            credential=secret,
+            deadline=None,
+        )
+
+    assert str(failure.value) == (
+        "Prevention candidate failed credential safety validation."
+    )
+    assert secret not in str(failure.value)
 
 
 def test_prevention_author_never_inherits_a_host_model_credential(
@@ -937,9 +1014,7 @@ def test_sandboxed_runner_uses_identical_configured_argv_and_minimal_environment
     )
 
     expected = [
-        "/usr/bin/sandbox-tool",
-        "--profile",
-        "/safe/profile",
+        "/usr/bin/guardian-sandbox-wrapper",
         "/opt/localize-guardian/bin/pytest",
         "tests/unit/test_rules.py",
         "-q",
@@ -1154,7 +1229,7 @@ def test_sandboxed_runner_rejects_prefix_that_fails_confinement_probe(
         ),
         (
             "sandbox_argv_prefix",
-            ("sandbox-tool", "--profile", "/safe/profile"),
+            ("sandbox-wrapper",),
         ),
     ],
 )
@@ -1202,9 +1277,10 @@ def test_sandboxed_runner_rejects_prefix_that_allows_outbound_connect(
     candidate = tmp_path / "candidate"
     base.mkdir()
     candidate.mkdir()
-    wrapper = tmp_path / "deny-bind-only.py"
+    wrapper = tmp_path / "deny-bind-only"
     wrapper.write_text(
-        """
+        f"#!{sys.executable}\n"
+        + """
 import pathlib
 import socket
 import sys
@@ -1240,9 +1316,10 @@ exec(compile(command[3], "<guardian-probe>", "exec"), {"__name__": "__main__"})
 """.lstrip(),
         encoding="utf-8",
     )
+    wrapper.chmod(0o700)
     policy = replace(
         _prevention_policy(),
-        sandbox_argv_prefix=(sys.executable, str(wrapper)),
+        sandbox_argv_prefix=(str(wrapper),),
     )
 
     with pytest.raises(
@@ -1268,9 +1345,10 @@ def test_sandbox_probe_accepts_denied_socket_and_cgroup_access(
     private = tmp_path / "private"
     workspace.mkdir()
     private.mkdir()
-    wrapper = tmp_path / "deny-all-sockets.py"
+    wrapper = tmp_path / "deny-all-sockets"
     wrapper.write_text(
-        """
+        f"#!{sys.executable}\n"
+        + """
 import os
 import pathlib
 import socket
@@ -1295,6 +1373,7 @@ exec(compile(command[3], "<guardian-probe>", "exec"), {"__name__": "__main__"})
 """.lstrip(),
         encoding="utf-8",
     )
+    wrapper.chmod(0o700)
     cgroup_parent_procs = tmp_path / "cgroup.procs"
     cgroup_parent_procs.touch()
     monkeypatch.setattr(
@@ -1307,7 +1386,7 @@ exec(compile(command[3], "<guardian-probe>", "exec"), {"__name__": "__main__"})
     runner._prove_confinement(
         workspace=workspace,
         private=private,
-        sandbox_prefix=(sys.executable, str(wrapper)),
+        sandbox_prefix=(str(wrapper),),
         environment=runner._environment(home=private, temp=private),
     )
 
@@ -1372,7 +1451,7 @@ def test_github_broker_revalidates_numeric_identities_and_opens_draft_only(
         if path == "/repos/guardian/pipeline/pulls" and request.method == "GET":
             return _response(request, [])
         if path == "/repos/guardian/pipeline/pulls" and request.method == "POST":
-            assert lease_checks == 3
+            assert lease_checks == 2
             payload = json.loads(request.content)
             assert payload["draft"] is True
             assert payload["maintainer_can_modify"] is False
@@ -1447,7 +1526,7 @@ def test_github_broker_revalidates_numeric_identities_and_opens_draft_only(
         created=True,
     )
     assert any(method == "POST" for method, _path, _body in requests)
-    assert lease_checks == 3
+    assert lease_checks == 2
     assert all(TOKEN.encode() not in body for _method, _path, body in requests)
 
 
@@ -2529,6 +2608,7 @@ def test_github_broker_revalidates_remote_authority_after_final_pr_lookup(
     branch = "guardian/prevention-" + "a" * 64
     pull_reads = 0
     authority_checks = 0
+    destination_moved = False
     methods: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2540,11 +2620,13 @@ def test_github_broker_revalidates_remote_authority_after_final_pr_lookup(
         if path == "/repos/guardian/pipeline":
             return _response(request, _repo_payload())
         if path == "/repos/guardian/pipeline/branches/main":
-            sha = "f" * 40 if mutation == "base" and pull_reads >= 2 else BASE_SHA
+            sha = "f" * 40 if mutation == "base" and destination_moved else BASE_SHA
             return _response(request, _branch_payload("main", sha))
         if path == f"/repos/guardian/pipeline/branches/{branch}":
             sha = (
-                "f" * 40 if mutation == "branch" and pull_reads >= 2 else CANDIDATE_SHA
+                "f" * 40
+                if mutation == "branch" and destination_moved
+                else CANDIDATE_SHA
             )
             return _response(request, _branch_payload(branch, sha))
         if path == "/repos/guardian/pipeline/pulls" and request.method == "GET":
@@ -2553,8 +2635,10 @@ def test_github_broker_revalidates_remote_authority_after_final_pr_lookup(
         raise AssertionError(f"unexpected {request.method} {path}")
 
     def before_create() -> None:
-        nonlocal authority_checks
+        nonlocal authority_checks, destination_moved
         authority_checks += 1
+        if authority_checks == 2:
+            destination_moved = True
 
     monkeypatch.setattr(prevention_runtime.SecretCommand, "read", lambda _self: TOKEN)
     broker = PreventionGitHubBroker(
@@ -2585,7 +2669,8 @@ def test_github_broker_rechecks_authority_immediately_before_post(
 ) -> None:
     branch = "guardian/prevention-" + "e" * 64
     methods: list[str] = []
-    authority_checks = 0
+    publication_slot_checks = 0
+    source_authority_checks = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         methods.append(request.method)
@@ -2603,10 +2688,13 @@ def test_github_broker_rechecks_authority_immediately_before_post(
         raise AssertionError(f"unexpected {request.method} {path}")
 
     def before_create() -> None:
-        nonlocal authority_checks
-        authority_checks += 1
-        if authority_checks == 3:
-            raise PreventionSourceAuthorityError("source changed before POST")
+        nonlocal publication_slot_checks
+        publication_slot_checks += 1
+
+    def before_post() -> None:
+        nonlocal source_authority_checks
+        source_authority_checks += 1
+        raise PreventionSourceAuthorityError("source changed before POST")
 
     monkeypatch.setattr(prevention_runtime.SecretCommand, "read", lambda _self: TOKEN)
     broker = PreventionGitHubBroker(
@@ -2625,9 +2713,11 @@ def test_github_broker_rechecks_authority_immediately_before_post(
             title="Prevent recurrence: placeholder parity",
             body="Validated body\n",
             before_create=before_create,
+            before_post=before_post,
         )
 
-    assert authority_checks == 3
+    assert publication_slot_checks == 2
+    assert source_authority_checks == 1
     assert "POST" not in methods
 
 
@@ -2854,6 +2944,9 @@ class _FakeBroker:
 
     def open_draft(self, *, branch: str, candidate_sha: str, **_kwargs):
         _kwargs["before_create"]()
+        before_post = _kwargs.get("before_post")
+        if before_post is not None:
+            before_post()
         if self.mutation_order is not None:
             self.mutation_order.append("post")
         self.open_calls += 1
@@ -2963,6 +3056,7 @@ def test_expired_poll_never_records_or_starts_model_attempt(
     with pytest.raises(PollDeadlineExceeded):
         coordinator._reserve_and_author(  # noqa: SLF001
             run_id="run-1",
+            base_workspace=_base_tree(tmp_path / "base"),
             workspace=_base_tree(tmp_path / "authoring"),
             candidate=_candidate(),
             evidence_ids=("review:1:revision-1",),
@@ -3454,6 +3548,92 @@ def test_coordinator_authors_proves_signs_publishes_draft_and_deduplicates(
         assert duplicate.drafts == ()
         assert duplicate.skipped == 1
         assert author.calls == 1
+
+
+def test_api_key_in_allowlisted_candidate_stops_before_any_later_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-guardian-candidate-regression-secret"
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+
+    class CredentialLeakingAuthor(_FakeAuthor):
+        def run(self, *, workspace: Path, **_kwargs) -> PreventionAuthorResult:
+            self.calls += 1
+            (workspace / "localize/rules.py").write_text(
+                f'MODEL_CREDENTIAL = "{secret}"\n',
+                encoding="utf-8",
+            )
+            (workspace / "tests/unit/test_rules.py").write_text(
+                "def test_preserve():\n    assert True\n",
+                encoding="utf-8",
+            )
+            return PreventionAuthorResult(attempts=1, usage=None)
+
+    class ForbiddenTestRunner(_FakeTestRunner):
+        def run_pair(self, **_kwargs):
+            raise AssertionError("credential-bearing candidates must never run tests")
+
+    def forbidden_patch_inspection(**_kwargs):
+        raise AssertionError(
+            "credential scan must precede patch diagnostics and downstream work"
+        )
+
+    monkeypatch.setattr(
+        prevention_runtime,
+        "inspect_prevention_patch",
+        forbidden_patch_inspection,
+    )
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(
+            repository="acme/translations",
+            locale="ru",
+            mode=GuardianMode.PROPOSE_PREVENTION,
+            started_at=now,
+        )
+        broker = _FakeBroker()
+        author = CredentialLeakingAuthor()
+        coordinator = _coordinator(
+            state=state,
+            tmp_path=tmp_path,
+            broker=broker,
+            author=author,
+            model_credential_provider=lambda: secret,
+            test_runner=ForbiddenTestRunner(),
+        )
+
+        def forbidden_candidate_state(**_kwargs):
+            raise AssertionError(
+                "credential-bearing candidates must never reach the draft ledger"
+            )
+
+        monkeypatch.setattr(
+            state,
+            "record_prevention_draft_event",
+            forbidden_candidate_state,
+        )
+
+        outcome = coordinator.propose(
+            policy=_repository_policy(),
+            recurrence_candidates=(_candidate(),),
+            evidence_revision_ids={"review_comment:42": OPEN_SOURCE_REVISION_ID},
+            run_id=run_id,
+            observed_at=now,
+            require_live_lease=_live_lease,
+            require_current_base_unchanged=_current_base,
+            **_open_source_kwargs(),
+        )
+
+        assert outcome.drafts == ()
+        assert outcome.failures == ("PreventionRuntimeError",)
+        assert secret not in repr(outcome)
+        assert author.calls == 1
+        assert broker.verify_calls == 0
+        assert broker.open_calls == 0
+        assert broker.branch_shas == {}
+        assert coordinator.checkout_factory.calls == 1
+        assert coordinator.checkout_factory.publications == 0
+        assert state.pending_prevention_drafts() == ()
 
 
 def test_new_proposal_reconciles_exact_pr_before_base_or_branch_revalidation(
@@ -3969,9 +4149,7 @@ def test_coordinator_revalidates_current_base_at_remote_and_terminal_boundaries(
                 "push_branch_prefix": "guardian/prevention-",
                 "push_repository": {"full_name": "guardian/pipeline", "id": 101},
                 "sandbox_argv_prefix": [
-                    "/usr/bin/sandbox-tool",
-                    "--profile",
-                    "/safe/profile",
+                    "/usr/bin/guardian-sandbox-wrapper",
                 ],
                 "target_base_branch": "main",
                 "target_repository": {
@@ -4023,9 +4201,6 @@ def test_attested_prevention_policy_round_trips_at_collection_bounds() -> None:
                 *(f"arg-{arg_index}" for arg_index in range(254)),
             )
             for command_index in range(64)
-        ),
-        sandbox_argv_prefix=tuple(
-            ["/usr/bin/sandbox", *(f"option-{index}" for index in range(255))]
         ),
         max_changed_files=100,
     )
@@ -4168,7 +4343,7 @@ def test_successful_post_is_durable_before_source_authority_is_revoked(
         ) -> None:
             nonlocal source_checks
             source_checks += 1
-            if source_checks == 5:
+            if broker.open_calls:
                 raise PreventionSourceAuthorityError("source was deleted after POST")
 
         first = coordinator.propose(
@@ -4581,6 +4756,11 @@ def test_subscription_prevention_uses_call_cap_without_api_key_or_usd_cost(
 def test_coordinator_recovers_pushed_branch_without_new_feedback_or_model_call(
     tmp_path: Path,
 ) -> None:
+    class SourceLastBroker(_FakeBroker):
+        def open_draft(self, **kwargs):
+            assert kwargs.get("before_post") is kwargs.get("before_create")
+            return super().open_draft(**kwargs)
+
     now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
     with GuardianState(tmp_path / "state.sqlite3") as state:
         assert _seed_open_source_event(state) == OPEN_SOURCE_REVISION_ID
@@ -4610,7 +4790,7 @@ def test_coordinator_recovers_pushed_branch_without_new_feedback_or_model_call(
             **ledger, phase="validated", occurred_at=now
         )
         state.record_prevention_draft_event(**ledger, phase="pushed", occurred_at=now)
-        broker = _FakeBroker()
+        broker = SourceLastBroker()
         broker.branch_shas[branch] = CANDIDATE_SHA
         author = _FakeAuthor()
         coordinator = _coordinator(
@@ -6890,6 +7070,137 @@ def test_coordinator_accounts_for_each_author_attempt_independently(
         # The failed attempt retains its full conservative $1 reservation;
         # only the successful attempt settles to reported usage.
         assert float(state.budget_committed_for_day(now.date())) == pytest.approx(1.01)
+
+
+def test_retry_is_fresh_and_old_credential_is_scanned_in_signing_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    first_key = "sk-first-prevention-attempt"
+    second_key = "sk-second-prevention-attempt"
+
+    class RetryingAuthor(_FakeAuthor):
+        max_attempts = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.second_attempt_was_clean = False
+
+        def run(self, *, workspace: Path, **kwargs) -> PreventionAuthorResult:
+            marker = workspace / "attempt-one-only"
+            if self.calls == 0:
+                self.calls += 1
+                marker.write_text("partial model edit\n", encoding="utf-8")
+                raise prevention_runtime.CodexTransientError("retry")
+            self.second_attempt_was_clean = not marker.exists()
+            return super().run(workspace=workspace, **kwargs)
+
+    original_inspection = prevention_runtime.inspect_prevention_patch
+    inspections = 0
+
+    def inject_old_key_after_signing_inspection(**kwargs):
+        nonlocal inspections
+        patch = original_inspection(**kwargs)
+        inspections += 1
+        if inspections == 2:
+            candidate = kwargs["candidate_workspace"] / "localize/rules.py"
+            candidate.write_text(
+                candidate.read_text(encoding="utf-8") + f"\nLEAKED = {first_key!r}\n",
+                encoding="utf-8",
+            )
+        return patch
+
+    monkeypatch.setattr(
+        prevention_runtime,
+        "inspect_prevention_patch",
+        inject_old_key_after_signing_inspection,
+    )
+    credentials = iter((first_key, second_key))
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(
+            repository="acme/translations",
+            locale="ru",
+            mode=GuardianMode.PROPOSE_PREVENTION,
+            started_at=now,
+        )
+        broker = _FakeBroker()
+        author = RetryingAuthor()
+        coordinator = _coordinator(
+            state=state,
+            tmp_path=tmp_path,
+            broker=broker,
+            author=author,
+            model_credential_provider=lambda: next(credentials),
+        )
+
+        outcome = coordinator.propose(
+            policy=_repository_policy(),
+            recurrence_candidates=(_candidate(),),
+            evidence_revision_ids={"review_comment:42": OPEN_SOURCE_REVISION_ID},
+            run_id=run_id,
+            observed_at=now,
+            require_live_lease=_live_lease,
+            require_current_base_unchanged=_current_base,
+            **_open_source_kwargs(),
+        )
+
+        assert author.calls == 2
+        assert author.second_attempt_was_clean is True
+        assert outcome.failures == ("PreventionRuntimeError",)
+        assert coordinator.checkout_factory.publications == 0
+        assert broker.open_calls == 0
+
+
+def test_transient_attempt_credential_leak_stops_before_retry(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    secret = "sk-transient-attempt-leak"
+
+    class LeakingTransientAuthor(_FakeAuthor):
+        max_attempts = 2
+
+        def run(self, *, workspace: Path, **_kwargs) -> PreventionAuthorResult:
+            self.calls += 1
+            (workspace / "localize/rules.py").write_text(
+                f"LEAKED = {secret!r}\n",
+                encoding="utf-8",
+            )
+            raise prevention_runtime.CodexTransientError("retry")
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        run_id = state.start_run(
+            repository="acme/translations",
+            locale="ru",
+            mode=GuardianMode.PROPOSE_PREVENTION,
+            started_at=now,
+        )
+        broker = _FakeBroker()
+        author = LeakingTransientAuthor()
+        coordinator = _coordinator(
+            state=state,
+            tmp_path=tmp_path,
+            broker=broker,
+            author=author,
+            model_credential_provider=lambda: secret,
+        )
+
+        outcome = coordinator.propose(
+            policy=_repository_policy(),
+            recurrence_candidates=(_candidate(),),
+            evidence_revision_ids={"review_comment:42": OPEN_SOURCE_REVISION_ID},
+            run_id=run_id,
+            observed_at=now,
+            require_live_lease=_live_lease,
+            require_current_base_unchanged=_current_base,
+            **_open_source_kwargs(),
+        )
+
+        assert outcome.failures == ("PreventionRuntimeError",)
+        assert author.calls == 1
+        assert coordinator.checkout_factory.publications == 0
+        assert broker.open_calls == 0
 
 
 def test_coordinator_accounts_author_retries_on_their_actual_utc_days(

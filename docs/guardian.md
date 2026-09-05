@@ -341,8 +341,17 @@ non-symlink, operator- or root-owned executables with trusted parent directories
 interpreted helpers must use an absolute interpreter in their shebang. In
 particular, an npm shim or script using `#!/usr/bin/env node` is rejected: point
 `codex_executable` at the package's platform-native Codex binary instead.
-`guardian doctor` reports any incompatible path before installation. Every due
-scheduled run checks the executable and its interpreter chain again before
+Every custom credential command must contain exactly one argv item naming the
+inspected helper. The sole multi-item exception is the exact GitHub CLI command
+`gh auth token`. Python, Node, shells, `nice`, `nohup`, and other interpreter or
+dispatcher programs are not accepted as `argv[0]` with an unchecked helper
+script in a later argument. A credential helper may itself be an executable
+script, because Guardian inspects that script and its absolute shebang
+interpreter chain; the shebang itself must contain only the interpreter path,
+without flags or other arguments. `guardian doctor` resolves interactive
+command names and validates each resulting executable before invoking any of
+them. `guardian install` additionally requires absolute configured paths. Every
+due scheduled run checks the executable and its interpreter chain again before
 credentials or repository data are used, so a background process cannot
 silently pick up a replaced binary from a changed `PATH`.
 
@@ -635,10 +644,15 @@ For an actionable batch, the Guardian revalidates the exact current target base
 and push repository, creates a signed commit on the deterministic new branch,
 and opens a new bot-marked draft pull request for human review. The exact
 `[Localize Guardian bot]` title prefix and body text identify it as
-bot-generated; this marker is not a GitHub label. It rechecks
-the base SHA and candidate branch immediately before the draft is created. It
-never reopens, edits, or comments on a closed pull request, never advances its
-branch, and never merges the remediation draft.
+bot-generated; this marker is not a GitHub label. Before creation it performs a
+coherent sequential pass: after local preparation it rechecks the destination
+actor, repository IDs, base SHA, candidate branch, and duplicate-PR state, then
+revalidates exact source authority as the final remote observation before the
+POST. GitHub's independent REST resources cannot provide an atomic snapshot;
+later changes are detected by the next bounded poll and never make an earlier
+observation retroactively atomic. It never reopens, edits, or comments on a
+closed pull request, never advances its branch, and never merges the remediation
+draft.
 
 Append-only publication phases, the deterministic branch, an embedded evidence
 marker, and preserved private durable state provide crash recovery without
@@ -713,8 +727,11 @@ eligible only when it is within the configured pipeline paths, cites immutable
 feedback evidence, and includes a focused regression test that is failing on the
 base revision and passing with the draft. The controller runs each configured
 test argv with a minimal, credential-free environment and prepends the exact
-operator-supplied `sandbox_argv_prefix`; its executable must be an absolute
-path. Before every focused command, a runtime probe must be able to read and
+operator-supplied `sandbox_argv_prefix`. This field is deliberately a one-item
+argv containing one absolute, directly invoked sandbox-wrapper executable. Put
+the confinement policy inside that inspected wrapper; a policy or helper-script
+path supplied as another unchecked prefix argument is rejected. Before every
+focused command, a runtime probe must be able to read and
 write generated paths inside the test workspace
 while reads and writes of generated paths outside it are denied. It also
 requires denial of an AF_INET loopback bind and a connection to a live parent
@@ -767,8 +784,9 @@ consent for a different private prevention target. If both are private, both
 opt-ins are required.
 
 Prevention policy collections have finite parser and runtime bounds: at most
-100 code globs, 100 test globs, 64 focused commands, and 256 arguments in each
-focused command or the sandbox prefix. Every string in those collections is at
+100 code globs, 100 test globs, 64 focused commands, 256 arguments in each
+focused command, and exactly one sandbox-wrapper executable in the sandbox
+prefix. Every string in those collections is at
 most 4096 UTF-8 bytes, `max_changed_files` is at most 100, and
 `push_branch_prefix` must leave 77 characters for the generated
 `<base-prefix>-<evidence-hash>` identity inside a 255-character branch name.
@@ -924,8 +942,9 @@ policy changes. If the ChatGPT session expires or is revoked, run
 - Private-repository model access is either disabled or deliberately approved.
 - `observe` evidence and `prepare` audit outcomes were reviewed before enabling
   writes; `prepare` was not mistaken for a retained diff preview.
-- The operator-supplied prevention sandbox prefix and policy were tested outside
-  the Guardian, and the Guardian's focused runtime confinement probe passes.
+- The directly invoked prevention sandbox wrapper embeds and enforces its policy,
+  was tested outside the Guardian, and passes Guardian's focused confinement
+  probe.
 - Linux deployments provide a delegated cgroup-v2 parent, and `doctor` proves
   that detached descendants are included in its cleanup scope.
 - Every prevention test command uses an absolute operator-controlled executable

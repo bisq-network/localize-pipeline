@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import os
 from pathlib import Path
+import re
 import stat
 
 from localize.guardian.filesystem_trust import is_trusted_directory
@@ -12,6 +13,66 @@ from localize.guardian.filesystem_trust import is_trusted_directory
 
 class ExecutableTrustError(ValueError):
     """A configured executable or interpreter chain is mutable or ambiguous."""
+
+
+_INDIRECT_COMMAND_LAUNCHERS = frozenset(
+    {
+        "busybox",
+        "chrt",
+        "command",
+        "deno",
+        "doas",
+        "env",
+        "expect",
+        "ionice",
+        "nice",
+        "nohup",
+        "npm",
+        "npx",
+        "open",
+        "osascript",
+        "pnpm",
+        "script",
+        "setsid",
+        "stdbuf",
+        "sudo",
+        "time",
+        "timeout",
+        "xargs",
+        "yarn",
+    }
+)
+_VERSIONED_INTERPRETER_RE = re.compile(
+    r"^(?:bash|bun|dash|fish|java|javaw|ksh|lua|node|nodejs|perl|php|"
+    r"pypy|python|pythonw|ruby|sh|zsh)(?:\d+(?:\.\d+)*)?(?:\.exe)?$",
+    re.IGNORECASE,
+)
+
+
+def is_indirect_command_launcher(executable: str) -> bool:
+    """Return whether argv[0] delegates execution to an unchecked argument."""
+
+    name = Path(executable).name.casefold()
+    return name in _INDIRECT_COMMAND_LAUNCHERS or bool(
+        _VERSIONED_INTERPRETER_RE.fullmatch(name)
+    )
+
+
+def is_supported_direct_helper_command(
+    command: Sequence[str],
+    *,
+    allow_github_cli: bool = False,
+) -> bool:
+    """Return whether argv names one dedicated helper or exact ``gh auth token``."""
+
+    if len(command) == 1:
+        return not is_indirect_command_launcher(command[0])
+    return bool(
+        allow_github_cli
+        and len(command) == 3
+        and Path(command[0]).name.casefold() == "gh"
+        and tuple(command[1:]) == ("auth", "token")
+    )
 
 
 def _trusted_owners() -> frozenset[int]:
@@ -36,6 +97,41 @@ def require_absolute_trusted_executable(
             f"{field} must use an absolute executable path for scheduled runs."
         )
     _require_trusted_executable(executable, field=field, seen=frozenset())
+
+
+def require_absolute_trusted_direct_executable(
+    command: Sequence[str],
+    *,
+    field: str,
+    allow_github_cli: bool = False,
+) -> None:
+    """Require one inspected helper executable or the exact GitHub CLI helper."""
+
+    require_absolute_trusted_executable(command, field=field)
+    if not is_supported_direct_helper_command(
+        command,
+        allow_github_cli=allow_github_cli,
+    ):
+        raise ExecutableTrustError(
+            f"{field} must invoke one dedicated trusted helper executable directly; "
+            "arguments are not accepted, and the executable must not be an "
+            "interpreter or command dispatcher."
+        )
+
+
+def require_absolute_trusted_wrapper(
+    command: Sequence[str],
+    *,
+    field: str,
+) -> None:
+    """Require a one-element argv naming one directly inspected wrapper."""
+
+    if len(command) != 1:
+        raise ExecutableTrustError(
+            f"{field} must contain exactly one direct wrapper executable; "
+            "policy and script arguments are not accepted."
+        )
+    require_absolute_trusted_direct_executable(command, field=field)
 
 
 def _require_trusted_executable(
@@ -104,6 +200,11 @@ def _require_trusted_executable(
     tokens = shebang.split()
     if not tokens:
         raise ExecutableTrustError(f"{field} executable has an invalid shebang.")
+    if len(tokens) != 1:
+        raise ExecutableTrustError(
+            f"{field} executable shebang must contain only one absolute interpreter "
+            "path; interpreter arguments are not allowed."
+        )
     interpreter = Path(tokens[0])
     if interpreter == Path("/usr/bin/env"):
         raise ExecutableTrustError(
@@ -155,4 +256,11 @@ def _resolve_trusted_interpreter(interpreter: Path, *, field: str) -> Path:
         ) from None
 
 
-__all__ = ["ExecutableTrustError", "require_absolute_trusted_executable"]
+__all__ = [
+    "ExecutableTrustError",
+    "is_indirect_command_launcher",
+    "is_supported_direct_helper_command",
+    "require_absolute_trusted_direct_executable",
+    "require_absolute_trusted_executable",
+    "require_absolute_trusted_wrapper",
+]

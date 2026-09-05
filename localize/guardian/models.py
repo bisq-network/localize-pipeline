@@ -12,6 +12,8 @@ import re
 from types import MappingProxyType
 from typing import ClassVar, Mapping
 
+from localize.guardian.executable_trust import is_supported_direct_helper_command
+
 
 class GuardianMode(str, Enum):
     """The maximum authority granted to one guardian run."""
@@ -166,6 +168,15 @@ def _validate_runtime_command(value: object, *, field_name: str) -> tuple[str, .
         raise ValueError(f"{field_name} must not contain an interpreter command string.")
     if executable == "php" and "-r" in argv[1:]:
         raise ValueError(f"{field_name} must not contain an interpreter command string.")
+    if not is_supported_direct_helper_command(
+        argv,
+        allow_github_cli=field_name == "github_token_command",
+    ):
+        raise ValueError(
+            f"{field_name} must invoke one dedicated helper executable directly; "
+            "arguments are not accepted, and the executable must not be an "
+            "interpreter or command dispatcher."
+        )
     return argv
 
 
@@ -695,6 +706,16 @@ class PreventionPolicy:
             raise ValueError(
                 "prevention collections must contain bounded string sequences."
             ) from None
+        if len(sandbox_argv) != 1:
+            raise ValueError(
+                "sandbox_argv_prefix must contain exactly one direct wrapper "
+                "executable."
+            )
+        if not is_supported_direct_helper_command(sandbox_argv):
+            raise ValueError(
+                "sandbox_argv_prefix must name a direct sandbox wrapper executable, "
+                "not an interpreter or command dispatcher."
+            )
         object.__setattr__(
             self,
             "allowed_code_path_globs",

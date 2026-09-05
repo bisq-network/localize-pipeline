@@ -273,23 +273,42 @@ def test_reader_paginates_all_open_prs_and_every_feedback_surface():
             return _json_response(request, _repo_payload())
         if path == "/repos/acme/app/pulls":
             if page == 1:
-                headers = {"Link": '<https://api.github.test/repos/acme/app/pulls?page=2>; rel="next"'}
-                return _json_response(request, [_pr_payload(i) for i in range(1, 31)], headers=headers)
+                headers = {
+                    "Link": '<https://api.github.test/repos/acme/app/pulls?page=2>; rel="next"'
+                }
+                return _json_response(
+                    request, [_pr_payload(i) for i in range(1, 31)], headers=headers
+                )
             return _json_response(request, [_pr_payload(31)])
         exact_pull = _exact_pull_number(path)
         if exact_pull is not None:
             return _json_response(request, _pr_payload(exact_pull))
         if path.endswith("/issues/1/comments"):
             if page == 1:
-                headers = {"Link": f'<https://api.github.test{path}?page=2>; rel="next"'}
-                return _json_response(request, [_feedback_payload(11, "issue comment")], headers=headers)
-            return _json_response(request, [_feedback_payload(12, "second issue comment")])
+                headers = {
+                    "Link": f'<https://api.github.test{path}?page=2>; rel="next"'
+                }
+                return _json_response(
+                    request, [_feedback_payload(11, "issue comment")], headers=headers
+                )
+            return _json_response(
+                request, [_feedback_payload(12, "second issue comment")]
+            )
         if path.endswith("/pulls/1/reviews"):
-            return _json_response(request, [{**_feedback_payload(21, "review summary"), "state": "COMMENTED"}])
+            return _json_response(
+                request,
+                [{**_feedback_payload(21, "review summary"), "state": "COMMENTED"}],
+            )
         if path.endswith("/pulls/1/comments"):
             return _json_response(
                 request,
-                [{**_feedback_payload(31, "inline comment"), "path": "l10n/app_de.properties", "line": 4}],
+                [
+                    {
+                        **_feedback_payload(31, "inline comment"),
+                        "path": "l10n/app_de.properties",
+                        "line": 4,
+                    }
+                ],
             )
         if path.endswith("/pulls/1/files"):
             return _json_response(
@@ -307,7 +326,9 @@ def test_reader_paginates_all_open_prs_and_every_feedback_surface():
             return _json_response(request, [])
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     snapshots = GitHubReader(client, _policy()).collect_open_pull_requests()
 
     assert len(snapshots) == 31
@@ -321,7 +342,12 @@ def test_reader_paginates_all_open_prs_and_every_feedback_surface():
         FeedbackKind.REVIEW,
         FeedbackKind.REVIEW_COMMENT,
     }
-    assert [revision.source_id for revision in first.feedback] == ["11", "12", "21", "31"]
+    assert [revision.source_id for revision in first.feedback] == [
+        "11",
+        "12",
+        "21",
+        "31",
+    ]
     assert first.changed_files[0].path == "l10n/messages_ru.properties"
     assert first.changed_files[0].patch.endswith("+new")
     assert ("/repos/acme/app/pulls", 2) in calls
@@ -501,7 +527,7 @@ def test_reader_open_path_authority_includes_unpermitted_human_pull() -> None:
     assert authority[0].identity.pull_id == 1007
 
 
-def test_reader_open_path_authority_fails_closed_for_deleted_fork_identity() -> None:
+def test_reader_open_path_authority_retains_deleted_fork_as_overlap_scope() -> None:
     deleted_fork_pull = _pr_payload(7)
     deleted_fork_pull["head"]["repo"] = None
 
@@ -514,15 +540,27 @@ def test_reader_open_path_authority_fails_closed_for_deleted_fork_identity() -> 
         if path == "/repos/acme/app/pulls/7":
             return _json_response(request, deleted_fork_pull)
         if path == "/repos/acme/app/pulls/7/files":
-            return _json_response(request, [])
+            return _json_response(
+                request,
+                [
+                    {
+                        "filename": "l10n/messages_ru.properties",
+                        "status": "modified",
+                        "sha": "a" * 40,
+                    }
+                ],
+            )
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
     with httpx.Client(
         transport=httpx.MockTransport(handler),
         base_url="https://api.github.test",
     ) as client:
-        with pytest.raises(GitHubAPIError, match="malformed path-authority"):
-            GitHubReader(client, _policy()).collect_open_changed_paths()
+        authority = GitHubReader(client, _policy()).collect_open_changed_paths()
+
+    assert authority[0].identity.head_repository == ""
+    assert authority[0].identity.head_repository_id is None
+    assert authority[0].changed_paths == ("l10n/messages_ru.properties",)
 
 
 def test_open_pull_path_authority_enforces_constructor_bounds() -> None:
@@ -766,9 +804,7 @@ def test_reader_revalidates_one_exact_open_pull_without_listing() -> None:
         base_url="https://api.github.test",
         transport=httpx.MockTransport(handler),
     ) as client:
-        snapshot = GitHubReader(client, _policy()).collect_exact_open_pull(
-            (1002, 2)
-        )
+        snapshot = GitHubReader(client, _policy()).collect_exact_open_pull((1002, 2))
 
     assert snapshot.pull_request.number == 2
     assert [item.body for item in snapshot.feedback] == [
@@ -1390,9 +1426,7 @@ def test_closed_reader_freezes_upper_bound_and_survives_listing_churn() -> None:
                         number,
                         state="closed",
                         updated_at=(
-                            "2026-09-02T09:00:00Z"
-                            if number == 99
-                            else frozen_time
+                            "2026-09-02T09:00:00Z" if number == 99 else frozen_time
                         ),
                     )
                     for number in numbers
@@ -1406,9 +1440,7 @@ def test_closed_reader_freezes_upper_bound_and_survives_listing_churn() -> None:
                     exact_pull,
                     state="closed",
                     updated_at=(
-                        "2026-09-02T09:00:00Z"
-                        if exact_pull == 99
-                        else frozen_time
+                        "2026-09-02T09:00:00Z" if exact_pull == 99 else frozen_time
                     ),
                 ),
             )
@@ -1428,9 +1460,7 @@ def test_closed_reader_freezes_upper_bound_and_survives_listing_churn() -> None:
             upper_bound=CLOSED_UPPER,
             max_prs_per_poll=2,
         )
-        first_seen = tuple(
-            (item.pull_id, item.pull_number) for item in first.items
-        )
+        first_seen = tuple((item.pull_id, item.pull_number) for item in first.items)
         second = reader.collect_closed_pull_requests(
             cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
             upper_bound=CLOSED_UPPER,
@@ -1534,9 +1564,7 @@ def test_closed_reader_hydrates_priority_pull_before_ordinary_listing() -> None:
         )
 
     assert [item.pull_request.number for item in result.snapshots] == [2, 1]
-    assert calls.index("/repos/acme/app/pulls/2") < calls.index(
-        "/repos/acme/app/pulls"
-    )
+    assert calls.index("/repos/acme/app/pulls/2") < calls.index("/repos/acme/app/pulls")
     assert result.cycle_complete is True
 
 
@@ -1622,9 +1650,7 @@ def test_closed_reader_surfaces_ineligible_durable_priority_for_quarantine(
         )
 
     assert result.snapshots == ()
-    assert [(item.pull_id, item.pull_number) for item in result.failures] == [
-        (1002, 2)
-    ]
+    assert [(item.pull_id, item.pull_number) for item in result.failures] == [(1002, 2)]
     assert result.hydration_attempts == 1
     assert result.cycle_complete is False
     assert calls == ["/repos/acme/app", "/repos/acme/app/pulls/2"]
@@ -1656,9 +1682,7 @@ def test_closed_reader_surfaces_unavailable_durable_priority_for_quarantine() ->
         )
 
     assert result.snapshots == ()
-    assert [(item.pull_id, item.pull_number) for item in result.failures] == [
-        (1002, 2)
-    ]
+    assert [(item.pull_id, item.pull_number) for item in result.failures] == [(1002, 2)]
     assert result.hydration_attempts == 1
     assert result.cycle_complete is False
     assert calls == ["/repos/acme/app", "/repos/acme/app/pulls/2"]
@@ -2172,7 +2196,6 @@ def test_reader_rejects_repeated_or_colliding_closed_pull_identities(
 
 
 def test_reader_rejects_a_closed_pull_page_over_githubs_page_size() -> None:
-
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/repos/acme/app":
             return _json_response(request, _repo_payload())
@@ -2213,9 +2236,7 @@ def test_closed_reader_ignores_untrusted_links_and_fetches_one_numeric_page() ->
             return _json_response(
                 request,
                 [_pr_payload(1, state="closed")],
-                headers={
-                    "Link": '<https://attacker.invalid/steal>; rel="next"'
-                },
+                headers={"Link": '<https://attacker.invalid/steal>; rel="next"'},
             )
         if "/issues/" in request.url.path or "/pulls/" in request.url.path:
             hydrated = True
@@ -2388,7 +2409,7 @@ def test_reader_fails_closed_when_github_pagination_exceeds_bound(
             [],
             headers={
                 "Link": (
-                    f'<https://api.test/repos/acme/app/pulls?page={page + 1}>; '
+                    f"<https://api.test/repos/acme/app/pulls?page={page + 1}>; "
                     'rel="next"'
                 )
             },
@@ -2565,9 +2586,7 @@ def test_reader_deduplicates_live_identity_before_authority_bound() -> None:
 
     assert len(snapshot.feedback) == 500
     assert sum(item.deleted for item in snapshot.feedback) == 200
-    overlapping = tuple(
-        item for item in snapshot.feedback if item.source_id == "300"
-    )
+    overlapping = tuple(item for item in snapshot.feedback if item.source_id == "300")
     assert len(overlapping) == 1
     assert overlapping[0].deleted is False
 
@@ -2602,12 +2621,17 @@ def test_reader_revisits_old_unchanged_pr_and_models_edits_and_deletions():
             if version["value"] == 1:
                 return _json_response(
                     request,
-                    [_feedback_payload(70, "first wording"), _feedback_payload(71, "later deleted")],
+                    [
+                        _feedback_payload(70, "first wording"),
+                        _feedback_payload(71, "later deleted"),
+                    ],
                 )
             return _json_response(
                 request,
                 [
-                    _feedback_payload(70, "edited wording", updated_at="2026-08-31T10:00:00Z"),
+                    _feedback_payload(
+                        70, "edited wording", updated_at="2026-08-31T10:00:00Z"
+                    ),
                     _feedback_payload(72, "new feedback on the unchanged head"),
                 ],
             )
@@ -2619,7 +2643,9 @@ def test_reader_revisits_old_unchanged_pr_and_models_edits_and_deletions():
             return _json_response(request, [])
         raise AssertionError(path)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     reader = GitHubReader(client, _policy())
     first = reader.collect_open_pull_requests()[0]
     version["value"] = 2
@@ -2647,7 +2673,9 @@ def test_reader_exposes_private_repository_before_model_dispatch():
             return _json_response(request, [])
         raise AssertionError(request.url.path)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     reader = GitHubReader(client, _policy())
 
     assert reader.repository_identity().private is True
@@ -2768,7 +2796,9 @@ def test_numeric_actor_ids_reject_login_spoof_but_allow_account_rename():
             return _json_response(request, [])
         raise AssertionError(path)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     reader = GitHubReader(client, _policy())
 
     assert reader.collect_open_pull_requests() == ()
@@ -2788,7 +2818,9 @@ def test_numeric_actor_ids_reject_login_spoof_but_allow_account_rename():
     ],
 )
 def test_coderabbit_coverage_comes_from_comment_body(fixture_key, expected):
-    bodies = json.loads((FIXTURES / "coderabbit-coverage.json").read_text(encoding="utf-8"))
+    bodies = json.loads(
+        (FIXTURES / "coderabbit-coverage.json").read_text(encoding="utf-8")
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -2801,7 +2833,14 @@ def test_coderabbit_coverage_comes_from_comment_body(fixture_key, expected):
         if path.endswith("/issues/1/comments"):
             return _json_response(
                 request,
-                [_feedback_payload(99, bodies[fixture_key], login="coderabbitai[bot]", item_type="Bot")],
+                [
+                    _feedback_payload(
+                        99,
+                        bodies[fixture_key],
+                        login="coderabbitai[bot]",
+                        item_type="Bot",
+                    )
+                ],
             )
         if (
             path.endswith("/reviews")
@@ -2811,7 +2850,9 @@ def test_coderabbit_coverage_comes_from_comment_body(fixture_key, expected):
             return _json_response(request, [])
         raise AssertionError(path)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     snapshot = GitHubReader(client, _policy()).collect_open_pull_requests()[0]
 
     assert snapshot.coderabbit.status is expected
@@ -2830,7 +2871,9 @@ def test_coderabbit_coverage_is_absent_without_a_bot_comment():
             return _json_response(request, [])
         raise AssertionError(path)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     snapshot = GitHubReader(client, _policy()).collect_open_pull_requests()[0]
 
     assert snapshot.coderabbit.status is CodeRabbitCoverageStatus.ABSENT
@@ -2849,7 +2892,9 @@ def test_hostile_feedback_and_metadata_remain_inert_data(tmp_path):
         if path == "/repos/acme/app/pulls/1":
             return _json_response(request, _pr_payload(1))
         if path.endswith("/issues/1/comments"):
-            return _json_response(request, [_feedback_payload(1, hostile, login="$(whoami)")])
+            return _json_response(
+                request, [_feedback_payload(1, hostile, login="$(whoami)")]
+            )
         if (
             path.endswith("/reviews")
             or path.endswith("/pulls/1/comments")
@@ -2858,7 +2903,9 @@ def test_hostile_feedback_and_metadata_remain_inert_data(tmp_path):
             return _json_response(request, [])
         raise AssertionError(path)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
     snapshot = GitHubReader(client, _policy()).collect_open_pull_requests()[0]
 
     assert snapshot.feedback[0].body == hostile
@@ -2873,9 +2920,13 @@ def test_reader_rejects_cross_origin_pagination_links():
         if request.url.path == "/repos/acme/app/pulls":
             headers = {"Link": '<https://attacker.invalid/steal?page=2>; rel="next"'}
             return _json_response(request, [_pr_payload(1)], headers=headers)
-        raise AssertionError(f"credential-bearing request escaped API origin: {request.url}")
+        raise AssertionError(
+            f"credential-bearing request escaped API origin: {request.url}"
+        )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="https://api.github.test"
+    )
 
     with pytest.raises(GitHubAPIError, match="pagination link"):
         GitHubReader(client, _policy()).collect_open_pull_requests()
@@ -2908,7 +2959,9 @@ def test_writer_fetches_token_with_argv_and_verifies_without_writing():
         stdout=f"{TOKEN}\n",
         stderr="",
     )
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=completed) as run:
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=completed
+    ) as run:
         result = broker.verify_pull(
             pull_number=1,
             expected_head_sha=HEAD_SHA,
@@ -2918,11 +2971,18 @@ def test_writer_fetches_token_with_argv_and_verifies_without_writing():
 
     assert result.head_sha == HEAD_SHA
     run.assert_called_once()
-    assert run.call_args.args[0] == ["token-helper", "mint", "--permissions=contents:write"]
+    assert run.call_args.args[0] == [
+        "token-helper",
+        "mint",
+        "--permissions=contents:write",
+    ]
     assert run.call_args.kwargs["shell"] is False
     assert run.call_args.kwargs["timeout"] == 30.0
     assert all(method == "GET" for method, _path, _payload in requests)
-    assert all("merge" not in path and "reviews" not in path and "threads" not in path for _, path, _ in requests)
+    assert all(
+        "merge" not in path and "reviews" not in path and "threads" not in path
+        for _, path, _ in requests
+    )
 
 
 def test_reader_deadline_stops_a_trickling_response_body() -> None:
@@ -2983,8 +3043,8 @@ def test_github_pagination_reclamps_each_request_to_remaining_deadline() -> None
     )
 
     assert http.paginate("/items") == [{"id": 1}, {"id": 2}]
-    assert set(observed_timeouts[0].values()) == {10.0}
-    assert set(observed_timeouts[1].values()) == {7.0}
+    assert set(observed_timeouts[0].values()) == {2.5}
+    assert set(observed_timeouts[1].values()) == {1.75}
 
 
 def test_github_operation_timeout_is_not_misclassified_as_poll_deadline() -> None:
@@ -3169,7 +3229,9 @@ def test_writer_fails_closed_when_fresh_pr_no_longer_matches_policy(pr_payload):
             return _json_response(request, _repo_payload())
         if request.url.path == "/repos/acme/app/pulls/1":
             return _json_response(request, pr_payload)
-        raise AssertionError(f"write escaped policy gate: {request.method} {request.url.path}")
+        raise AssertionError(
+            f"write escaped policy gate: {request.method} {request.url.path}"
+        )
 
     broker = _write_broker(
         policy=_policy(),
@@ -3177,8 +3239,12 @@ def test_writer_fails_closed_when_fresh_pr_no_longer_matches_policy(pr_payload):
         base_url="https://api.github.test",
         transport=httpx.MockTransport(handler),
     )
-    completed = subprocess.CompletedProcess(["token-helper"], 0, stdout=TOKEN, stderr="")
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=completed):
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=completed
+    ):
         with pytest.raises(PolicyViolation):
             broker.verify_pull(
                 pull_number=1,
@@ -3216,7 +3282,9 @@ def test_writer_posts_one_concise_bot_labelled_commit_reply_without_resolving_th
             }
             existing_comments.append(response)
             return _json_response(request, response, status=201)
-        raise AssertionError(f"unexpected or forbidden endpoint: {request.method} {path}")
+        raise AssertionError(
+            f"unexpected or forbidden endpoint: {request.method} {path}"
+        )
 
     broker = _write_broker(
         policy=_policy(),
@@ -3224,8 +3292,12 @@ def test_writer_posts_one_concise_bot_labelled_commit_reply_without_resolving_th
         base_url="https://api.github.test",
         transport=httpx.MockTransport(handler),
     )
-    completed = subprocess.CompletedProcess(["token-helper"], 0, stdout=TOKEN, stderr="")
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=completed):
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=completed
+    ):
         first = broker.post_commit_reply(
             pull_number=1,
             expected_head_sha=NEW_SHA,
@@ -3286,9 +3358,7 @@ def test_writer_rejects_spoofed_or_ambiguous_existing_reply_markers(
             body = json.loads(request.content)["body"]
             created = {
                 "id": 501,
-                "html_url": (
-                    "https://github.test/acme/app/pull/1#issuecomment-501"
-                ),
+                "html_url": ("https://github.test/acme/app/pull/1#issuecomment-501"),
                 "body": body,
                 "user": _user_payload(),
             }
@@ -3302,7 +3372,9 @@ def test_writer_rejects_spoofed_or_ambiguous_existing_reply_markers(
         base_url="https://api.github.test",
         transport=httpx.MockTransport(handler),
     )
-    completed = subprocess.CompletedProcess(["token-helper"], 0, stdout=TOKEN, stderr="")
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
     kwargs = {
         "pull_number": 1,
         "expected_head_sha": NEW_SHA,
@@ -3357,7 +3429,7 @@ def test_writer_recovery_rejects_publication_actor_rotation() -> None:
             user_reads += 1
             actor = (
                 _user_payload()
-                if user_reads <= 3
+                if user_reads <= 2
                 else _user_payload(login="replacement-actor", actor_id=18)
             )
             return _json_response(request, actor)
@@ -3372,9 +3444,7 @@ def test_writer_recovery_rejects_publication_actor_rotation() -> None:
             body = json.loads(request.content)["body"]
             created = {
                 "id": 501,
-                "html_url": (
-                    "https://github.test/acme/app/pull/1#issuecomment-501"
-                ),
+                "html_url": ("https://github.test/acme/app/pull/1#issuecomment-501"),
                 "body": body,
                 "user": _user_payload(),
             }
@@ -3388,7 +3458,9 @@ def test_writer_recovery_rejects_publication_actor_rotation() -> None:
         base_url="https://api.github.test",
         transport=httpx.MockTransport(handler),
     )
-    completed = subprocess.CompletedProcess(["token-helper"], 0, stdout=TOKEN, stderr="")
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
     kwargs = {
         "pull_number": 1,
         "expected_head_sha": NEW_SHA,
@@ -3429,9 +3501,7 @@ def test_writer_rejects_malformed_created_reply_identity(tamper: str) -> None:
             body = json.loads(request.content)["body"]
             created = {
                 "id": 501,
-                "html_url": (
-                    "https://github.test/acme/app/pull/1#issuecomment-501"
-                ),
+                "html_url": ("https://github.test/acme/app/pull/1#issuecomment-501"),
                 "body": body,
                 "user": _user_payload(),
             }
@@ -3452,7 +3522,9 @@ def test_writer_rejects_malformed_created_reply_identity(tamper: str) -> None:
         base_url="https://api.github.test",
         transport=httpx.MockTransport(handler),
     )
-    completed = subprocess.CompletedProcess(["token-helper"], 0, stdout=TOKEN, stderr="")
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
     with patch(
         "localize.guardian.credentials.run_bounded_process",
         return_value=completed,
@@ -3504,7 +3576,9 @@ def test_writer_revalidates_pull_after_comment_scan_before_reply_post() -> None:
     )
     lease_checks: list[str] = []
 
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=completed):
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=completed
+    ):
         with pytest.raises(PolicyViolation, match="head changed"):
             broker.post_commit_reply(
                 pull_number=1,
@@ -3522,10 +3596,79 @@ def test_writer_revalidates_pull_after_comment_scan_before_reply_post() -> None:
     assert posted is False
 
 
-@pytest.mark.parametrize("rotate_on_callback", (1, 2))
-def test_writer_rechecks_actor_after_each_callback_before_reply_post(
-    rotate_on_callback: int,
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("lifecycle", "no longer open"),
+        ("head", "head changed"),
+        ("base", "base changed"),
+    ),
+)
+def test_writer_revalidates_destination_after_source_callback_before_reply_post(
+    mutation: str,
+    message: str,
 ) -> None:
+    callback_finished = False
+    posted = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posted
+        path = request.url.path
+        if path == "/user":
+            return _json_response(request, _user_payload())
+        if path == "/repos/acme/app":
+            return _json_response(request, _repo_payload())
+        if path == "/repos/acme/app/pulls/1":
+            kwargs: dict[str, object] = {"head_sha": NEW_SHA}
+            if callback_finished:
+                if mutation == "lifecycle":
+                    kwargs["state"] = "closed"
+                elif mutation == "head":
+                    kwargs["head_sha"] = "9" * 40
+                else:
+                    kwargs["base_sha"] = "8" * 40
+            return _json_response(request, _pr_payload(1, **kwargs))
+        if path == "/repos/acme/app/issues/1/comments" and request.method == "GET":
+            return _json_response(request, [])
+        if path == "/repos/acme/app/issues/1/comments" and request.method == "POST":
+            posted = True
+            raise AssertionError("POST must not follow a destination mutation")
+        raise AssertionError(f"unexpected endpoint: {request.method} {path}")
+
+    def finish_source_callback() -> None:
+        nonlocal callback_finished
+        callback_finished = True
+
+    broker = _write_broker(
+        policy=_policy(),
+        token_command=("token-helper",),
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(handler),
+    )
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
+    with patch(
+        "localize.guardian.credentials.run_bounded_process",
+        return_value=completed,
+    ):
+        with pytest.raises(PolicyViolation, match=message):
+            broker.post_commit_reply(
+                pull_number=1,
+                expected_head_sha=NEW_SHA,
+                expected_base_sha=BASE_SHA,
+                commit_sha=NEW_SHA,
+                action_id=f"action-{mutation}",
+                event_revision_id=f"comment:{mutation}",
+                expected_actor=EXPECTED_ACTOR,
+                before_create=finish_source_callback,
+            )
+
+    assert callback_finished is True
+    assert posted is False
+
+
+def test_writer_rechecks_actor_after_callback_before_reply_post() -> None:
     callback_count = 0
     actor_rotated = False
     posted = False
@@ -3554,8 +3697,7 @@ def test_writer_rechecks_actor_after_each_callback_before_reply_post(
     def before_create() -> None:
         nonlocal callback_count, actor_rotated
         callback_count += 1
-        if callback_count == rotate_on_callback:
-            actor_rotated = True
+        actor_rotated = True
 
     broker = _write_broker(
         policy=_policy(),
@@ -3583,7 +3725,63 @@ def test_writer_rechecks_actor_after_each_callback_before_reply_post(
                 before_create=before_create,
             )
 
-    assert callback_count == rotate_on_callback
+    assert callback_count == 1
+    assert posted is False
+
+
+def test_writer_rechecks_full_source_after_destination_before_reply_post() -> None:
+    callback_count = 0
+    posted = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posted
+        path = request.url.path
+        if path == "/user":
+            return _json_response(request, _user_payload())
+        if path == "/repos/acme/app":
+            return _json_response(request, _repo_payload())
+        if path == "/repos/acme/app/pulls/1":
+            return _json_response(request, _pr_payload(1, head_sha=NEW_SHA))
+        if path == "/repos/acme/app/issues/1/comments" and request.method == "GET":
+            return _json_response(request, [])
+        if path == "/repos/acme/app/issues/1/comments" and request.method == "POST":
+            posted = True
+            raise AssertionError("POST must not follow a source-authority change")
+        raise AssertionError(f"unexpected endpoint: {request.method} {path}")
+
+    def recheck_source() -> None:
+        nonlocal callback_count
+        callback_count += 1
+        if callback_count == 2:
+            raise PolicyViolation("trusted feedback changed before reply")
+
+    broker = _write_broker(
+        policy=_policy(),
+        token_command=("token-helper",),
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(handler),
+    )
+    completed = subprocess.CompletedProcess(
+        ["token-helper"], 0, stdout=TOKEN, stderr=""
+    )
+
+    with patch(
+        "localize.guardian.credentials.run_bounded_process",
+        return_value=completed,
+    ):
+        with pytest.raises(PolicyViolation, match="trusted feedback changed"):
+            broker.post_commit_reply(
+                pull_number=1,
+                expected_head_sha=NEW_SHA,
+                expected_base_sha=BASE_SHA,
+                commit_sha=NEW_SHA,
+                action_id="action-feedback-rotation",
+                event_revision_id="comment:feedback-rotation",
+                expected_actor=EXPECTED_ACTOR,
+                before_create=recheck_source,
+            )
+
+    assert callback_count == 2
     assert posted is False
 
 
@@ -3593,7 +3791,9 @@ def test_writer_never_leaks_token_from_command_or_http_errors(caplog):
         token_command=("token-helper",),
         base_url="https://api.github.test",
         transport=httpx.MockTransport(
-            lambda request: httpx.Response(500, request=request, text=f"failure contained {TOKEN}")
+            lambda request: httpx.Response(
+                500, request=request, text=f"failure contained {TOKEN}"
+            )
         ),
     )
     completed = subprocess.CompletedProcess(
@@ -3602,7 +3802,9 @@ def test_writer_never_leaks_token_from_command_or_http_errors(caplog):
         stdout=TOKEN,
         stderr=f"diagnostic accidentally contained {TOKEN}",
     )
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=completed):
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=completed
+    ):
         with pytest.raises(GitHubAPIError) as raised:
             broker.post_commit_reply(
                 pull_number=1,
@@ -3631,7 +3833,9 @@ def test_writer_token_command_failure_is_redacted():
         stdout=TOKEN,
         stderr=f"could not mint {TOKEN}",
     )
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=failed):
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=failed
+    ):
         with pytest.raises(GitHubAuthenticationError) as raised:
             broker.verify_pull(
                 pull_number=1,
@@ -3660,7 +3864,9 @@ def test_github_authentication_statuses_open_the_typed_circuit(status: int) -> N
         stderr="",
     )
 
-    with patch("localize.guardian.credentials.run_bounded_process", return_value=completed):
+    with patch(
+        "localize.guardian.credentials.run_bounded_process", return_value=completed
+    ):
         with pytest.raises(GitHubAuthenticationError):
             broker.verify_pull(
                 pull_number=1,

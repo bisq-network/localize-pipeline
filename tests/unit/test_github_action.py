@@ -1,4 +1,5 @@
 """Static structural tests for the drop-in GitHub Action (action.yml)."""
+
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,9 @@ def test_action_uses_sha_pinned_dependencies(action):
     rendered = ACTION.read_text(encoding="utf-8")
 
     assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in rendered
-    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in rendered
+    assert (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in rendered
+    )
     assert "actions/setup-python@v" not in rendered
     assert "actions/upload-artifact@v" not in rendered
 
@@ -57,48 +60,102 @@ def test_translate_step_wires_provider_and_process_all_env(action):
     assert env["PROCESS_ALL_FILES"] == "${{ inputs.process-all-files }}"
     assert env["LOCALIZE_DRY_RUN"] == "${{ inputs.dry-run }}"
     assert env["LOCALIZE_PLUGIN_MODULES"] == "${{ inputs.plugin-modules }}"
-    assert 'unset OPENAI_BASE_URL' in translate["run"]
-    assert 'unset REVIEW_MODEL_NAME' in translate["run"]
-    assert 'python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"' in translate["run"]
+    assert "unset OPENAI_BASE_URL" in translate["run"]
+    assert "unset REVIEW_MODEL_NAME" in translate["run"]
+    assert (
+        'python -m localize.cli run --config "$TRANSLATOR_CONFIG_FILE"'
+        in translate["run"]
+    )
 
 
 def test_action_runs_preflight_check_before_translation(action):
     steps = action["runs"]["steps"]
-    preflight_index = next(i for i, step in enumerate(steps) if step["name"] == "Check localization setup")
-    translate_index = next(i for i, step in enumerate(steps) if step["name"] == "Translate changed strings")
-    assert preflight_index < translate_index
+    scope_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step["name"] == "Validate Action workspace scope"
+    )
+    preflight_index = next(
+        i for i, step in enumerate(steps) if step["name"] == "Check localization setup"
+    )
+    translate_index = next(
+        i for i, step in enumerate(steps) if step["name"] == "Translate changed strings"
+    )
+    assert scope_index < preflight_index < translate_index
+    assert "if repo_root != workspace:" in steps[scope_index]["run"]
+    assert "input_folder.relative_to(repo_root)" in steps[scope_index]["run"]
     assert "OPENAI_BASE_URL" not in steps[preflight_index]["env"]
     assert "REVIEW_MODEL_NAME" not in steps[preflight_index]["env"]
-    assert steps[preflight_index]["env"]["LOCALIZE_API_BASE_URL_INPUT"] == "${{ inputs.api-base-url }}"
-    assert steps[preflight_index]["env"]["LOCALIZE_REVIEW_MODEL_INPUT"] == "${{ inputs.review-model }}"
-    assert steps[preflight_index]["env"]["LOCALIZE_PLUGIN_MODULES"] == "${{ inputs.plugin-modules }}"
-    assert 'unset OPENAI_BASE_URL' in steps[preflight_index]["run"]
-    assert 'unset REVIEW_MODEL_NAME' in steps[preflight_index]["run"]
-    assert 'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"' in steps[preflight_index]["run"]
+    assert (
+        steps[preflight_index]["env"]["LOCALIZE_API_BASE_URL_INPUT"]
+        == "${{ inputs.api-base-url }}"
+    )
+    assert (
+        steps[preflight_index]["env"]["LOCALIZE_REVIEW_MODEL_INPUT"]
+        == "${{ inputs.review-model }}"
+    )
+    assert (
+        steps[preflight_index]["env"]["LOCALIZE_PLUGIN_MODULES"]
+        == "${{ inputs.plugin-modules }}"
+    )
+    assert "unset OPENAI_BASE_URL" in steps[preflight_index]["run"]
+    assert "unset REVIEW_MODEL_NAME" in steps[preflight_index]["run"]
+    assert (
+        'python -m localize.cli check --config "$TRANSLATOR_CONFIG_FILE"'
+        in steps[preflight_index]["run"]
+    )
 
 
 def test_action_runs_quality_gate_before_opening_pr(action):
     steps = action["runs"]["steps"]
-    translate_index = next(i for i, step in enumerate(steps) if step["name"] == "Translate changed strings")
-    gate_index = next(i for i, step in enumerate(steps) if step["name"] == "Run translation quality gate")
-    publish_index = next(i for i, step in enumerate(steps) if step["name"] == "Open pull request")
+    translate_index = next(
+        i for i, step in enumerate(steps) if step["name"] == "Translate changed strings"
+    )
+    gate_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step["name"] == "Run translation quality gate"
+    )
+    publish_index = next(
+        i for i, step in enumerate(steps) if step["name"] == "Open pull request"
+    )
     gate = steps[gate_index]
 
     assert translate_index < gate_index < publish_index
-    assert gate["env"]["TRANSLATOR_CONFIG_FILE"] == "${{ github.workspace }}/${{ inputs.config-file }}"
+    assert (
+        gate["env"]["TRANSLATOR_CONFIG_FILE"]
+        == "${{ github.workspace }}/${{ inputs.config-file }}"
+    )
     assert gate["env"]["ACTION_QUALITY_REPORT_DIR"] == "${{ github.action_path }}/logs"
     assert gate["env"]["LOCALIZE_ACTION_WORKSPACE"] == "${{ github.workspace }}"
+    assert (
+        gate["env"]["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
+    )
+    assert gate["env"]["LOCALIZE_API_BASE_URL_INPUT"] == "${{ inputs.api-base-url }}"
+    assert gate["env"]["LOCALIZE_REVIEW_MODEL_INPUT"] == "${{ inputs.review-model }}"
+    assert gate["env"]["LOCALIZE_DRY_RUN"] == "${{ inputs.dry-run }}"
     assert gate["env"]["LOCALIZE_PLUGIN_MODULES"] == "${{ inputs.plugin-modules }}"
+    semantic_index = gate["run"].index(
+        "python -m localize.translation_semantic_reviewer"
+    )
+    quality_index = gate["run"].index("python -m localize.cli quality-gate")
+    assert semantic_index < quality_index
+    assert (
+        '--token-usage-summary "$ACTION_QUALITY_REPORT_DIR/token_usage_summary.json"'
+        in gate["run"]
+    )
+    assert 'git add -- "${changed_files[@]}"' in gate["run"]
+    assert "unset OPENAI_API_KEY LOCALIZE_OPENAI_API_KEY_INPUT" in gate["run"]
     assert "python -m localize.cli quality-gate" in gate["run"]
     assert "translation_quality_report.json" in gate["run"]
     assert "translation_quality_report.md" in gate["run"]
-    assert "repo_root.relative_to(workspace)" in gate["run"]
+    assert "if repo_root != workspace:" in gate["run"]
+    assert "repo_root.relative_to(workspace)" not in gate["run"]
 
 
 def test_action_resolves_target_root_relative_to_config_file(action):
     publish = next(
-        step for step in action["runs"]["steps"]
-        if step["name"] == "Open pull request"
+        step for step in action["runs"]["steps"] if step["name"] == "Open pull request"
     )
 
     assert "target_root = config_file.parent / target_root" in publish["run"]
@@ -108,15 +165,22 @@ def test_action_resolves_target_root_relative_to_config_file(action):
 def test_action_rejects_unsafe_pr_contexts_before_setup(action):
     steps = action["runs"]["steps"]
     guard = next(step for step in steps if step["name"] == "Validate workflow context")
-    setup_index = next(i for i, step in enumerate(steps) if step["name"] == "Set up Python")
+    setup_index = next(
+        i for i, step in enumerate(steps) if step["name"] == "Set up Python"
+    )
     guard_index = steps.index(guard)
 
     assert guard_index == 0
     assert guard_index < setup_index
     assert guard["env"]["LOCALIZE_OPEN_PR"] == "${{ inputs.open-pr }}"
     assert guard["env"]["LOCALIZE_DRY_RUN"] == "${{ inputs.dry-run }}"
-    assert guard["env"]["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
-    assert guard["env"]["LOCALIZE_COMMIT_SIGNING_KEY_INPUT"] == "${{ inputs.commit-signing-key }}"
+    assert (
+        guard["env"]["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
+    )
+    assert (
+        guard["env"]["LOCALIZE_COMMIT_SIGNING_KEY_INPUT"]
+        == "${{ inputs.commit-signing-key }}"
+    )
     assert "pull_request_target" in guard["run"]
     assert 'workflow_run.get("event") == "pull_request"' in guard["run"]
     assert "Fork pull_request runs may only use Localize Pipeline" in guard["run"]
@@ -124,14 +188,18 @@ def test_action_rejects_unsafe_pr_contexts_before_setup(action):
 
 def test_action_installs_dependencies_in_private_virtualenv(action):
     dependency_step = next(
-        step for step in action["runs"]["steps"] if step["name"] == "Install pipeline dependencies"
+        step
+        for step in action["runs"]["steps"]
+        if step["name"] == "Install pipeline dependencies"
     )
     run = dependency_step["run"]
 
-    assert "python -m venv \"$LOCALIZE_ACTION_VENV\"" in run
+    assert 'python -m venv "$LOCALIZE_ACTION_VENV"' in run
     assert '"$LOCALIZE_ACTION_VENV/bin/python" -m pip install -r' in run
     assert "GITHUB_PATH" in run
-    assert "pip install -r" not in run.replace('"$LOCALIZE_ACTION_VENV/bin/python" -m pip install -r', "")
+    assert "pip install -r" not in run.replace(
+        '"$LOCALIZE_ACTION_VENV/bin/python" -m pip install -r', ""
+    )
 
 
 def test_action_has_first_class_plugin_install_and_module_inputs(action):
@@ -140,14 +208,27 @@ def test_action_has_first_class_plugin_install_and_module_inputs(action):
     assert inputs["plugin-install-command"]["default"] == ""
 
     steps = action["runs"]["steps"]
-    dependency_index = next(i for i, step in enumerate(steps) if step["name"] == "Install pipeline dependencies")
-    plugin_index = next(i for i, step in enumerate(steps) if step["name"] == "Install plugin dependencies")
-    preflight_index = next(i for i, step in enumerate(steps) if step["name"] == "Check localization setup")
+    dependency_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step["name"] == "Install pipeline dependencies"
+    )
+    plugin_index = next(
+        i
+        for i, step in enumerate(steps)
+        if step["name"] == "Install plugin dependencies"
+    )
+    preflight_index = next(
+        i for i, step in enumerate(steps) if step["name"] == "Check localization setup"
+    )
 
     assert dependency_index < plugin_index < preflight_index
     plugin_step = steps[plugin_index]
     assert "plugin-install-command" in plugin_step["if"]
-    assert plugin_step["env"]["PLUGIN_INSTALL_COMMAND"] == "${{ inputs.plugin-install-command }}"
+    assert (
+        plugin_step["env"]["PLUGIN_INSTALL_COMMAND"]
+        == "${{ inputs.plugin-install-command }}"
+    )
     assert 'bash -lc "$PLUGIN_INSTALL_COMMAND"' in plugin_step["run"]
 
 
@@ -178,7 +259,9 @@ def test_no_user_input_interpolated_into_run_scripts(action):
     for step in action["runs"]["steps"]:
         run = step.get("run")
         if run:
-            assert "${{ inputs." not in run, f"step '{step.get('name')}' interpolates an input into run:"
+            assert "${{ inputs." not in run, (
+                f"step '{step.get('name')}' interpolates an input into run:"
+            )
 
 
 def test_opens_pr_with_gh_cli(action):
@@ -196,11 +279,16 @@ def test_opens_pr_with_gh_cli(action):
 def test_open_pr_step_supports_optional_ssh_commit_signing(action):
     inputs = action["inputs"]
     assert inputs["git-user-name"]["default"] == "github-actions[bot]"
-    assert inputs["git-user-email"]["default"] == "41898282+github-actions[bot]@users.noreply.github.com"
+    assert (
+        inputs["git-user-email"]["default"]
+        == "41898282+github-actions[bot]@users.noreply.github.com"
+    )
     assert inputs["commit-signing-method"]["default"] == "none"
     assert inputs["commit-signing-key"]["default"] == ""
 
-    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    pr_step = next(
+        step for step in action["runs"]["steps"] if step["name"] == "Open pull request"
+    )
     env = pr_step["env"]
     assert env["GIT_USER_NAME"] == "${{ inputs.git-user-name }}"
     assert env["GIT_USER_EMAIL"] == "${{ inputs.git-user-email }}"
@@ -209,18 +297,20 @@ def test_open_pr_step_supports_optional_ssh_commit_signing(action):
 
     run = pr_step["run"]
     assert 'case "${COMMIT_SIGNING_METHOD:-none}" in' in run
-    assert "ssh-keygen -y -f \"$signing_key_file\"" in run
+    assert 'ssh-keygen -y -f "$signing_key_file"' in run
     assert "git config gpg.format ssh" in run
-    assert "git config user.signingkey \"$signing_key_file\"" in run
+    assert 'git config user.signingkey "$signing_key_file"' in run
     assert "git config commit.gpgsign true" in run
-    assert "commit_args=(-S -m \"$COMMIT_MSG\")" in run
+    assert 'commit_args=(-S -m "$COMMIT_MSG")' in run
     assert "trap cleanup_pr_step EXIT" in run
-    assert "git config user.name \"$GIT_USER_NAME\"" in run
-    assert "git config user.email \"$GIT_USER_EMAIL\"" in run
+    assert 'git config user.name "$GIT_USER_NAME"' in run
+    assert 'git config user.email "$GIT_USER_EMAIL"' in run
 
 
 def test_open_pr_step_stages_localization_changes_without_archives(action):
-    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    pr_step = next(
+        step for step in action["runs"]["steps"] if step["name"] == "Open pull request"
+    )
     run = pr_step["run"]
     assert "target_project_root" in run
     assert "input_folder" in run
@@ -234,18 +324,30 @@ def test_open_pr_step_stages_localization_changes_without_archives(action):
 
 
 def test_generated_pr_uses_summary_body_and_uploads_artifacts(action):
-    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    pr_step = next(
+        step for step in action["runs"]["steps"] if step["name"] == "Open pull request"
+    )
     run = pr_step["run"]
     assert "translation_summary.json" in run
     assert "translation_validation_summary.json" in run
     assert "token_usage_summary.json" in run
     assert "body_file=" in run
-    assert "gh pr create --head \"$branch\" --title \"$PR_TITLE\" --body-file \"$body_file\"" in run
-    assert "gh pr edit \"$branch\" --title \"$PR_TITLE\" --body-file \"$body_file\"" in run
+    assert (
+        'gh pr create --head "$branch" --title "$PR_TITLE" --body-file "$body_file"'
+        in run
+    )
+    assert 'gh pr edit "$branch" --title "$PR_TITLE" --body-file "$body_file"' in run
 
-    upload = next(step for step in action["runs"]["steps"] if step["name"] == "Upload run summaries")
+    upload = next(
+        step
+        for step in action["runs"]["steps"]
+        if step["name"] == "Upload run summaries"
+    )
     assert upload["if"] == "${{ always() }}"
-    assert upload["uses"] == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    assert (
+        upload["uses"]
+        == "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
     assert upload["with"]["name"] == "localize-pipeline-summaries"
     paths = upload["with"]["path"]
     assert "translation_summary.json" in paths
@@ -258,22 +360,34 @@ def test_generated_pr_uses_summary_body_and_uploads_artifacts(action):
 
 
 def test_open_pr_fetches_force_with_lease_baseline(action):
-    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    pr_step = next(
+        step for step in action["runs"]["steps"] if step["name"] == "Open pull request"
+    )
     run = pr_step["run"]
 
-    baseline_index = run.index('expected_remote_sha="$(git ls-remote --heads origin "$branch"')
-    fetch_index = run.index('git fetch origin "+$remote_ref:refs/remotes/origin/$branch" || true')
-    push_index = run.index('git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"')
+    baseline_index = run.index(
+        'expected_remote_sha="$(git ls-remote --heads origin "$branch"'
+    )
+    fetch_index = run.index(
+        'git fetch origin "+$remote_ref:refs/remotes/origin/$branch" || true'
+    )
+    push_index = run.index(
+        'git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"'
+    )
     assert baseline_index < fetch_index < push_index
     assert 'git push --force-with-lease origin "$branch"' not in run
 
 
 def test_open_pr_checks_token_permissions_before_push(action):
-    pr_step = next(step for step in action["runs"]["steps"] if step["name"] == "Open pull request")
+    pr_step = next(
+        step for step in action["runs"]["steps"] if step["name"] == "Open pull request"
+    )
     run = pr_step["run"]
 
     preflight_index = run.index('gh api "repos/${GITHUB_REPOSITORY}" --jq')
-    push_index = run.index('git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"')
+    push_index = run.index(
+        'git push --force-with-lease="$remote_ref:$expected_remote_sha" origin "$branch"'
+    )
     assert preflight_index < push_index
     assert "contents:write permission" in run
     assert "pull-requests:write permissions to push" not in run
@@ -283,8 +397,16 @@ def test_action_uses_neutral_openai_key_env(action):
     rendered = ACTION.read_text(encoding="utf-8")
     for step in action["runs"]["steps"]:
         env = step.get("env", {})
-        if step["name"] in {"Check localization setup", "Translate changed strings"}:
+        if step["name"] in {
+            "Check localization setup",
+            "Translate changed strings",
+            "Run translation quality gate",
+        }:
             assert "OPENAI_API_KEY" not in env
-            assert env["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
-            assert 'export OPENAI_API_KEY="$LOCALIZE_OPENAI_API_KEY_INPUT"' in step["run"]
+            assert (
+                env["LOCALIZE_OPENAI_API_KEY_INPUT"] == "${{ inputs.openai-api-key }}"
+            )
+            assert (
+                'export OPENAI_API_KEY="$LOCALIZE_OPENAI_API_KEY_INPUT"' in step["run"]
+            )
     assert "LOCALIZE_OPENAI_API_KEY_INPUT" in rendered

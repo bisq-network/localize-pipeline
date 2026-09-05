@@ -283,8 +283,8 @@ def test_remediation_pagination_reclamps_each_page_to_remaining_deadline() -> No
     with broker._client() as (client, _actor):  # noqa: SLF001
         assert broker._pull_event_history(client, number=91) == ()  # noqa: SLF001
 
-    assert set(observed_timeouts[0].values()) == {10.0}
-    assert set(observed_timeouts[1].values()) == {7.0}
+    assert set(observed_timeouts[0].values()) == {2.5}
+    assert set(observed_timeouts[1].values()) == {1.75}
 
 
 @pytest.mark.parametrize(
@@ -1834,7 +1834,7 @@ def test_draft_post_stops_when_last_exact_source_check_fails() -> None:
     assert "post" not in sequence
 
 
-def test_draft_post_revalidates_branch_after_last_exact_source_check() -> None:
+def test_draft_post_revalidates_branch_after_slow_source_preparation() -> None:
     evidence_hash = "c" * 64
     branch = f"translation-updates-history-{evidence_hash[:20]}"
     branch_sha = CANDIDATE_SHA
@@ -1858,7 +1858,7 @@ def test_draft_post_revalidates_branch_after_last_exact_source_check() -> None:
             return _response(request, [])
         raise AssertionError(request.url)
 
-    def move_branch_after_source_check() -> None:
+    def move_branch_during_source_preparation() -> None:
         nonlocal branch_sha
         branch_sha = "d" * 40
 
@@ -1870,8 +1870,10 @@ def test_draft_post_revalidates_branch_after_last_exact_source_check() -> None:
             evidence_hash=evidence_hash,
             title="Human review",
             body="Human review only.",
-            before_create=lambda: None,
-            before_post=move_branch_after_source_check,
+            before_create=move_branch_during_source_preparation,
+            before_post=lambda: pytest.fail(
+                "final source check must follow destination revalidation"
+            ),
         )
 
     assert posts == []
@@ -2351,12 +2353,18 @@ class _StateSpy:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = 100,
     ) -> tuple[RemediationDraftRecord, ...]:
         pending = self.pending_remediation_drafts(repository=repository)
         return tuple(
             sorted(
-                pending,
+                (
+                    record
+                    for record in pending
+                    if repository_id is None
+                    or record.target_repository_id == repository_id
+                ),
                 key=lambda record: self.recovery_attempts.get(record.draft_key, 0),
             )[:limit]
         )
@@ -2381,11 +2389,17 @@ class _StateSpy:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = 100,
     ) -> tuple[RemediationDraftRecord, ...]:
         return tuple(
             sorted(
-                self.opened_remediation_drafts(repository=repository),
+                (
+                    record
+                    for record in self.opened_remediation_drafts(repository=repository)
+                    if repository_id is None
+                    or record.target_repository_id == repository_id
+                ),
                 key=lambda record: self.recovery_attempts.get(record.draft_key, 0),
             )[:limit]
         )
@@ -2394,6 +2408,7 @@ class _StateSpy:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = 100,
     ) -> tuple[MergedRemediationRevalidation, ...]:
         return tuple(
@@ -2401,6 +2416,7 @@ class _StateSpy:
             for item in self.merged_revalidations
             if item.revalidation_key not in self.merge_revalidation_outcomes
             if repository is None or item.source.repository == repository
+            if repository_id is None or item.source.repository_id == repository_id
         )[:limit]
 
     def record_merged_remediation_revalidation_attempt(
@@ -2747,6 +2763,54 @@ def _record(
         ),
         occurred_at=NOW,
     )
+
+
+def test_recovery_path_policy_does_not_let_star_cross_nested_segments() -> None:
+    nested = replace(
+        _record(phase="pushed"),
+        changed_paths=("l10n/nested/messages_ru.properties",),
+    )
+    shallow_policy = _policy()
+
+    assert not remediation_module.RemediationCoordinator._record_matches_policy(
+        nested,
+        shallow_policy,
+    )
+    assert remediation_module.RemediationCoordinator._record_matches_policy(
+        nested,
+        replace(shallow_policy, allowed_path_globs=("l10n/**/*.properties",)),
+    )
+
+
+def test_recovery_routes_renamed_repositories_by_immutable_ids() -> None:
+    record = _record(phase="draft_opened")
+    current = _policy()
+    remediation = current.closed_pr_backfill.remediation
+    assert remediation is not None
+    renamed = replace(
+        current,
+        base_repo="acme/renamed-translations",
+        allowed_head_repositories=(
+            AllowedHeadRepository("translator/renamed-translations", 84),
+        ),
+        closed_pr_backfill=replace(
+            current.closed_pr_backfill,
+            remediation=replace(
+                remediation,
+                push_repository=ExactRepository(
+                    "translator/renamed-translations",
+                    remediation.push_repository.id,
+                ),
+            ),
+        ),
+    )
+
+    assert RemediationCoordinator._record_matches_policy(record, renamed)
+    routed = remediation_module._opened_pull_identity(record, policy=renamed)
+    assert routed.repository == "acme/renamed-translations"
+    assert routed.repository_id == record.target_repository_id
+    assert routed.head_repository == "translator/renamed-translations"
+    assert routed.head_repository_id == record.push_repository_id
 
 
 class _CoordinatorHarness(RemediationCoordinator):
@@ -3140,8 +3204,7 @@ def _publish(
             or (lambda _sources, _revision_ids: workspace.order.append("sources"))
         ),
         require_no_open_translation_overlap=(
-            require_no_open_translation_overlap
-            or (lambda _paths, _excluded: None)
+            require_no_open_translation_overlap or (lambda _paths, _excluded: None)
         ),
         prior_draft_keys_by_source=(
             prior_draft_keys_by_source
@@ -3328,9 +3391,9 @@ def test_branch_only_recovery_rechecks_overlap_before_pr_post() -> None:
             coordinator,
             recovered_workspace,
             base,
-            require_no_open_translation_overlap=lambda _paths, _excluded: (_ for _ in ()).throw(
-                RemediationOpenPullAuthorityError("new overlapping open pull")
-            ),
+            require_no_open_translation_overlap=lambda _paths, _excluded: (
+                _ for _ in ()
+            ).throw(RemediationOpenPullAuthorityError("new overlapping open pull")),
         )
 
     assert recovered_workspace.commit_calls == []
@@ -3373,7 +3436,9 @@ def test_branch_only_recovery_rechecks_source_after_overlap_before_pr_post() -> 
     def require_current_source(_sources: object, _revision_ids: object) -> None:
         order.append("exact-source")
         if not source_current:
-            raise RemediationSourceAuthorityError("feedback changed during overlap scan")
+            raise RemediationSourceAuthorityError(
+                "feedback changed during overlap scan"
+            )
 
     with pytest.raises(RemediationSourceAuthorityError, match="during overlap"):
         _publish(

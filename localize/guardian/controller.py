@@ -88,6 +88,7 @@ from localize.guardian.state import (
     HistoricalPullReference,
     OpenPullAuthorityReference,
     RemediationCoverageReason,
+    feedback_revision_hash,
     remediation_batch_hash,
     remediation_edit_hash,
     remediation_target_hash,
@@ -694,6 +695,10 @@ class _PublicationRecoveryManualRequired(RuntimeError):
     """A remotely present legacy commit has no safe recovery provenance."""
 
 
+class _PublicationRecoveryBacklog(RuntimeError):
+    """Bounded publication recovery must finish before new repository work."""
+
+
 def _safe_failure_name(error: BaseException) -> str:
     """Return an audit-safe failure identifier without untrusted text."""
 
@@ -954,6 +959,89 @@ def _open_pull_feedback_digest(
             },
             "trusted_feedback": feedback,
         }
+    )
+
+
+def _repository_route_alias(
+    snapshot: PullRequestFeedbackSnapshot,
+    *,
+    repository: str,
+) -> PullRequestFeedbackSnapshot:
+    """Recreate durable authority hashes across a base-repository rename.
+
+    GitHub's immutable repository ID remains authoritative, but several API
+    display fields and feedback URLs adopt the current owner/name route.  This
+    helper is used only for hashing already-authorized live evidence; network
+    reads always use the current policy route.
+    """
+
+    current = snapshot.repository_identity.full_name
+    pull = snapshot.pull_request
+    if (
+        snapshot.repository_identity.repository_id != pull.base_repository_id
+        or pull.repository != current
+    ):
+        raise ValueError("Snapshot repository identity is inconsistent.")
+
+    route_marker = f"/{current}/"
+    alias_marker = f"/{repository}/"
+
+    def alias_url(value: str) -> str:
+        return value.replace(route_marker, alias_marker, 1)
+
+    return replace(
+        snapshot,
+        repository_identity=replace(
+            snapshot.repository_identity,
+            full_name=repository,
+        ),
+        pull_request=replace(
+            pull,
+            repository=repository,
+            html_url=alias_url(pull.html_url),
+            head_repository=(
+                repository
+                if pull.head_repository_id == pull.base_repository_id
+                else pull.head_repository
+            ),
+            base_repository=(
+                repository
+                if pull.base_repository in {"", current}
+                else pull.base_repository
+            ),
+        ),
+        feedback=tuple(
+            replace(
+                item,
+                repository=repository,
+                html_url=alias_url(item.html_url),
+            )
+            for item in snapshot.feedback
+        ),
+    )
+
+
+def _feedback_repository_alias(
+    events: Sequence[FeedbackEvent],
+    *,
+    current_repository: str,
+    repository: str,
+) -> tuple[FeedbackEvent, ...]:
+    """Normalize authorized feedback display routes for durable hashing."""
+
+    marker = f"/{current_repository}/"
+    replacement = f"/{repository}/"
+    return tuple(
+        replace(
+            event,
+            repository=repository,
+            html_url=(
+                None
+                if event.html_url is None
+                else event.html_url.replace(marker, replacement, 1)
+            ),
+        )
+        for event in events
     )
 
 
@@ -2262,6 +2350,14 @@ class GuardianController:
                         observed_at=observed_at,
                         lease_owner=owner,
                     )
+                    if self.state.pending_publications(
+                        repository=policy.base_repo,
+                        repository_id=policy.base_repo_id,
+                        limit=1,
+                    ):
+                        raise _PublicationRecoveryBacklog(
+                            "Publication recovery remains after the bounded workset."
+                        )
                     for snapshot in snapshots:
                         outcome.pull_requests_seen += 1
                         self._process_snapshot(
@@ -2708,25 +2804,41 @@ class GuardianController:
         policy: RepositoryPolicy,
         snapshot: PullRequestFeedbackSnapshot,
         authorized: AuthorizedFeedback,
+        authority_repository: str | None = None,
     ) -> OpenPullAuthorityReference:
         """Bind prevention evidence to the complete live trusted open snapshot."""
 
+        repository = authority_repository or policy.base_repo
+        digest_snapshot = (
+            snapshot
+            if repository == snapshot.repository_identity.full_name
+            else _repository_route_alias(snapshot, repository=repository)
+        )
+        digest_events = (
+            authorized.events
+            if repository == snapshot.repository_identity.full_name
+            else _feedback_repository_alias(
+                authorized.events,
+                current_repository=snapshot.repository_identity.full_name,
+                repository=repository,
+            )
+        )
         pull = snapshot.pull_request
         return OpenPullAuthorityReference(
-            repository=policy.base_repo,
+            repository=repository,
             repository_id=policy.base_repo_id,
             pull_id=pull.pull_id,
             pr_number=pull.number,
             authority_digest=_historical_pull_revision_digest(
                 policy,
-                snapshot,
-                feedback_events=authorized.events,
+                digest_snapshot,
+                feedback_events=digest_events,
             ),
             head_sha=pull.head_sha,
             base_sha=pull.base_sha,
             feedback_digest=_open_pull_feedback_digest(
-                snapshot,
-                feedback_events=authorized.events,
+                digest_snapshot,
+                feedback_events=digest_events,
             ),
         )
 
@@ -2742,9 +2854,11 @@ class GuardianController:
         """Rehydrate and reauthorize one complete open source before mutation."""
 
         try:
+            if source.repository_id != policy.base_repo_id:
+                raise ValueError
             if expected_current_head_sha in {None, source.head_sha}:
                 self.state.validate_prevention_source_attestation(
-                    source_repository=policy.base_repo,
+                    source_repository=source.repository,
                     open_source=source,
                     source_pulls=(),
                     event_revision_ids=event_revision_ids,
@@ -2784,8 +2898,13 @@ class GuardianController:
                 "Exact open-source revalidation is unavailable."
             )
         require_live_lease()
+        routed_source = (
+            source
+            if source.repository == policy.base_repo
+            else replace(source, repository=policy.base_repo)
+        )
         try:
-            fresh = revalidate(policy, source)
+            fresh = revalidate(policy, routed_source)
         except (
             _LeaseLost,
             PreventionLeaseLostError,
@@ -2825,6 +2944,7 @@ class GuardianController:
                 policy=policy,
                 snapshot=fresh,
                 authorized=authorized,
+                authority_repository=source.repository,
             )
         except (
             _LeaseLost,
@@ -2857,6 +2977,65 @@ class GuardianController:
             raise PreventionSourceAuthorityError(
                 "The open prevention source changed after assessment."
             )
+
+        # Materializing and inspecting the trusted base checkout above can be
+        # slow. Hydrate the exact pull once more afterward and derive its
+        # authority from the already trusted scope, so a lifecycle, revision,
+        # changed-file, or trusted-feedback race cannot authorize a write from
+        # the earlier snapshot.
+        require_live_lease()
+        try:
+            final_fresh = revalidate(policy, routed_source)
+        except (
+            _LeaseLost,
+            PreventionLeaseLostError,
+            PollDeadlineExceeded,
+            GitHubAuthenticationError,
+        ):
+            raise
+        except Exception as exc:
+            raise PreventionSourceAuthorityError(
+                "The open prevention source is no longer authorized."
+            ) from exc
+        require_live_lease()
+        try:
+            if not isinstance(final_fresh, PullRequestFeedbackSnapshot):
+                raise TypeError("Exact open-source snapshot is malformed.")
+            _exact_revisions(
+                policy,
+                final_fresh,
+                github_host=self.github_host,
+            )
+            final_authorized = authorize_feedback(
+                policy=policy,
+                snapshot=final_fresh,
+                path_locales=scope.path_locales,
+                changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+            )
+            final_current = self._open_pull_authority_reference(
+                policy=policy,
+                snapshot=final_fresh,
+                authorized=final_authorized,
+                authority_repository=source.repository,
+            )
+        except (
+            _LeaseLost,
+            PreventionLeaseLostError,
+            PollDeadlineExceeded,
+            GitHubAuthenticationError,
+        ):
+            raise
+        except Exception as exc:
+            raise PreventionSourceAuthorityError(
+                "The open prevention source no longer has the same authority."
+            ) from exc
+        if (
+            final_fresh.pull_request.head_sha != expected_head
+            or final_current != current
+        ):
+            raise PreventionSourceAuthorityError(
+                "The open prevention source changed during authority validation."
+            )
         require_live_lease()
 
     def _require_exact_historical_sources_still_closed(
@@ -2882,9 +3061,7 @@ class GuardianController:
             ):
                 raise ValueError("Remediation event revisions are malformed.")
             if any(
-                source.repository != policy.base_repo
-                or source.repository_id != policy.base_repo_id
-                for source in source_tuple
+                source.repository_id != policy.base_repo_id for source in source_tuple
             ):
                 raise ValueError("Remediation source escaped repository policy.")
             if revision_ids:
@@ -2899,7 +3076,7 @@ class GuardianController:
 
         quarantined = frozenset(
             self.state.operator_quarantined_historical_pull_retries(
-                repository=policy.base_repo,
+                repository=source_tuple[0].repository,
                 repository_id=policy.base_repo_id,
                 policy_digest=source_tuple[0].policy_digest,
             )
@@ -3068,10 +3245,23 @@ class GuardianController:
                             deleted=True,
                         )
                     )
+                digest_snapshot = (
+                    snapshot
+                    if source.repository == snapshot.repository_identity.full_name
+                    else _repository_route_alias(
+                        snapshot,
+                        repository=source.repository,
+                    )
+                )
+                digest_events = _feedback_repository_alias(
+                    (*authorized.events, *tombstones),
+                    current_repository=snapshot.repository_identity.full_name,
+                    repository=source.repository,
+                )
                 digest = _historical_pull_revision_digest(
                     policy,
-                    snapshot,
-                    feedback_events=(*authorized.events, *tombstones),
+                    digest_snapshot,
+                    feedback_events=digest_events,
                 )
             except (
                 IntakePolicyError,
@@ -3079,7 +3269,15 @@ class GuardianController:
                 ValueError,
                 _HistoricalPolicyRejection,
             ) as exc:
-                digest = _historical_pull_revision_digest(policy, snapshot)
+                digest_snapshot = (
+                    snapshot
+                    if source.repository == snapshot.repository_identity.full_name
+                    else _repository_route_alias(
+                        snapshot,
+                        repository=source.repository,
+                    )
+                )
+                digest = _historical_pull_revision_digest(policy, digest_snapshot)
                 if digest == source.authority_digest:
                     continue
                 raise RemediationSourceAuthorityError(
@@ -3089,6 +3287,45 @@ class GuardianController:
                 raise RemediationSourceAuthorityError(
                     "A remediation source changed after assessment."
                 )
+
+        # Historical base checkouts and authorization above are bounded but
+        # potentially slow. Rehydrate the complete exact source set after that
+        # local preparation and require field-for-field typed snapshot stability
+        # before permitting the caller's remote mutation.
+        require_live_lease()
+        try:
+            final_fresh = self.historical_source_snapshot_provider(
+                policy,
+                source_tuple,
+            )
+        except PolicyViolation as exc:
+            raise RemediationSourceAuthorityError(
+                "A remediation source is no longer closed and authorized."
+            ) from exc
+        require_live_lease()
+        if not isinstance(final_fresh, tuple) or len(final_fresh) != len(source_tuple):
+            raise RemediationSourceAuthorityError(
+                "Final source revalidation returned an incomplete snapshot set."
+            )
+        final_snapshots: dict[tuple[int, int], PullRequestFeedbackSnapshot] = {}
+        for snapshot in final_fresh:
+            if not isinstance(snapshot, PullRequestFeedbackSnapshot):
+                raise RemediationSourceAuthorityError(
+                    "Final source revalidation returned malformed evidence."
+                )
+            identity = (
+                snapshot.pull_request.pull_id,
+                snapshot.pull_request.number,
+            )
+            if identity in final_snapshots:
+                raise RemediationSourceAuthorityError(
+                    "Final source revalidation repeated a pull identity."
+                )
+            final_snapshots[identity] = snapshot
+        if final_snapshots != snapshots:
+            raise RemediationSourceAuthorityError(
+                "A remediation source changed during authority validation."
+            )
         require_live_lease()
 
     def _record_historical_terminal_status(
@@ -3249,6 +3486,10 @@ class GuardianController:
                 sources: Sequence[HistoricalPullReference],
                 event_revision_ids: Sequence[int],
             ) -> None:
+                # Destination authority is checked first so the complete source
+                # snapshot remains the final remote read before a publication
+                # callback returns. Callers perform only local lease/deadline
+                # checks after this guard and before the mutation.
                 require_current_base_unchanged()
                 self._require_exact_historical_sources_still_closed(
                     policy=policy,
@@ -3257,7 +3498,6 @@ class GuardianController:
                     operator_config=operator_config,
                     require_live_lease=require_live_lease,
                 )
-                require_current_base_unchanged()
 
             def require_no_open_translation_overlap(
                 candidate_paths: Sequence[str],
@@ -3294,8 +3534,7 @@ class GuardianController:
                         outcome=outcome,
                     )
                     if any(
-                        source.repository != policy.base_repo
-                        or source.repository_id != policy.base_repo_id
+                        source.repository_id != policy.base_repo_id
                         for batch in retry_batches
                         for source in batch
                     ):
@@ -4950,11 +5189,12 @@ class GuardianController:
             )
         try:
             pending_publications = self.state.pending_publications(
-                repository=policy.base_repo
+                repository=policy.base_repo,
+                repository_id=policy.base_repo_id,
             )
         except (TypeError, ValueError, RuntimeError) as exc:
             raise _PublicationRecoveryManualRequired(
-                "Pending publication actor authority is unavailable or malformed."
+                "Pending publication authority is unavailable or malformed."
             ) from exc
         snapshots_by_pr = {
             snapshot.pull_request.number: snapshot for snapshot in snapshots
@@ -5266,6 +5506,7 @@ class GuardianController:
                 if publication_actor is None
                 else self.state.replied_publication_for_head(
                     repository=policy.base_repo,
+                    repository_id=policy.base_repo_id,
                     pr_number=snapshot.pull_request.number,
                     head_sha=snapshot.pull_request.head_sha,
                     publication_actor_id=publication_actor.id,
@@ -5301,6 +5542,36 @@ class GuardianController:
                 if revision.is_new:
                     outcome.feedback_revisions_recorded += 1
                 current[(event.kind, event.event_id)] = (event, revision)
+
+            if (
+                replied_publication is not None
+                and replied_publication.repository != policy.base_repo
+            ):
+                # A GitHub repository rename changes feedback URLs but not the
+                # underlying review objects. Match the current-route revision
+                # to the exact old-route content identity already covered by
+                # the replied publication, while persisting new observations
+                # under the current policy route.
+                for event, revision in current.values():
+                    aliased_event = _feedback_repository_alias(
+                        (event,),
+                        current_repository=policy.base_repo,
+                        repository=replied_publication.repository,
+                    )[0]
+                    aliased_signature = (
+                        event.kind,
+                        event.event_id,
+                        feedback_revision_hash(aliased_event),
+                    )
+                    current_signature = (
+                        event.kind,
+                        event.event_id,
+                        revision.revision_hash,
+                    )
+                    if aliased_signature in addressed_signatures:
+                        addressed_signatures.add(current_signature)
+                    if aliased_signature in translation_applied_signatures:
+                        translation_applied_signatures.add(current_signature)
 
             pending = tuple(
                 revision

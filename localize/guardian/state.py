@@ -24,11 +24,12 @@ from localize.guardian.models import (
     HistoricalCheckScope,
     ProposedReplacement,
 )
+from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.prevention import TestCommandResult, TestOutcome
 
 
 _UTC = timezone.utc
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _SUPPORTED_SCHEMA_VERSIONS = frozenset(range(_SCHEMA_VERSION + 1))
 _TERMINAL_ACTION_STATUSES = frozenset({"completed", "skipped"})
 _ACTION_STATUSES = _TERMINAL_ACTION_STATUSES | {"failed", "pending"}
@@ -182,6 +183,7 @@ class PublicationRecord:
     publication_key: str
     run_id: str
     repository: str
+    repository_id: int | None
     pr_number: int
     original_head_sha: str
     base_sha: str
@@ -676,6 +678,17 @@ def _canonical_json(value: Mapping[str, Any] | None) -> str:
     )
 
 
+def _validate_repository_id_filter(repository_id: int | None) -> None:
+    """Require a normalized immutable repository identity when supplied."""
+
+    if repository_id is not None and (
+        isinstance(repository_id, bool)
+        or not isinstance(repository_id, int)
+        or not 0 < repository_id <= _SQLITE_MAX_INTEGER
+    ):
+        raise ValueError("repository_id must be a positive integer or None.")
+
+
 def _canonical_attestation_json(value: object) -> str:
     return json.dumps(
         value,
@@ -792,7 +805,7 @@ def _validated_revision_ids_json(value: object, *, label: str) -> tuple[int, ...
     ):
         raise RuntimeError(f"{label} contains malformed evidence.")
     try:
-        decoded = json.loads(value)
+        decoded = loads_bounded_json(value)
         canonical = _canonical_attestation_json(decoded)
     except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
         raise RuntimeError(f"{label} contains malformed evidence.") from None
@@ -856,9 +869,9 @@ def _validated_attestation_json(value: str, *, label: str) -> str:
     ):
         raise ValueError(f"{label} must be a bounded canonical JSON document.")
     try:
-        decoded = json.loads(value)
+        decoded = loads_bounded_json(value)
         canonical = _canonical_attestation_json(decoded)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         raise ValueError(
             f"{label} must be a bounded canonical JSON document."
         ) from None
@@ -881,7 +894,7 @@ def _prevention_policy_from_json(value: str) -> _PreventionPolicyAttestation:
     """Extract immutable source, target, and push identities from an attestation."""
 
     try:
-        raw = json.loads(value)
+        raw = loads_bounded_json(value)
         repository_policy = raw["repository_policy"]
         prevention = repository_policy["prevention"]
 
@@ -966,7 +979,7 @@ def _validate_prevention_test_attestation(
     """Require exact base-fail/candidate-pass evidence for every configured argv."""
 
     try:
-        raw = json.loads(value)
+        raw = loads_bounded_json(value)
         if (
             not isinstance(raw, Mapping)
             or set(raw)
@@ -1101,9 +1114,9 @@ def _open_pull_authority_from_json(value: object) -> OpenPullAuthorityReference 
     ):
         raise ValueError("open_source_json must be bounded canonical JSON.")
     try:
-        raw = json.loads(value)
+        raw = loads_bounded_json(value)
         canonical = _canonical_attestation_json(raw)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         raise ValueError("open_source_json must be bounded canonical JSON.") from None
     if canonical != value:
         raise ValueError("open_source_json must be bounded canonical JSON.")
@@ -1155,9 +1168,9 @@ def _historical_pull_reference_from_json(value: object) -> HistoricalPullReferen
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError("source_json must be bounded canonical JSON.")
     try:
-        raw = json.loads(value)
+        raw = loads_bounded_json(value)
         canonical = _canonical_attestation_json(raw)
-    except (json.JSONDecodeError, RecursionError):
+    except (ValueError, RecursionError):
         raise ValueError("source_json must be bounded canonical JSON.") from None
     if not isinstance(raw, Mapping) or canonical != value:
         raise ValueError("source_json must be bounded canonical JSON.")
@@ -1296,21 +1309,21 @@ def _prevention_draft_key(
         "body": body,
         "branch": branch,
         "candidate_sha": candidate_sha,
-        "event_revision_ids": json.loads(event_revision_ids_json),
+        "event_revision_ids": loads_bounded_json(event_revision_ids_json),
         "evidence_hash": evidence_hash,
         "patch_hash": patch_hash,
-        "patch_paths": json.loads(patch_paths_json),
+        "patch_paths": loads_bounded_json(patch_paths_json),
         "push_repository": push_repository,
         "run_id": run_id,
-        "source_policy": json.loads(source_policy_json),
+        "source_policy": loads_bounded_json(source_policy_json),
         "source_policy_digest": source_policy_digest,
-        "open_source": json.loads(open_source_json),
-        "source_pulls": json.loads(source_pulls_json),
+        "open_source": loads_bounded_json(open_source_json),
+        "source_pulls": loads_bounded_json(source_pulls_json),
         "source_repository": source_repository,
         "target_base_branch": target_base_branch,
         "target_base_sha": target_base_sha,
         "target_repository": target_repository,
-        "test_attestation": json.loads(test_attestation_json),
+        "test_attestation": loads_bounded_json(test_attestation_json),
         "test_attestation_digest": test_attestation_digest,
         "title": title,
     }
@@ -1424,7 +1437,9 @@ def _amount_to_microusd(amount_usd: Decimal | float | str) -> int:
     return int(micros)
 
 
-def _revision_hash(event: FeedbackEvent) -> str:
+def feedback_revision_hash(event: FeedbackEvent) -> str:
+    """Return the durable content identity for one feedback revision."""
+
     payload = json.dumps(
         {
             "author_id": event.author_id,
@@ -1442,6 +1457,12 @@ def _revision_hash(event: FeedbackEvent) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _revision_hash(event: FeedbackEvent) -> str:
+    """Compatibility alias for the pre-public helper name."""
+
+    return feedback_revision_hash(event)
 
 
 def _legacy_revision_hash(event: FeedbackEvent) -> str:
@@ -1495,8 +1516,8 @@ def _validate_assessment_metadata(
     ):
         raise ValueError("assessment cache metadata is invalid")
     try:
-        parsed_result = json.loads(result_json)
-    except (TypeError, json.JSONDecodeError):
+        parsed_result = loads_bounded_json(result_json)
+    except (TypeError, ValueError):
         raise ValueError("assessment cache result must be JSON") from None
     if not isinstance(parsed_result, Mapping):
         raise ValueError("assessment cache result must be a JSON object")
@@ -1825,6 +1846,7 @@ class GuardianState:
                 publication_key TEXT NOT NULL,
                 run_id TEXT NOT NULL,
                 repository TEXT NOT NULL,
+                repository_id INTEGER CHECK (repository_id > 0),
                 pr_number INTEGER NOT NULL CHECK (pr_number > 0),
                 original_head_sha TEXT NOT NULL,
                 base_sha TEXT NOT NULL,
@@ -4174,6 +4196,15 @@ class GuardianState:
             self._connection.execute(
                 "ALTER TABLE publication_events ADD COLUMN publication_actor_type TEXT"
             )
+        publication_repository_id_added = "repository_id" not in publication_columns
+        if publication_repository_id_added:
+            # Released schemas stored the immutable repository ID only inside
+            # the exact open-source authority. Preserve NULL for legacy or
+            # malformed rows instead of inferring authority from a mutable name.
+            self._connection.execute(
+                "ALTER TABLE publication_events "
+                "ADD COLUMN repository_id INTEGER CHECK (repository_id > 0)"
+            )
         completion_plan_columns = {
             str(row["name"])
             for row in self._connection.execute(
@@ -4201,6 +4232,7 @@ class GuardianState:
                   AND (
                       first.run_id IS NOT NEW.run_id
                       OR first.repository IS NOT NEW.repository
+                      OR first.repository_id IS NOT NEW.repository_id
                       OR first.pr_number IS NOT NEW.pr_number
                       OR first.original_head_sha IS NOT NEW.original_head_sha
                       OR first.base_sha IS NOT NEW.base_sha
@@ -4221,6 +4253,18 @@ class GuardianState:
         )
         self._connection.execute(
             """
+            CREATE TRIGGER IF NOT EXISTS publication_events_repository_id_safe
+            BEFORE INSERT ON publication_events
+            WHEN NEW.repository_id IS NULL
+              OR typeof(NEW.repository_id) != 'integer'
+              OR NEW.repository_id NOT BETWEEN 1 AND 9223372036854775807
+            BEGIN
+                SELECT RAISE(ABORT, 'publication repository id is unsafe');
+            END
+            """
+        )
+        self._connection.execute(
+            """
             CREATE TRIGGER IF NOT EXISTS publication_events_actor_safe
             BEFORE INSERT ON publication_events
             WHEN NEW.publication_actor_id IS NULL
@@ -4231,6 +4275,41 @@ class GuardianState:
             BEGIN
                 SELECT RAISE(ABORT, 'publication actor is unsafe');
             END
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS publication_events_pending_by_repository_id
+            ON publication_events(
+                repository_id, pr_number, publication_key,
+                publication_event_id DESC
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS publication_events_replied_by_repository_id
+            ON publication_events(
+                repository_id, pr_number, commit_sha, phase,
+                publication_event_id DESC
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS remediation_draft_events_pending_by_repository_id
+            ON remediation_draft_events(
+                target_repository_id, draft_key, remediation_event_id DESC
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS remediation_draft_events_pull_by_repository_id
+            ON remediation_draft_events(
+                target_repository_id, draft_number, phase,
+                remediation_event_id
+            )
             """
         )
         self._connection.execute(
@@ -4808,6 +4887,20 @@ class GuardianState:
               )
             """
         )
+        if publication_repository_id_added:
+            self._connection.execute(
+                "DROP TRIGGER IF EXISTS publication_events_no_update"
+            )
+            self._backfill_publication_repository_ids()
+            self._connection.execute(
+                """
+                CREATE TRIGGER publication_events_no_update
+                BEFORE UPDATE ON publication_events
+                BEGIN
+                    SELECT RAISE(ABORT, 'publication events are immutable');
+                END
+                """
+            )
         self._connection.execute(
             """
             INSERT INTO historical_pull_completion_observations (
@@ -4930,6 +5023,167 @@ class GuardianState:
         self._verify_database_integrity()
         self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         self._connection.commit()
+
+    def _backfill_publication_repository_ids(self) -> None:
+        """Recover only bounded, exact modern publication repository IDs."""
+
+        last_first_event_id = 0
+        while True:
+            candidates = self._connection.execute(
+                """
+                WITH missing AS (
+                    SELECT publication_key,
+                           MIN(publication_event_id) AS first_event_id
+                    FROM publication_events
+                    WHERE repository_id IS NULL
+                    GROUP BY publication_key
+                )
+                SELECT publication_key, first_event_id
+                FROM missing
+                WHERE first_event_id > ?
+                ORDER BY first_event_id
+                LIMIT ?
+                """,
+                (last_first_event_id, _MAX_PENDING_PUBLICATION_WORKSET),
+            ).fetchall()
+            if not candidates:
+                return
+            for candidate in candidates:
+                rows = self._connection.execute(
+                    """
+                    SELECT * FROM publication_events
+                    WHERE publication_key = ?
+                    ORDER BY publication_event_id
+                    LIMIT 5
+                    """,
+                    (candidate["publication_key"],),
+                ).fetchall()
+                sources: list[OpenPullAuthorityReference] = []
+                revision_sets: list[tuple[int, ...]] = []
+                phase_history: list[str] = []
+                identities: list[tuple[object, ...]] = []
+                try:
+                    if not rows or len(rows) > 4:
+                        raise ValueError
+                    for row in rows:
+                        source = _open_pull_authority_from_json(row["open_source_json"])
+                        revision_ids = _validated_revision_ids_json(
+                            row["event_revision_ids_json"],
+                            label="Publication migration",
+                        )
+                        occurred_at = _parse_datetime(row["occurred_at"])
+                        key_payload = (
+                            f"{row['repository']}\n{row['pr_number']}\n"
+                            f"{row['original_head_sha']}\n{row['base_sha']}\n"
+                            f"{row['commit_sha']}"
+                        )
+                        if (
+                            source is None
+                            or source.feedback_digest is None
+                            or not revision_ids
+                            or source.repository != row["repository"]
+                            or source.pr_number != row["pr_number"]
+                            or source.head_sha != row["original_head_sha"]
+                            or source.base_sha != row["base_sha"]
+                            or hashlib.sha256(key_payload.encode("utf-8")).hexdigest()
+                            != row["publication_key"]
+                            or occurred_at is None
+                            or _serialize_datetime(occurred_at) != row["occurred_at"]
+                        ):
+                            raise ValueError
+                        sources.append(source)
+                        revision_sets.append(revision_ids)
+                        phase_history.append(str(row["phase"]))
+                        identities.append(
+                            (
+                                row["run_id"],
+                                row["repository"],
+                                row["pr_number"],
+                                row["original_head_sha"],
+                                row["base_sha"],
+                                row["commit_sha"],
+                                row["publication_actor_id"],
+                                row["publication_actor_type"],
+                                row["event_revision_ids_json"],
+                                row["open_source_json"],
+                            )
+                        )
+                    valid_phase_histories = {
+                        ("prepared",),
+                        ("prepared", "abandoned"),
+                        ("prepared", "published"),
+                        ("prepared", "published", "abandoned"),
+                        ("prepared", "published", "replied"),
+                    }
+                    if (
+                        len(set(sources)) != 1
+                        or len(set(revision_sets)) != 1
+                        or len(set(identities)) != 1
+                        or tuple(phase_history) not in valid_phase_histories
+                    ):
+                        raise ValueError
+                    run = self.get_run(str(rows[0]["run_id"]))
+                    if run.repository != sources[0].repository or run.mode not in {
+                        GuardianMode.APPLY_OWNED_TRANSLATIONS,
+                        GuardianMode.PROPOSE_PREVENTION,
+                    }:
+                        raise ValueError
+                    revision_rows: list[sqlite3.Row] = []
+                    # A review comment may have been edited after this
+                    # publication. Validate its immutable stored revisions,
+                    # not today's mutable current-observation pointers.
+                    for offset in range(
+                        0,
+                        len(revision_sets[0]),
+                        _SQLITE_IN_QUERY_CHUNK,
+                    ):
+                        revision_chunk = revision_sets[0][
+                            offset : offset + _SQLITE_IN_QUERY_CHUNK
+                        ]
+                        placeholders = ", ".join("?" for _item in revision_chunk)
+                        revision_rows.extend(
+                            self._connection.execute(
+                                f"""
+                                SELECT revision_id, repository, pr_number,
+                                       head_sha, base_sha, deleted
+                                FROM event_revisions
+                                WHERE revision_id IN ({placeholders})
+                                """,
+                                revision_chunk,
+                            ).fetchall()
+                        )
+                    source = sources[0]
+                    if {int(row["revision_id"]) for row in revision_rows} != set(
+                        revision_sets[0]
+                    ) or any(
+                        (
+                            row["repository"],
+                            int(row["pr_number"]),
+                            row["head_sha"],
+                            row["base_sha"],
+                            int(row["deleted"]),
+                        )
+                        != (
+                            source.repository,
+                            source.pr_number,
+                            source.head_sha,
+                            source.base_sha,
+                            0,
+                        )
+                        for row in revision_rows
+                    ):
+                        raise ValueError
+                except (KeyError, TypeError, ValueError, RuntimeError, RecursionError):
+                    continue
+                self._connection.execute(
+                    """
+                    UPDATE publication_events
+                    SET repository_id = ?
+                    WHERE publication_key = ? AND repository_id IS NULL
+                    """,
+                    (sources[0].repository_id, candidate["publication_key"]),
+                )
+            last_first_event_id = int(candidates[-1]["first_event_id"])
 
     def _audit_draft_event_ledgers(self) -> None:
         """Reject legacy draft histories that current recovery cannot trust."""
@@ -9084,6 +9338,16 @@ class GuardianState:
         ).fetchone()
         if row is None:
             return None
+        raw_details = row["details_json"]
+        try:
+            details = loads_bounded_json(raw_details)
+            if (
+                not isinstance(details, Mapping)
+                or _canonical_json(details) != raw_details
+            ):
+                raise ValueError
+        except (TypeError, ValueError, RecursionError):
+            raise RuntimeError("Health ledger contains malformed data.") from None
         checked_at = _parse_datetime(row["checked_at"])
         if checked_at is None:  # pragma: no cover - database constraint
             raise RuntimeError("Health record has no timestamp.")
@@ -9092,7 +9356,7 @@ class GuardianState:
             component=row["component"],
             status=row["status"],
             message=row["message"],
-            details=json.loads(row["details_json"]),
+            details=details,
             checked_at=checked_at,
         )
 
@@ -9447,6 +9711,13 @@ class GuardianState:
             publication_key = str(row["publication_key"])
             run_id = str(row["run_id"])
             repository = str(row["repository"])
+            raw_repository_id = row["repository_id"]
+            if raw_repository_id is not None and (
+                isinstance(raw_repository_id, bool)
+                or not isinstance(raw_repository_id, int)
+            ):
+                raise ValueError
+            repository_id = raw_repository_id
             pr_number = int(row["pr_number"])
             original_head_sha = str(row["original_head_sha"])
             base_sha = str(row["base_sha"])
@@ -9465,7 +9736,7 @@ class GuardianState:
             publication_actor_id = raw_publication_actor_id
             publication_actor_type = raw_publication_actor_type
             phase = str(row["phase"])
-            event_ids = json.loads(row["event_revision_ids_json"])
+            event_ids = loads_bounded_json(row["event_revision_ids_json"])
             occurred_at = _parse_datetime(row["occurred_at"])
             raw_open_source = row["open_source_json"]
             open_source = (
@@ -9496,6 +9767,10 @@ class GuardianState:
             or _serialize_datetime(occurred_at) != row["occurred_at"]
             or not run_id
             or not _REPOSITORY_RE.fullmatch(repository)
+            or (
+                repository_id is not None
+                and not 0 < repository_id <= _SQLITE_MAX_INTEGER
+            )
             or not 0 < pr_number <= _SQLITE_MAX_INTEGER
             or (publication_actor_id is None) != (publication_actor_type is None)
             or (
@@ -9518,17 +9793,20 @@ class GuardianState:
                 and (
                     open_source.feedback_digest is None
                     or open_source.repository != repository
+                    or open_source.repository_id != repository_id
                     or open_source.pr_number != pr_number
                     or open_source.head_sha != original_head_sha
                     or open_source.base_sha != base_sha
                 )
             )
+            or (repository_id is None) != (open_source is None)
         ):
             raise RuntimeError("Publication ledger contains malformed data.")
         return PublicationRecord(
             publication_key=publication_key,
             run_id=run_id,
             repository=repository,
+            repository_id=repository_id,
             pr_number=pr_number,
             original_head_sha=original_head_sha,
             base_sha=base_sha,
@@ -9616,6 +9894,7 @@ class GuardianState:
             event_revision_ids=canonical_ids,
         )
         open_source_json = _open_pull_authority_json(open_source)
+        repository_id = open_source.repository_id
         key_payload = (
             f"{repository}\n{pr_number}\n{original_head_sha}\n{base_sha}\n{commit_sha}"
         )
@@ -9624,6 +9903,7 @@ class GuardianState:
         identity = (
             run_id,
             repository,
+            repository_id,
             pr_number,
             original_head_sha,
             base_sha,
@@ -9635,7 +9915,7 @@ class GuardianState:
         )
         existing = self._connection.execute(
             """
-            SELECT run_id, repository, pr_number, original_head_sha,
+            SELECT run_id, repository, repository_id, pr_number, original_head_sha,
                    base_sha, commit_sha, publication_actor_id,
                    publication_actor_type, event_revision_ids_json,
                    open_source_json
@@ -9690,11 +9970,11 @@ class GuardianState:
         self._connection.execute(
             """
             INSERT OR IGNORE INTO publication_events (
-                publication_key, run_id, repository, pr_number,
+                publication_key, run_id, repository, repository_id, pr_number,
                 original_head_sha, base_sha, commit_sha,
                 publication_actor_id, publication_actor_type,
                 event_revision_ids_json, open_source_json, phase, occurred_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 publication_key,
@@ -9744,7 +10024,7 @@ class GuardianState:
         normalized: list[tuple[int, str, str]] = []
         for index, row in enumerate(rows):
             try:
-                details = json.loads(row["details_json"])
+                details = loads_bounded_json(row["details_json"])
                 occurred_at = _parse_datetime(str(row["occurred_at"]))
                 revision_id = int(row["event_revision_id"])
                 status = str(row["status"])
@@ -9778,7 +10058,7 @@ class GuardianState:
         try:
             canonical = _normalized_publication_completion_actions(
                 tuple(
-                    (revision_id, status, json.loads(details_json))
+                    (revision_id, status, loads_bounded_json(details_json))
                     for revision_id, status, details_json in normalized
                 )
             )
@@ -10077,6 +10357,7 @@ class GuardianState:
 
         replied = self.replied_publication_for_head(
             repository=publication.repository,
+            repository_id=publication.repository_id,
             pr_number=publication.pr_number,
             head_sha=publication.commit_sha,
             publication_actor_id=publication.publication_actor_id,
@@ -10495,9 +10776,13 @@ class GuardianState:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = _MAX_PENDING_PUBLICATION_WORKSET,
     ) -> tuple[PublicationRecord, ...]:
-        """Return a bounded oldest-first publication-recovery workset."""
+        """Return a bounded oldest-first publication-recovery workset.
+
+        The immutable ID is authoritative when both repository filters are given.
+        """
 
         if (
             isinstance(limit, bool)
@@ -10505,9 +10790,46 @@ class GuardianState:
             or not 1 <= limit <= _MAX_PENDING_PUBLICATION_WORKSET
         ):
             raise ValueError("limit must be an integer from 1 through 100.")
+        _validate_repository_id_filter(repository_id)
 
-        where = "WHERE repository = ?" if repository is not None else ""
-        parameters = (repository,) if repository is not None else ()
+        if repository_id is not None and repository is not None:
+            # Check legacy ambiguity globally and outside the bounded modern
+            # workset. A NULL-ID row cannot be attributed after a repository
+            # rename and must never hide behind 100 older exact-ID rows.
+            ambiguous_legacy = self._connection.execute(
+                """
+                SELECT 1 FROM (
+                    SELECT p.publication_key, p.phase,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY publication_key
+                               ORDER BY publication_event_id DESC
+                           ) AS guardian_row_number
+                    FROM publication_events AS p
+                    WHERE p.repository_id IS NULL
+                ) AS latest
+                LEFT JOIN publication_reply_terminal_events AS reply_terminal
+                  ON reply_terminal.publication_key = latest.publication_key
+                WHERE latest.guardian_row_number = 1
+                  AND latest.phase IN ('prepared', 'published')
+                  AND reply_terminal.publication_key IS NULL
+                LIMIT 1
+                """,
+            ).fetchone()
+            if ambiguous_legacy is not None:
+                raise RuntimeError(
+                    "Pending publication lacks durable repository authority."
+                )
+            where = "WHERE repository_id = ?"
+            parameters: tuple[object, ...] = (repository_id,)
+        elif repository_id is not None:
+            where = "WHERE repository_id = ?"
+            parameters = (repository_id,)
+        elif repository is not None:
+            where = "WHERE repository = ?"
+            parameters = (repository,)
+        else:
+            where = ""
+            parameters = ()
         rows = self._connection.execute(
             f"""
             SELECT latest.* FROM (
@@ -10538,18 +10860,29 @@ class GuardianState:
             raise RuntimeError(
                 "Pending publication lacks durable publication-actor authority."
             )
+        if any(
+            publication.repository_id is None or publication.open_source is None
+            for publication in publications
+        ):
+            raise RuntimeError(
+                "Pending publication lacks durable repository authority."
+            )
         return publications
 
     def replied_publication_for_head(
         self,
         *,
         repository: str,
+        repository_id: int | None = None,
         pr_number: int,
         head_sha: str,
         publication_actor_id: int,
         publication_actor_type: str,
     ) -> PublicationRecord | None:
-        """Return an actor-bound replied publication for the exact current head."""
+        """Return an actor-bound replied publication for the exact current head.
+
+        The immutable ID is authoritative when both repository filters are given.
+        """
 
         if (
             isinstance(publication_actor_id, bool)
@@ -10561,11 +10894,40 @@ class GuardianState:
             publication_actor_type, str
         ) or publication_actor_type not in {"User", "Bot"}:
             raise ValueError("publication_actor_type must be User or Bot.")
+        _validate_repository_id_filter(repository_id)
+
+        if repository_id is None:
+            repository_where = "p.repository = ?"
+            repository_parameters: tuple[object, ...] = (repository,)
+        else:
+            ambiguous_legacy = self._connection.execute(
+                """
+                SELECT 1 FROM publication_events AS p
+                WHERE p.repository_id IS NULL
+                  AND p.pr_number = ? AND p.commit_sha = ?
+                  AND p.phase = 'replied'
+                  AND p.publication_actor_id = ?
+                  AND p.publication_actor_type = ?
+                LIMIT 1
+                """,
+                (
+                    pr_number,
+                    head_sha,
+                    publication_actor_id,
+                    publication_actor_type,
+                ),
+            ).fetchone()
+            if ambiguous_legacy is not None:
+                raise RuntimeError(
+                    "Replied publication lacks durable repository authority."
+                )
+            repository_where = "p.repository_id = ?"
+            repository_parameters = (repository_id,)
 
         row = self._connection.execute(
-            """
+            f"""
             SELECT p.* FROM publication_events AS p
-            WHERE p.repository = ? AND p.pr_number = ? AND p.commit_sha = ?
+            WHERE {repository_where} AND p.pr_number = ? AND p.commit_sha = ?
               AND p.phase = 'replied'
               AND p.publication_actor_id = ?
               AND p.publication_actor_type = ?
@@ -10573,14 +10935,21 @@ class GuardianState:
             LIMIT 1
             """,
             (
-                repository,
+                *repository_parameters,
                 pr_number,
                 head_sha,
                 publication_actor_id,
                 publication_actor_type,
             ),
         ).fetchone()
-        return self._publication_from_row(row) if row is not None else None
+        if row is None:
+            return None
+        publication = self._publication_from_row(row)
+        if publication.repository_id is None or publication.open_source is None:
+            raise RuntimeError(
+                "Replied publication lacks durable repository authority."
+            )
+        return publication
 
     def _prevention_from_row(self, row: sqlite3.Row) -> PreventionDraftRecord:
         try:
@@ -10671,7 +11040,7 @@ class GuardianState:
                 target_base_sha=row["target_base_sha"],
                 candidate_sha=row["candidate_sha"],
             )
-            raw_paths = json.loads(row["patch_paths_json"])
+            raw_paths = loads_bounded_json(row["patch_paths_json"])
             if (
                 not isinstance(raw_paths, list)
                 or not raw_paths
@@ -10691,8 +11060,8 @@ class GuardianState:
             ):
                 raise ValueError
             patch_paths = tuple(raw_paths)
-            raw_pulls = json.loads(row["source_pulls_json"])
-            raw_revision_ids = json.loads(row["event_revision_ids_json"])
+            raw_pulls = loads_bounded_json(row["source_pulls_json"])
+            raw_revision_ids = loads_bounded_json(row["event_revision_ids_json"])
             if (
                 not isinstance(raw_pulls, list)
                 or not isinstance(
@@ -13456,8 +13825,8 @@ class GuardianState:
                 > _MAX_REMEDIATION_SOURCE_JSON_BYTES
             ):
                 raise ValueError
-            raw_pulls = json.loads(source_pulls_json)
-            raw_revision_ids = json.loads(event_revision_ids_json)
+            raw_pulls = loads_bounded_json(source_pulls_json)
+            raw_revision_ids = loads_bounded_json(event_revision_ids_json)
             if (
                 not isinstance(raw_pulls, list)
                 or not isinstance(
@@ -13530,7 +13899,7 @@ class GuardianState:
                     > _MAX_REMEDIATION_PATHS_JSON_BYTES
                 ):
                     raise ValueError
-                raw_paths = json.loads(raw_paths_json)
+                raw_paths = loads_bounded_json(raw_paths_json)
                 if not isinstance(raw_paths, list):
                     raise ValueError
                 changed_paths, canonical_paths_json = (
@@ -14500,9 +14869,13 @@ class GuardianState:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = 100,
     ) -> tuple[RemediationDraftRecord, ...]:
-        """Return a bounded, least-recently-attempted pending workset."""
+        """Return a bounded, least-recently-attempted pending workset.
+
+        The immutable ID is authoritative when both repository filters are given.
+        """
 
         if (
             isinstance(limit, bool)
@@ -14510,8 +14883,16 @@ class GuardianState:
             or not 1 <= limit <= 100
         ):
             raise ValueError("limit must be an integer from 1 through 100.")
-        where = "WHERE target_repository = ?" if repository is not None else ""
-        parameters: tuple[object, ...] = (repository,) if repository is not None else ()
+        _validate_repository_id_filter(repository_id)
+        if repository_id is not None:
+            where = "WHERE target_repository_id = ?"
+            parameters: tuple[object, ...] = (repository_id,)
+        elif repository is not None:
+            where = "WHERE target_repository = ?"
+            parameters = (repository,)
+        else:
+            where = ""
+            parameters = ()
         rows = self._connection.execute(
             f"""
             WITH latest AS (
@@ -14816,15 +15197,16 @@ class GuardianState:
             policy_digest="0" * 64,
             authority_scope=HistoricalCheckScope.REMEDIATION,
         )
+        _validate_repository_id_filter(repository_id)
         rows = self._connection.execute(
             """
             SELECT * FROM remediation_draft_events
-            WHERE target_repository = ? AND target_repository_id = ?
+            WHERE target_repository_id = ?
               AND phase = 'draft_opened' AND draft_number = ?
             ORDER BY remediation_event_id
             LIMIT 2
             """,
-            (repository, repository_id, pr_number),
+            (repository_id, pr_number),
         ).fetchall()
         if len(rows) > 1:
             raise RuntimeError(
@@ -14855,9 +15237,9 @@ class GuardianState:
                 > _MAX_REMEDIATION_PATHS_JSON_BYTES
             ):
                 raise ValueError
-            source_pulls_raw = json.loads(source_pulls_json)
-            edit_hashes_raw = json.loads(edit_hashes_json)
-            changed_paths_raw = json.loads(changed_paths_json)
+            source_pulls_raw = loads_bounded_json(source_pulls_json)
+            edit_hashes_raw = loads_bounded_json(edit_hashes_json)
+            changed_paths_raw = loads_bounded_json(changed_paths_json)
             occurred_at = _parse_datetime(str(row["occurred_at"]))
             if (
                 not isinstance(source_pulls_raw, list)
@@ -15865,7 +16247,7 @@ class GuardianState:
                 > _MAX_REMEDIATION_SOURCE_EVENT_REVISIONS_JSON_BYTES
             ):
                 raise ValueError
-            raw_revision_ids = json.loads(revision_ids_json)
+            raw_revision_ids = loads_bounded_json(revision_ids_json)
             phase = str(row["phase"])
             occurred_at = _parse_datetime(str(row["occurred_at"]))
             if (
@@ -16021,9 +16403,13 @@ class GuardianState:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = 100,
     ) -> tuple[MergedRemediationRevalidation, ...]:
-        """Return a bounded, rotating workset of merged-source revalidations."""
+        """Return a bounded, rotating workset of merged-source revalidations.
+
+        The immutable ID is authoritative when both repository filters are given.
+        """
 
         if (
             isinstance(limit, bool)
@@ -16031,8 +16417,16 @@ class GuardianState:
             or not 1 <= limit <= 100
         ):
             raise ValueError("limit must be an integer from 1 through 100.")
-        where = "WHERE draft.target_repository = ?" if repository is not None else ""
-        parameters: tuple[object, ...] = (repository,) if repository is not None else ()
+        _validate_repository_id_filter(repository_id)
+        if repository_id is not None:
+            where = "WHERE draft.target_repository_id = ?"
+            parameters: tuple[object, ...] = (repository_id,)
+        elif repository is not None:
+            where = "WHERE draft.target_repository = ?"
+            parameters = (repository,)
+        else:
+            where = ""
+            parameters = ()
         rows = self._connection.execute(
             f"""
             WITH latest_queue AS (
@@ -16049,15 +16443,14 @@ class GuardianState:
                            ORDER BY remediation_event_id DESC
                        ) AS guardian_row_number
                 FROM remediation_draft_events AS draft
+                {where}
             )
             SELECT latest_queue.*
             FROM latest_queue
             JOIN latest_drafts AS draft
               ON draft.draft_key = latest_queue.draft_key
              AND draft.guardian_row_number = 1
-            {where}
-              {"AND" if where else "WHERE"}
-              latest_queue.guardian_row_number = 1
+            WHERE latest_queue.guardian_row_number = 1
               AND latest_queue.phase IN ('pending', 'attempted')
               AND EXISTS (
                   SELECT 1 FROM remediation_resolution_events AS resolution
@@ -16566,9 +16959,13 @@ class GuardianState:
         self,
         *,
         repository: str | None = None,
+        repository_id: int | None = None,
         limit: int = 100,
     ) -> tuple[RemediationDraftRecord, ...]:
-        """Return least-recently-checked active correction PRs for lifecycle checks."""
+        """Return least-recently-checked active correction PRs for lifecycle checks.
+
+        The immutable ID is authoritative when both repository filters are given.
+        """
 
         if (
             isinstance(limit, bool)
@@ -16576,8 +16973,16 @@ class GuardianState:
             or not 1 <= limit <= 100
         ):
             raise ValueError("limit must be an integer from 1 through 100.")
-        where = "WHERE target_repository = ?" if repository is not None else ""
-        parameters: tuple[object, ...] = (repository,) if repository is not None else ()
+        _validate_repository_id_filter(repository_id)
+        if repository_id is not None:
+            where = "WHERE target_repository_id = ?"
+            parameters: tuple[object, ...] = (repository_id,)
+        elif repository is not None:
+            where = "WHERE target_repository = ?"
+            parameters = (repository,)
+        else:
+            where = ""
+            parameters = ()
         rows = self._connection.execute(
             f"""
             WITH latest AS (

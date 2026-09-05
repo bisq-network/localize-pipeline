@@ -9,14 +9,35 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Pattern, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Pattern,
+    Sequence,
+    Tuple,
+)
 
 import yaml
 
 from localize.ignore_keys import compile_ignore_key_patterns, is_ignored_key
-from localize.localization_formats import JAVA_PROPERTIES_FORMAT, LocalizationFormat, load_localization_format
-from localize.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout, load_localization_layout
-from localize.localization_profiles import LocalizationProfile, load_localization_profiles
+from localize.localization_formats import (
+    JAVA_PROPERTIES_FORMAT,
+    LocalizationFormat,
+    load_localization_format,
+)
+from localize.localization_layouts import (
+    SUFFIX_LAYOUT,
+    LocalizationLayout,
+    load_localization_layout,
+)
+from localize.localization_profiles import (
+    LocalizationProfile,
+    load_localization_profiles,
+)
 from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
@@ -43,7 +64,9 @@ class QualityGateConfig:
     block_on_semantic_qa_findings: bool = True
     block_on_semantic_qa_warnings: bool = False
     semantic_qa_audit_scope: str = "changed"
-    retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(
+        default_factory=dict
+    )
     ignore_key_patterns: List[Pattern[str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -87,7 +110,9 @@ _TOKEN_PATTERNS = [
 _ENUM_LIKE_KEY = re.compile(r"^[A-Z0-9_.$-]+$")
 
 
-def is_expected_source_identical(key: str, value: str, brand_glossary: Iterable[str]) -> bool:
+def is_expected_source_identical(
+    key: str, value: str, brand_glossary: Iterable[str]
+) -> bool:
     """Return true for values that are commonly and legitimately untranslated."""
     normalized = normalize_value(value)
     if not normalized:
@@ -201,7 +226,9 @@ def _analyze_source_identical_translation_changes(
     return stats
 
 
-def _deduplicate_translation_changes(changes: Iterable[TranslationChange]) -> List[TranslationChange]:
+def _deduplicate_translation_changes(
+    changes: Iterable[TranslationChange],
+) -> List[TranslationChange]:
     unique_changes: List[TranslationChange] = []
     seen: set[tuple[str, str]] = set()
     for change in changes:
@@ -380,18 +407,30 @@ def load_quality_gate_config(
         for locale in raw_config.get("supported_locales", [])
         if (isinstance(locale, dict) and locale.get("code")) or isinstance(locale, str)
     ]
-    semantic_qa_audit_scope = str(quality_gate.get("semantic_qa_audit_scope", "changed"))
+    semantic_qa_audit_scope = str(
+        quality_gate.get("semantic_qa_audit_scope", "changed")
+    )
     if semantic_qa_audit_scope not in {"changed", "all"}:
-        raise ValueError("quality_gate.semantic_qa_audit_scope must be 'changed' or 'all'.")
-    brand_glossary = [str(term) for term in raw_config.get("brand_technical_glossary", [])]
+        raise ValueError(
+            "quality_gate.semantic_qa_audit_scope must be 'changed' or 'all'."
+        )
+    brand_glossary = [
+        str(term) for term in raw_config.get("brand_technical_glossary", [])
+    ]
     return (
         QualityGateConfig(
             source_identical_min_block_count=int(
                 quality_gate.get("source_identical_min_block_count", 5)
             ),
-            source_identical_max_count=int(quality_gate.get("source_identical_max_count", 20)),
-            source_identical_max_ratio=float(quality_gate.get("source_identical_max_ratio", 0.30)),
-            block_on_pipeline_warnings=bool(quality_gate.get("block_on_pipeline_warnings", True)),
+            source_identical_max_count=int(
+                quality_gate.get("source_identical_max_count", 20)
+            ),
+            source_identical_max_ratio=float(
+                quality_gate.get("source_identical_max_ratio", 0.30)
+            ),
+            block_on_pipeline_warnings=bool(
+                quality_gate.get("block_on_pipeline_warnings", True)
+            ),
             block_on_semantic_qa_findings=bool(
                 quality_gate.get("block_on_semantic_qa_findings", True)
             ),
@@ -419,7 +458,9 @@ def load_quality_gate_localization_metadata(
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
 
-    localization_format = load_localization_format(raw_config.get("localization_format"))
+    localization_format = load_localization_format(
+        raw_config.get("localization_format")
+    )
     localization_layout = load_localization_layout(
         raw_config.get("localization_layout"),
         source_locale=str(raw_config.get("source_locale") or "en"),
@@ -428,7 +469,9 @@ def load_quality_gate_localization_metadata(
     return localization_format, localization_layout
 
 
-def load_quality_gate_localization_profiles(config_path: str) -> Tuple[LocalizationProfile, ...]:
+def load_quality_gate_localization_profiles(
+    config_path: str,
+) -> Tuple[LocalizationProfile, ...]:
     """Load localization profiles used by quality gate sidecars."""
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
@@ -447,7 +490,9 @@ def load_validation_summary(path: str) -> Dict[str, Any]:
     return data
 
 
-def _changed_files_relative_to_input(changed_files: Sequence[str], input_folder: str) -> set[str]:
+def _changed_files_relative_to_input(
+    changed_files: Sequence[str], input_folder: str
+) -> set[str]:
     input_path = Path(input_folder)
     result = set()
     for changed_file in changed_files:
@@ -467,7 +512,9 @@ def _changed_files_relative_to_input(changed_files: Sequence[str], input_folder:
     return result
 
 
-def _file_matches_changed_files(filename: str, changed_relative_files: set[str]) -> bool:
+def _file_matches_changed_files(
+    filename: str, changed_relative_files: set[str]
+) -> bool:
     path = Path(filename)
     return path.as_posix() in changed_relative_files
 
@@ -477,7 +524,9 @@ def _aggregate_validation(
     changed_files: Sequence[str],
     input_folder: str,
 ) -> Dict[str, Any]:
-    changed_relative_files = _changed_files_relative_to_input(changed_files, input_folder)
+    changed_relative_files = _changed_files_relative_to_input(
+        changed_files, input_folder
+    )
     totals = {
         "reverted_keys_count": 0,
         "control_character_findings_count": 0,
@@ -486,13 +535,17 @@ def _aggregate_validation(
         "model_translation_failed_keys": {},
     }
     for filename, file_summary in validation_summary.get("files", {}).items():
-        if changed_relative_files and not _file_matches_changed_files(filename, changed_relative_files):
+        if changed_relative_files and not _file_matches_changed_files(
+            filename, changed_relative_files
+        ):
             continue
         totals["reverted_keys_count"] += int(file_summary.get("reverted_keys_count", 0))
         totals["control_character_findings_count"] += int(
             file_summary.get("control_character_findings_count", 0)
         )
-        totals["placeholder_failures_count"] += int(file_summary.get("placeholder_failures_count", 0))
+        totals["placeholder_failures_count"] += int(
+            file_summary.get("placeholder_failures_count", 0)
+        )
         totals["model_translation_failed_count"] += int(
             file_summary.get("model_translation_failed_count", 0)
         )
@@ -511,7 +564,9 @@ def _filter_pipeline_warnings(
     changed_files: Sequence[str],
     input_folder: str,
 ) -> List[Dict[str, Any]]:
-    changed_relative_files = _changed_files_relative_to_input(changed_files, input_folder)
+    changed_relative_files = _changed_files_relative_to_input(
+        changed_files, input_folder
+    )
     warnings = validation_summary.get("pipeline_warnings", [])
     if not changed_relative_files:
         return list(warnings)
@@ -519,7 +574,9 @@ def _filter_pipeline_warnings(
         warning
         for warning in warnings
         if warning.get("scope") == "run"
-        or _file_matches_changed_files(str(warning.get("file", "")), changed_relative_files)
+        or _file_matches_changed_files(
+            str(warning.get("file", "")), changed_relative_files
+        )
     ]
 
 
@@ -528,13 +585,17 @@ def _semantic_review_remediation_signatures(
     changed_files: Sequence[str],
     input_folder: str,
 ) -> set[str]:
-    changed_relative_files = _changed_files_relative_to_input(changed_files, input_folder)
+    changed_relative_files = _changed_files_relative_to_input(
+        changed_files, input_folder
+    )
     signatures: set[str] = set()
     for raw_remediation in validation_summary.get("semantic_review_remediations", []):
         if not isinstance(raw_remediation, dict):
             continue
         filename = str(raw_remediation.get("file", ""))
-        if changed_relative_files and not _file_matches_changed_files(filename, changed_relative_files):
+        if changed_relative_files and not _file_matches_changed_files(
+            filename, changed_relative_files
+        ):
             continue
         signature = str(raw_remediation.get("finding_signature", ""))
         if signature:
@@ -547,7 +608,9 @@ def _semantic_review_stats_from_validation(
     changed_files: Sequence[str],
     input_folder: str,
 ) -> Tuple[SemanticQAStats, int]:
-    changed_relative_files = _changed_files_relative_to_input(changed_files, input_folder)
+    changed_relative_files = _changed_files_relative_to_input(
+        changed_files, input_folder
+    )
     remediated_signatures = _semantic_review_remediation_signatures(
         validation_summary,
         changed_files,
@@ -558,7 +621,9 @@ def _semantic_review_stats_from_validation(
         if not isinstance(raw_finding, dict):
             continue
         filename = str(raw_finding.get("file", ""))
-        if changed_relative_files and not _file_matches_changed_files(filename, changed_relative_files):
+        if changed_relative_files and not _file_matches_changed_files(
+            filename, changed_relative_files
+        ):
             continue
         signature = str(raw_finding.get("finding_signature", ""))
         if signature and signature in remediated_signatures:
@@ -608,14 +673,20 @@ def build_quality_gate_report(
     input_folder: str,
     config: QualityGateConfig,
 ) -> Dict[str, Any]:
-    validation_totals = _aggregate_validation(validation_summary, changed_files, input_folder)
-    pipeline_warnings = _filter_pipeline_warnings(validation_summary, changed_files, input_folder)
+    validation_totals = _aggregate_validation(
+        validation_summary, changed_files, input_folder
+    )
+    pipeline_warnings = _filter_pipeline_warnings(
+        validation_summary, changed_files, input_folder
+    )
     blocking_reasons: List[str] = []
     rule_and_heuristic_stats = semantic_stats or SemanticQAStats()
-    semantic_review_stats, remediated_ai_findings_count = _semantic_review_stats_from_validation(
-        validation_summary,
-        changed_files,
-        input_folder,
+    semantic_review_stats, remediated_ai_findings_count = (
+        _semantic_review_stats_from_validation(
+            validation_summary,
+            changed_files,
+            input_folder,
+        )
     )
     semantic_stats = _merge_semantic_stats(
         rule_and_heuristic_stats,
@@ -629,10 +700,13 @@ def build_quality_gate_report(
     }
 
     source_identical_blocking = (
-        source_stats.unexpected_source_identical_count >= config.source_identical_min_block_count
+        source_stats.unexpected_source_identical_count
+        >= config.source_identical_min_block_count
         and (
-            source_stats.unexpected_source_identical_count > config.source_identical_max_count
-            or source_stats.unexpected_source_identical_ratio > config.source_identical_max_ratio
+            source_stats.unexpected_source_identical_count
+            > config.source_identical_max_count
+            or source_stats.unexpected_source_identical_ratio
+            > config.source_identical_max_ratio
         )
     )
     if source_identical_blocking:
@@ -641,25 +715,50 @@ def build_quality_gate_report(
         )
 
     if config.block_on_pipeline_warnings and pipeline_warnings:
-        blocking_reasons.append("Translation pipeline warnings require manual resolution.")
+        blocking_reasons.append(
+            "Translation pipeline warnings require manual resolution."
+        )
 
-    if source_stats.control_character_findings_count or validation_totals["control_character_findings_count"]:
-        blocking_reasons.append("Control-character artifacts require manual resolution.")
+    semantic_review_status = validation_summary.get("semantic_review")
+    if semantic_review_status is not None:
+        semantic_review_incomplete = not isinstance(
+            semantic_review_status, dict
+        ) or bool(
+            semantic_review_status.get("failed_run")
+            or semantic_review_status.get("failed_batches")
+            or semantic_review_status.get("failed_locales")
+        )
+        if semantic_review_incomplete:
+            blocking_reasons.append(
+                "Semantic AI review did not complete and requires manual resolution."
+            )
+
+    if (
+        source_stats.control_character_findings_count
+        or validation_totals["control_character_findings_count"]
+    ):
+        blocking_reasons.append(
+            "Control-character artifacts require manual resolution."
+        )
     if validation_totals["placeholder_failures_count"]:
-        blocking_reasons.append("Placeholder parity failures require manual resolution.")
+        blocking_reasons.append(
+            "Placeholder parity failures require manual resolution."
+        )
     if validation_totals["model_translation_failed_count"]:
         blocking_reasons.append("Model translation failures require manual resolution.")
 
     if config.block_on_semantic_qa_findings and semantic_stats.errors_count:
-        blocking_reasons.append("Semantic translation QA findings require manual resolution.")
+        blocking_reasons.append(
+            "Semantic translation QA findings require manual resolution."
+        )
     elif config.block_on_semantic_qa_warnings and semantic_stats.warnings_count:
-        blocking_reasons.append("Semantic translation QA warnings require manual resolution.")
+        blocking_reasons.append(
+            "Semantic translation QA warnings require manual resolution."
+        )
 
     blocking = bool(blocking_reasons)
     description = (
-        blocking_reasons[0]
-        if blocking
-        else "Translation quality gate passed."
+        blocking_reasons[0] if blocking else "Translation quality gate passed."
     )
     description = description[:140]
 
@@ -819,9 +918,7 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
         ai_review = semantic_breakdown.get("ai_review", {})
         rules_and_heuristics = semantic_breakdown.get("rules_and_heuristics", {})
         ai_examples = (
-            ai_review.get("examples", [])
-            if isinstance(ai_review, Mapping)
-            else []
+            ai_review.get("examples", []) if isinstance(ai_review, Mapping) else []
         )
         rule_examples = (
             rules_and_heuristics.get("examples", [])
@@ -859,7 +956,9 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
         lines.append("### Pipeline Warnings")
         lines.append("")
         for warning in report["pipeline_warnings"]:
-            lines.append(f"- `{_escape_markdown_report_text(warning.get('file', 'unknown'), 160)}`")
+            lines.append(
+                f"- `{_escape_markdown_report_text(warning.get('file', 'unknown'), 160)}`"
+            )
             for error in warning.get("errors", []):
                 lines.append(f"  - {_escape_markdown_report_text(error, 180)}")
         lines.append("")
@@ -894,7 +993,9 @@ def get_staged_diff(repo_root: str, changed_files: Sequence[str]) -> str:
     return result.stdout
 
 
-def write_report(report: Dict[str, Any], output_json: str, output_markdown: str) -> None:
+def write_report(
+    report: Dict[str, Any], output_json: str, output_markdown: str
+) -> None:
     Path(output_json).parent.mkdir(parents=True, exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as file:
         json.dump(report, file, ensure_ascii=False, indent=2)
@@ -918,7 +1019,9 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(args.config)
+    config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(
+        args.config
+    )
     localization_profiles = load_quality_gate_localization_profiles(args.config)
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
     source_stats = analyze_source_identical_changes_for_profiles(

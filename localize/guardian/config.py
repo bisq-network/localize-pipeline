@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 import yaml
 
+from localize.guardian.executable_trust import is_supported_direct_helper_command
 from localize.guardian.models import (
     AllowedHeadRepository,
     ClosedPrBackfillPolicy,
@@ -98,6 +99,12 @@ _ARGV_SCHEMA = {
     "maxItems": _MAX_PREVENTION_ARGV_ITEMS,
     "items": _NON_EMPTY_STRING,
 }
+_DIRECT_WRAPPER_ARGV_SCHEMA = {
+    "type": "array",
+    "minItems": 1,
+    "maxItems": 1,
+    "items": _NON_EMPTY_STRING,
+}
 
 _PREVENTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -141,7 +148,7 @@ _PREVENTION_SCHEMA: dict[str, Any] = {
             "maxItems": _MAX_PREVENTION_TEST_COMMANDS,
             "items": _ARGV_SCHEMA,
         },
-        "sandbox_argv_prefix": _ARGV_SCHEMA,
+        "sandbox_argv_prefix": _DIRECT_WRAPPER_ARGV_SCHEMA,
         "max_changed_files": {
             "type": "integer",
             "minimum": 1,
@@ -536,6 +543,8 @@ def _validate_argv(
     *,
     field: str,
     absolute_executable: bool | None,
+    direct_executable: bool = False,
+    allow_github_cli: bool = False,
 ) -> tuple[str, ...]:
     argv = tuple(raw_argv)
     for index, argument in enumerate(argv):
@@ -580,6 +589,15 @@ def _validate_argv(
         raise GuardianConfigError(
             f"{field} must not contain an interpreter command string."
         )
+    if direct_executable and not is_supported_direct_helper_command(
+        argv,
+        allow_github_cli=allow_github_cli,
+    ):
+        raise GuardianConfigError(
+            f"{field} must invoke one dedicated helper executable directly; "
+            "arguments are not accepted, and the executable must not be an "
+            "interpreter or command dispatcher."
+        )
     return argv
 
 
@@ -604,6 +622,8 @@ def _runtime_command(
         raw_command,
         field=f"runtime.{field}",
         absolute_executable=None,
+        direct_executable=True,
+        allow_github_cli=field == "github_token_command",
     )
 
 
@@ -699,6 +719,7 @@ def _parse_prevention_policy(
         raw_prevention["sandbox_argv_prefix"],
         field=f"{field}.sandbox_argv_prefix",
         absolute_executable=True,
+        direct_executable=True,
     )
 
     target_name = target["full_name"].casefold()

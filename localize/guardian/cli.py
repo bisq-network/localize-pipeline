@@ -32,17 +32,21 @@ from localize.guardian.codex import (
 from localize.guardian.credentials import CredentialError, SecretCommand
 from localize.guardian.executable_trust import (
     ExecutableTrustError,
+    require_absolute_trusted_direct_executable,
     require_absolute_trusted_executable,
+    require_absolute_trusted_wrapper,
 )
 from localize.guardian.filesystem_trust import (
     create_or_wait_for_private_directory,
     is_trusted_directory,
+    resolve_trusted_private_directory,
 )
 from localize.guardian.github import (
     GitHubReader,
     GitHubRepositoryIdentity,
     GitHubRepositoryPolicy,
 )
+from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.models import (
     CodexAuthMode,
     GuardianConfig,
@@ -123,7 +127,7 @@ runtime:
   github_token_command: [gh, auth, token]
   # API billing is opt-in: switch codex_auth_mode to api-key, configure this
   # argv-only OS secret-store helper, and enable both USD limits below.
-  # codex_api_key_command: [/usr/bin/security, find-generic-password, -w, -s, localize-guardian]
+  # codex_api_key_command: [/absolute/path/to/model-key-helper]
   # Required for write modes; global Git configuration is intentionally ignored.
   # signing_key: REPLACE_WITH_FULL_GPG_FINGERPRINT
   # SSH alternative (all four fields are required together):
@@ -192,7 +196,7 @@ repositories:
     # evidence only. The window admits new evidence; a durable pending
     # recovery group cannot age out, but must stay closed, exact-identity, and
     # policy/trust eligible. A nested remediation policy may remain configured
-    # while observe/prepare keep it dormant and never write.
+    # while observe/prepare keep it dormant and perform no GitHub writes.
     # closed_pr_backfill:
     #   lookback_days: 90
     #   max_prs_per_poll: 5
@@ -234,10 +238,7 @@ repositories:
     #   focused_test_argv:
     #     - [/absolute/path/to/python, -m, pytest, tests/unit/test_rules.py, -q]
     #   sandbox_argv_prefix:
-    #     - /usr/bin/sandbox-exec
-    #     - -f
-    #     - /absolute/path/to/guardian-test.sb
-    #     - --
+    #     - /absolute/path/to/guardian-sandbox-wrapper
     #   max_changed_files: 4
     #   max_changed_bytes: 262144
     #   private_target_model_opt_in: false
@@ -629,8 +630,8 @@ def _preflight_publication_actor(
     except httpx.HTTPError:
         raise GuardianCLIError("GitHub publication actor probe failed.") from None
     try:
-        payload = json.loads(b"".join(chunks).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = loads_bounded_json(b"".join(chunks))
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise GuardianCLIError(
             "GitHub publication actor response is invalid."
         ) from None
@@ -731,11 +732,9 @@ def _signing_key_configured(
         if configured_home
         else Path.home() / ".gnupg"
     )
-    if not signing_home.is_dir() or signing_home.is_symlink():
-        return False
     try:
-        resolved_signing_home = signing_home.resolve(strict=True)
-    except (OSError, subprocess.SubprocessError):
+        resolved_signing_home = resolve_trusted_private_directory(signing_home)
+    except (ValueError, subprocess.SubprocessError):
         return False
     try:
         with tempfile.TemporaryDirectory(prefix="localize-guardian-signing-probe-") as raw:
@@ -969,6 +968,113 @@ def _require_absolute_executable(command: Sequence[str], *, field: str) -> None:
         require_absolute_trusted_executable(command, field=field)
     except ExecutableTrustError as exc:
         raise GuardianCLIError(str(exc)) from None
+
+
+def _require_absolute_direct_executable(
+    command: Sequence[str],
+    *,
+    field: str,
+    allow_github_cli: bool = False,
+) -> None:
+    try:
+        require_absolute_trusted_direct_executable(
+            command,
+            field=field,
+            allow_github_cli=allow_github_cli,
+        )
+    except ExecutableTrustError as exc:
+        raise GuardianCLIError(str(exc)) from None
+
+
+def _require_absolute_sandbox_wrapper(
+    command: Sequence[str],
+    *,
+    field: str,
+) -> None:
+    try:
+        require_absolute_trusted_wrapper(command, field=field)
+    except ExecutableTrustError as exc:
+        raise GuardianCLIError(str(exc)) from None
+
+
+def _resolved_doctor_command(command: Sequence[str]) -> tuple[str, ...]:
+    """Resolve one interactive command before applying unattended trust rules."""
+
+    if not command:
+        raise GuardianCLIError("Guardian command is empty.")
+    executable = command[0]
+    if "/" in executable:
+        candidate = Path(executable).expanduser()
+        if not candidate.is_absolute():
+            raise GuardianCLIError("Guardian executable path must be absolute.")
+        resolved = str(candidate)
+    else:
+        discovered = shutil.which(executable)
+        if discovered is None:
+            raise GuardianCLIError("Guardian executable was not found.")
+        resolved = discovered
+    return (resolved, *command[1:])
+
+
+def _doctor_executables_trusted(config: GuardianConfig) -> bool:
+    """Validate every executable before doctor invokes any external process."""
+
+    ordinary_commands: list[tuple[Sequence[str], str]] = [
+        ((config.runtime.codex_executable,), "runtime.codex_executable"),
+        ((config.runtime.git_executable,), "runtime.git_executable"),
+    ]
+    if config.mode in _WRITE_MODES:
+        ordinary_commands.append(
+            ((config.runtime.signing_program,), "runtime.signing_program")
+        )
+    direct_commands: list[tuple[Sequence[str], str, bool]] = [
+        (
+            config.runtime.github_token_command,
+            "runtime.github_token_command",
+            True,
+        )
+    ]
+    if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
+        direct_commands.append(
+            (
+                config.runtime.codex_api_key_command,
+                "runtime.codex_api_key_command",
+                False,
+            )
+        )
+
+    try:
+        for command, field in ordinary_commands:
+            require_absolute_trusted_executable(
+                _resolved_doctor_command(command),
+                field=field,
+            )
+        for command, field, allow_github_cli in direct_commands:
+            require_absolute_trusted_direct_executable(
+                _resolved_doctor_command(command),
+                field=field,
+                allow_github_cli=allow_github_cli,
+            )
+        if config.mode is GuardianMode.PROPOSE_PREVENTION:
+            for index, repository in enumerate(config.repositories):
+                prevention = repository.prevention
+                if prevention is None:
+                    continue
+                require_absolute_trusted_wrapper(
+                    _resolved_doctor_command(prevention.sandbox_argv_prefix),
+                    field=f"repositories.{index}.prevention.sandbox_argv_prefix",
+                )
+                for test_index, command in enumerate(prevention.focused_test_argv):
+                    require_absolute_trusted_executable(
+                        _resolved_doctor_command(command),
+                        field=(
+                            f"repositories.{index}.prevention."
+                            f"focused_test_argv.{test_index}"
+                        ),
+                    )
+    except (ExecutableTrustError, GuardianCLIError):
+        return False
+    return True
 
 
 def _credential_helper_works(command: Sequence[str]) -> bool:
@@ -1273,7 +1379,7 @@ def _prevention_sandbox_probe(config: GuardianConfig) -> bool:
             policy = repository.prevention
             if policy is None:
                 continue
-            _require_absolute_executable(
+            _require_absolute_sandbox_wrapper(
                 policy.sandbox_argv_prefix,
                 field=f"{repository.base_repo} prevention sandbox",
             )
@@ -1448,6 +1554,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"operator pipeline configs: {operator_status}")
     healthy &= operator_ok
     if not operator_ok:
+        return 1
+
+    executable_trust = _doctor_executables_trusted(config)
+    print(
+        "executable trust: "
+        f"{'ok' if executable_trust else 'error (unavailable or unsafe)'}"
+    )
+    if not executable_trust:
         return 1
 
     codex_path = _command_available((config.runtime.codex_executable,))
@@ -1956,15 +2070,6 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
     try:
         config = _load_config_or_raise(config_path)
-        if config.runtime.codex_auth_mode is CodexAuthMode.CHATGPT:
-            if not _codex_chatgpt_login_ready(config):
-                raise GuardianCLIError(
-                    "Scheduled runs require a dedicated ChatGPT login; run guardian login."
-                )
-        elif not config.runtime.codex_api_key_command:
-            raise GuardianCLIError(
-                "API-key scheduled runs require runtime.codex_api_key_command."
-            )
         _require_absolute_executable(
             (config.runtime.codex_executable,),
             field="runtime.codex_executable",
@@ -1978,14 +2083,41 @@ def _cmd_install(args: argparse.Namespace) -> int:
                 (config.runtime.signing_program,),
                 field="runtime.signing_program",
             )
-        _require_absolute_executable(
+        _require_absolute_direct_executable(
             config.runtime.github_token_command,
             field="runtime.github_token_command",
+            allow_github_cli=True,
         )
         if config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
-            _require_absolute_executable(
+            _require_absolute_direct_executable(
                 config.runtime.codex_api_key_command,
                 field="runtime.codex_api_key_command",
+            )
+        if config.mode is GuardianMode.PROPOSE_PREVENTION:
+            for index, repository in enumerate(config.repositories):
+                prevention = repository.prevention
+                if prevention is None:
+                    continue
+                _require_absolute_sandbox_wrapper(
+                    prevention.sandbox_argv_prefix,
+                    field=f"repositories.{index}.prevention.sandbox_argv_prefix",
+                )
+                for test_index, command in enumerate(prevention.focused_test_argv):
+                    _require_absolute_executable(
+                        command,
+                        field=(
+                            f"repositories.{index}.prevention."
+                            f"focused_test_argv.{test_index}"
+                        ),
+                    )
+        if config.runtime.codex_auth_mode is CodexAuthMode.CHATGPT:
+            if not _codex_chatgpt_login_ready(config):
+                raise GuardianCLIError(
+                    "Scheduled runs require a dedicated ChatGPT login; run guardian login."
+                )
+        elif not config.runtime.codex_api_key_command:
+            raise GuardianCLIError(
+                "API-key scheduled runs require runtime.codex_api_key_command."
             )
         executable = _resolve_localize_executable(args.executable)
         paths = guardian_install_paths(config_path)

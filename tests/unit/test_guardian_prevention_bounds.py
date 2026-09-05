@@ -31,7 +31,7 @@ def _policy(**overrides: object) -> PreventionPolicy:
         "allowed_code_path_globs": ("localize/**/*.py",),
         "allowed_test_path_globs": ("tests/**/*.py",),
         "focused_test_argv": (("/opt/bin/pytest", "tests/unit/test_rules.py"),),
-        "sandbox_argv_prefix": ("/usr/bin/sandbox-exec", "--"),
+        "sandbox_argv_prefix": ("/usr/bin/guardian-sandbox-wrapper",),
         "max_changed_files": 4,
         "max_changed_bytes": 262_144,
     }
@@ -55,7 +55,6 @@ def test_direct_prevention_policy_accepts_exact_collection_and_byte_bounds() -> 
             f"tests/generated_{index}.py" for index in range(100)
         ),
         focused_test_argv=commands,
-        sandbox_argv_prefix=("/usr/bin/sandbox-exec", *(["arg"] * 255)),
         max_changed_files=100,
     )
 
@@ -63,7 +62,7 @@ def test_direct_prevention_policy_accepts_exact_collection_and_byte_bounds() -> 
     assert len(policy.allowed_test_path_globs) == 100
     assert len(policy.focused_test_argv) == 64
     assert len(policy.focused_test_argv[0]) == 256
-    assert len(policy.sandbox_argv_prefix) == 256
+    assert policy.sandbox_argv_prefix == ("/usr/bin/guardian-sandbox-wrapper",)
     assert len(policy.focused_test_argv[0][-1].encode("utf-8")) == 4096
     assert len(policy.push_branch_prefix) + 77 == 255
     assert policy.max_changed_files == 100
@@ -101,8 +100,8 @@ def test_direct_prevention_policy_accepts_exact_collection_and_byte_bounds() -> 
             "focused.*test.*argv",
         ),
         (
-            {"sandbox_argv_prefix": ("/usr/bin/sandbox-exec", *(["arg"] * 256))},
-            "sandbox.*argv",
+            {"sandbox_argv_prefix": ("/usr/bin/sandbox-exec", "--")},
+            "exactly one direct wrapper",
         ),
         (
             {"focused_test_argv": (("/opt/bin/pytest", "é" * 2049),)},
@@ -175,7 +174,11 @@ def test_direct_prevention_policy_rejects_malformed_collections(
             },
             "duplicates",
         ),
-        ({"sandbox_argv_prefix": ("sandbox-exec", "--")}, "absolute POSIX"),
+        ({"sandbox_argv_prefix": ("sandbox-exec",)}, "absolute POSIX"),
+        (
+            {"sandbox_argv_prefix": ("/usr/bin/python3",)},
+            "direct sandbox wrapper",
+        ),
         (
             {
                 "push_repository": ExactRepository("acme/pipeline", 502),
@@ -196,7 +199,7 @@ def test_direct_prevention_policy_freezes_mutable_authority_inputs() -> None:
     code_globs = ["localize/**/*.py"]
     test_globs = ["tests/**/*.py"]
     focused_commands = [["/opt/bin/pytest", "tests/unit/test_rules.py"]]
-    sandbox_argv = ["/usr/bin/sandbox-exec", "--"]
+    sandbox_argv = ["/usr/bin/guardian-sandbox-wrapper"]
 
     policy = _policy(
         allowed_code_path_globs=code_globs,
@@ -215,7 +218,7 @@ def test_direct_prevention_policy_freezes_mutable_authority_inputs() -> None:
     assert policy.focused_test_argv == (
         ("/opt/bin/pytest", "tests/unit/test_rules.py"),
     )
-    assert policy.sandbox_argv_prefix == ("/usr/bin/sandbox-exec", "--")
+    assert policy.sandbox_argv_prefix == ("/usr/bin/guardian-sandbox-wrapper",)
 
 def test_direct_publication_actor_login_has_the_same_utf8_byte_bound() -> None:
     with pytest.raises(ValueError, match="login"):

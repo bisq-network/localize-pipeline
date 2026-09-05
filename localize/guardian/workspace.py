@@ -20,8 +20,9 @@ from urllib.parse import urlsplit
 
 from localize.guardian.deadline import PollDeadline
 from localize.guardian.deadline import PollDeadlineExceeded
-from localize.guardian.models import SigningFormat
 from localize.guardian.executable_trust import require_absolute_trusted_executable
+from localize.guardian.filesystem_trust import resolve_trusted_private_directory
+from localize.guardian.models import SigningFormat
 from localize.guardian.signing import (
     SSHSigningMaterial,
     canonical_signing_key,
@@ -197,6 +198,46 @@ class CommitResult:
     parent_sha: str
     changed_paths: tuple[str, ...]
     signature_verified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _CommitPipelineContract:
+    """Operation-specific checks and diagnostics for the shared commit pipeline."""
+
+    staged_codes: frozenset[str]
+    staged_status_error: str
+    staged_paths_error: str
+    parent_error: str
+    changed_paths_error: str
+    dirty_tree_error: str
+
+
+_VALIDATED_COMMIT_CONTRACT = _CommitPipelineContract(
+    staged_codes=frozenset({"M "}),
+    staged_status_error="working tree changed while Guardian staged its edit",
+    staged_paths_error="staged paths do not match the exact Guardian allowlist",
+    parent_error="Guardian commit parent does not match the exact intake SHA",
+    changed_paths_error="Guardian commit changed paths outside the exact allowlist",
+    dirty_tree_error="working tree is not clean after the Guardian commit",
+)
+_HISTORICAL_REMEDIATION_COMMIT_CONTRACT = _CommitPipelineContract(
+    staged_codes=frozenset({"M "}),
+    staged_status_error="historical remediation changed while Guardian staged it",
+    staged_paths_error="staged remediation paths do not match the exact allowlist",
+    parent_error="historical remediation commit is not a direct child of exact base",
+    changed_paths_error=(
+        "signed remediation commit changed paths outside the exact allowlist"
+    ),
+    dirty_tree_error="working tree is not clean after historical remediation commit",
+)
+_PREVENTION_COMMIT_CONTRACT = _CommitPipelineContract(
+    staged_codes=frozenset({"M ", "A "}),
+    staged_status_error="prevention candidate changed while it was staged",
+    staged_paths_error="staged prevention paths do not match the allowlist",
+    parent_error="prevention commit is not a direct child of exact base",
+    changed_paths_error="signed prevention commit changed unexpected paths",
+    dirty_tree_error="working tree is not clean after prevention commit",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,9 +767,11 @@ def _openpgp_signing_environment(values: Mapping[str, str] | None) -> dict[str, 
     if values is None:
         configured_home = os.environ.get("GNUPGHOME")
         candidate = Path(configured_home) if configured_home else Path.home() / ".gnupg"
-        if not candidate.is_dir() or candidate.is_symlink():
+        try:
+            trusted_home = resolve_trusted_private_directory(candidate)
+        except ValueError:
             return {}
-        return {"GNUPGHOME": str(candidate.resolve(strict=True))}
+        return {"GNUPGHOME": str(trusted_home)}
     if not isinstance(values, Mapping) or any(
         key not in _OPENPGP_SIGNING_ENVIRONMENT_KEYS or not isinstance(value, str)
         for key, value in values.items()
@@ -737,9 +780,14 @@ def _openpgp_signing_environment(values: Mapping[str, str] | None) -> dict[str, 
     normalized = dict(values)
     if "GNUPGHOME" in normalized:
         home = Path(normalized["GNUPGHOME"])
-        if not home.is_absolute() or not home.is_dir() or home.is_symlink():
-            raise ValueError("GNUPGHOME must be an absolute, non-symlinked directory")
-        normalized["GNUPGHOME"] = str(home.resolve(strict=True))
+        try:
+            trusted_home = resolve_trusted_private_directory(home)
+        except ValueError:
+            raise ValueError(
+                "GNUPGHOME must be an absolute, current-user-owned, "
+                "non-symlinked 0700 directory below trusted ancestors"
+            ) from None
+        normalized["GNUPGHOME"] = str(trusted_home)
     return normalized
 
 
@@ -840,6 +888,113 @@ class GuardianWorkspace:
     def original_sha(self) -> str:
         return self.revision.sha
 
+    def _stage_commit_and_verify(
+        self,
+        *,
+        normalized_paths: tuple[str, ...],
+        message: str,
+        contract: _CommitPipelineContract,
+        sign: bool,
+        signing_key: str | None,
+        signing_environment: Mapping[str, str],
+        author_name: str,
+        author_email: str,
+    ) -> CommitResult:
+        """Stage exact paths, create one commit, and verify its immutable result."""
+
+        self._runner.run(("add", "--", *normalized_paths))
+        staged_status = _porcelain_status(self._runner)
+        if (
+            any(code not in contract.staged_codes for code, _path in staged_status)
+            or tuple(sorted(path for _code, path in staged_status)) != normalized_paths
+        ):
+            raise WorkspaceError(contract.staged_status_error)
+        staged_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff",
+                            "--cached",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "HEAD",
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if staged_paths != normalized_paths:
+            raise WorkspaceError(contract.staged_paths_error)
+
+        command = ["commit", "--cleanup=verbatim", "--file=-"]
+        if sign:
+            if self._runner.signing_format is SigningFormat.SSH:
+                command.append(f"-S{self._runner._ssh_material().public_key}")
+            else:
+                command.append("-S" if signing_key is None else f"-S{signing_key}")
+        else:
+            command.append("--no-gpg-sign")
+        identity_environment = {
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_AUTHOR_NAME": author_name,
+            "GIT_COMMITTER_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": author_name,
+            **signing_environment,
+        }
+        self._runner.run(
+            tuple(command),
+            extra_environment=identity_environment,
+            input_text=message,
+        )
+
+        commit_sha = self._runner.revision("HEAD^{commit}")
+        parent_sha = self._runner.revision("HEAD^1^{commit}")
+        if parent_sha != self.original_sha:
+            raise WorkspaceError(contract.parent_error)
+        changed_paths = tuple(
+            sorted(
+                _split_nul_paths(
+                    self._runner.run(
+                        (
+                            "diff-tree",
+                            "--no-commit-id",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "-r",
+                            parent_sha,
+                            commit_sha,
+                            "--",
+                        )
+                    ).stdout
+                )
+            )
+        )
+        if changed_paths != normalized_paths:
+            raise WorkspaceError(contract.changed_paths_error)
+        if sign:
+            _verify_commit_signature(
+                self._runner,
+                commit_sha,
+                signing_key=signing_key,
+                signing_environment=(
+                    {}
+                    if self._runner.signing_format is SigningFormat.SSH
+                    else signing_environment
+                ),
+            )
+        if _porcelain_status(self._runner):
+            raise WorkspaceError(contract.dirty_tree_error)
+        return CommitResult(
+            commit_sha=commit_sha,
+            parent_sha=parent_sha,
+            changed_paths=changed_paths,
+            signature_verified=sign,
+        )
+
     def commit_validated_changes(
         self,
         *,
@@ -891,33 +1046,6 @@ class GuardianWorkspace:
         ):
             raise WorkspaceError("unexpected working-tree changes are present")
 
-        self._runner.run(("add", "--", *normalized_paths))
-        staged_status = _porcelain_status(self._runner)
-        if (
-            any(code != "M " for code, _path in staged_status)
-            or tuple(sorted(path for _code, path in staged_status)) != normalized_paths
-        ):
-            raise WorkspaceError("working tree changed while Guardian staged its edit")
-        staged_paths = tuple(
-            sorted(
-                _split_nul_paths(
-                    self._runner.run(
-                        (
-                            "diff",
-                            "--cached",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            "HEAD",
-                            "--",
-                        )
-                    ).stdout
-                )
-            )
-        )
-        if staged_paths != normalized_paths:
-            raise WorkspaceError("staged paths do not match the exact Guardian allowlist")
-
         message_lines = [
             _COMMIT_SUBJECT,
             "",
@@ -927,70 +1055,15 @@ class GuardianWorkspace:
             *(f"- {url}" for url in normalized_feedback),
             "",
         ]
-        command = ["commit", "--cleanup=verbatim", "--file=-"]
-        if sign:
-            if self._runner.signing_format is SigningFormat.SSH:
-                command.append(f"-S{self._runner._ssh_material().public_key}")
-            else:
-                command.append("-S" if signing_key is None else f"-S{signing_key}")
-        else:
-            command.append("--no-gpg-sign")
-        identity_environment = {
-            "GIT_AUTHOR_EMAIL": author_email,
-            "GIT_AUTHOR_NAME": author_name,
-            "GIT_COMMITTER_EMAIL": author_email,
-            "GIT_COMMITTER_NAME": author_name,
-            **verified_signing_environment,
-        }
-        self._runner.run(
-            tuple(command),
-            extra_environment=identity_environment,
-            input_text="\n".join(message_lines),
-        )
-
-        commit_sha = self._runner.revision("HEAD^{commit}")
-        parent_sha = self._runner.revision("HEAD^1^{commit}")
-        if parent_sha != self.original_sha:
-            raise WorkspaceError("Guardian commit parent does not match the exact intake SHA")
-        changed_paths = tuple(
-            sorted(
-                _split_nul_paths(
-                    self._runner.run(
-                        (
-                            "diff-tree",
-                            "--no-commit-id",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            "-r",
-                            parent_sha,
-                            commit_sha,
-                            "--",
-                        )
-                    ).stdout
-                )
-            )
-        )
-        if changed_paths != normalized_paths:
-            raise WorkspaceError("Guardian commit changed paths outside the exact allowlist")
-        if sign:
-            _verify_commit_signature(
-                self._runner,
-                commit_sha,
-                signing_key=signing_key,
-                signing_environment=(
-                    {}
-                    if self._runner.signing_format is SigningFormat.SSH
-                    else verified_signing_environment
-                ),
-            )
-        if _porcelain_status(self._runner):
-            raise WorkspaceError("working tree is not clean after the Guardian commit")
-        return CommitResult(
-            commit_sha=commit_sha,
-            parent_sha=parent_sha,
-            changed_paths=changed_paths,
-            signature_verified=sign,
+        return self._stage_commit_and_verify(
+            normalized_paths=normalized_paths,
+            message="\n".join(message_lines),
+            contract=_VALIDATED_COMMIT_CONTRACT,
+            sign=sign,
+            signing_key=signing_key,
+            signing_environment=verified_signing_environment,
+            author_name=author_name,
+            author_email=author_email,
         )
 
     def commit_historical_remediation_changes(
@@ -1046,50 +1119,6 @@ class GuardianWorkspace:
                 "unexpected historical remediation working-tree changes are present"
             )
 
-        self._runner.run(("add", "--", *normalized_paths))
-        staged_status = _porcelain_status(self._runner)
-        if (
-            any(code != "M " for code, _path in staged_status)
-            or tuple(sorted(path for _code, path in staged_status))
-            != normalized_paths
-        ):
-            raise WorkspaceError(
-                "historical remediation changed while Guardian staged it"
-            )
-        staged_paths = tuple(
-            sorted(
-                _split_nul_paths(
-                    self._runner.run(
-                        (
-                            "diff",
-                            "--cached",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            "HEAD",
-                            "--",
-                        )
-                    ).stdout
-                )
-            )
-        )
-        if staged_paths != normalized_paths:
-            raise WorkspaceError(
-                "staged remediation paths do not match the exact allowlist"
-            )
-
-        command = ["commit", "--cleanup=verbatim", "--file=-"]
-        if self._runner.signing_format is SigningFormat.SSH:
-            command.append(f"-S{self._runner._ssh_material().public_key}")
-        else:
-            command.append("-S" if signing_key is None else f"-S{signing_key}")
-        identity_environment = {
-            "GIT_AUTHOR_EMAIL": author_email,
-            "GIT_AUTHOR_NAME": author_name,
-            "GIT_COMMITTER_EMAIL": author_email,
-            "GIT_COMMITTER_NAME": author_name,
-            **verified_signing_environment,
-        }
         message_lines = [
             _REMEDIATION_COMMIT_SUBJECT,
             "",
@@ -1101,60 +1130,15 @@ class GuardianWorkspace:
             *(f"- {url}" for url in normalized_feedback),
             "",
         ]
-        self._runner.run(
-            tuple(command),
-            extra_environment=identity_environment,
-            input_text="\n".join(message_lines),
-        )
-
-        commit_sha = self._runner.revision("HEAD^{commit}")
-        parent_sha = self._runner.revision("HEAD^1^{commit}")
-        if parent_sha != self.original_sha:
-            raise WorkspaceError(
-                "historical remediation commit is not a direct child of exact base"
-            )
-        changed_paths = tuple(
-            sorted(
-                _split_nul_paths(
-                    self._runner.run(
-                        (
-                            "diff-tree",
-                            "--no-commit-id",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            "-r",
-                            parent_sha,
-                            commit_sha,
-                            "--",
-                        )
-                    ).stdout
-                )
-            )
-        )
-        if changed_paths != normalized_paths:
-            raise WorkspaceError(
-                "signed remediation commit changed paths outside the exact allowlist"
-            )
-        _verify_commit_signature(
-            self._runner,
-            commit_sha,
+        return self._stage_commit_and_verify(
+            normalized_paths=normalized_paths,
+            message="\n".join(message_lines),
+            contract=_HISTORICAL_REMEDIATION_COMMIT_CONTRACT,
+            sign=True,
             signing_key=signing_key,
-            signing_environment=(
-                {}
-                if self._runner.signing_format is SigningFormat.SSH
-                else verified_signing_environment
-            ),
-        )
-        if _porcelain_status(self._runner):
-            raise WorkspaceError(
-                "working tree is not clean after historical remediation commit"
-            )
-        return CommitResult(
-            commit_sha=commit_sha,
-            parent_sha=parent_sha,
-            changed_paths=changed_paths,
-            signature_verified=True,
+            signing_environment=verified_signing_environment,
+            author_name=author_name,
+            author_email=author_email,
         )
 
     def commit_prevention_changes(
@@ -1198,95 +1182,19 @@ class GuardianWorkspace:
             if code != expected_code:
                 raise WorkspaceError("prevention candidate has an unsupported file operation")
 
-        self._runner.run(("add", "--", *normalized_paths))
-        staged_status = _porcelain_status(self._runner)
-        if tuple(sorted(path for _code, path in staged_status)) != normalized_paths or any(
-            code not in {"M ", "A "} for code, _path in staged_status
-        ):
-            raise WorkspaceError("prevention candidate changed while it was staged")
-        staged_paths = tuple(
-            sorted(
-                _split_nul_paths(
-                    self._runner.run(
-                        (
-                            "diff",
-                            "--cached",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            "HEAD",
-                            "--",
-                        )
-                    ).stdout
-                )
-            )
-        )
-        if staged_paths != normalized_paths:
-            raise WorkspaceError("staged prevention paths do not match the allowlist")
-
-        command = ["commit", "--cleanup=verbatim", "--file=-"]
-        if self._runner.signing_format is SigningFormat.SSH:
-            command.append(f"-S{self._runner._ssh_material().public_key}")
-        else:
-            command.append("-S" if signing_key is None else f"-S{signing_key}")
-        identity_environment = {
-            "GIT_AUTHOR_EMAIL": author_email,
-            "GIT_AUTHOR_NAME": author_name,
-            "GIT_COMMITTER_EMAIL": author_email,
-            "GIT_COMMITTER_NAME": author_name,
-            **verified_signing_environment,
-        }
-        self._runner.run(
-            tuple(command),
-            extra_environment=identity_environment,
-            input_text=(
+        return self._stage_commit_and_verify(
+            normalized_paths=normalized_paths,
+            message=(
                 f"{_PREVENTION_COMMIT_SUBJECT}\n\n"
                 "Created by the Localize Guardian bot for human review.\n\n"
                 f"Prevention evidence: {evidence_hash}\n"
             ),
-        )
-        commit_sha = self._runner.revision("HEAD^{commit}")
-        parent_sha = self._runner.revision("HEAD^1^{commit}")
-        if parent_sha != self.original_sha:
-            raise WorkspaceError("prevention commit is not a direct child of exact base")
-        changed_paths = tuple(
-            sorted(
-                _split_nul_paths(
-                    self._runner.run(
-                        (
-                            "diff-tree",
-                            "--no-commit-id",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            "-r",
-                            parent_sha,
-                            commit_sha,
-                            "--",
-                        )
-                    ).stdout
-                )
-            )
-        )
-        if changed_paths != normalized_paths:
-            raise WorkspaceError("signed prevention commit changed unexpected paths")
-        _verify_commit_signature(
-            self._runner,
-            commit_sha,
+            contract=_PREVENTION_COMMIT_CONTRACT,
+            sign=True,
             signing_key=signing_key,
-            signing_environment=(
-                {}
-                if self._runner.signing_format is SigningFormat.SSH
-                else verified_signing_environment
-            ),
-        )
-        if _porcelain_status(self._runner):
-            raise WorkspaceError("working tree is not clean after prevention commit")
-        return CommitResult(
-            commit_sha=commit_sha,
-            parent_sha=parent_sha,
-            changed_paths=changed_paths,
-            signature_verified=True,
+            signing_environment=verified_signing_environment,
+            author_name=author_name,
+            author_email=author_email,
         )
 
     def publish_prevention_branch(

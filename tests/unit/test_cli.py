@@ -291,7 +291,9 @@ def test_cli_doctor_prints_redacted_effective_config(tmp_path, monkeypatch, caps
     assert "sk-secret-value" not in captured.out
 
 
-def test_cli_doctor_reports_shared_model_defaults(tmp_path, capsys):
+def test_cli_doctor_reports_shared_model_defaults(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    monkeypatch.delenv("REVIEW_MODEL_NAME", raising=False)
     repo = tmp_path / "repo"
     i18n = repo / "i18n"
     i18n.mkdir(parents=True)

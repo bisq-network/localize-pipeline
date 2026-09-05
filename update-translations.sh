@@ -824,6 +824,10 @@ stage_and_submit_batch() {
     git fetch "$REMOTE" "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/${REMOTE}/${DEFAULT_BRANCH}" \
       || log "Warning: failed to fetch $REMOTE/$DEFAULT_BRANCH before branch checkout." "WARNING"
     git checkout -B "$branch" "${REMOTE}/${DEFAULT_BRANCH}"
+    if ! git reset -q; then
+        log "Failed to reset the batch index to '$REMOTE/$DEFAULT_BRANCH'." "ERROR"
+        return 1
+    fi
 
     for bf in "${BATCH_FILES[@]}"; do
         if [ -f "$bf" ]; then
@@ -854,7 +858,8 @@ stage_and_submit_batch() {
     SEMANTIC_REVIEW_EXIT=$?
     set -e
     if [ "$SEMANTIC_REVIEW_EXIT" -ne 0 ]; then
-        log "Semantic AI review failed; continuing with deterministic quality gate only." "WARNING"
+        log "Semantic AI review failed; refusing publication." "ERROR"
+        return 1
     fi
     log "Re-staging translation files after semantic review"
     for bf in "${BATCH_FILES[@]}"; do
@@ -897,6 +902,28 @@ stage_and_submit_batch() {
             log "Translation quality gate failed unexpectedly." "ERROR"
             return 1
         fi
+    fi
+
+    if ! python3 - "${BATCH_FILES[@]}" <<'PY'
+import os
+import subprocess
+import sys
+
+expected = sys.argv[1:]
+result = subprocess.run(
+    ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTD", "-z", "--"],
+    check=True,
+    stdout=subprocess.PIPE,
+)
+actual = [os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
+if len(expected) != len(set(expected)) or len(actual) != len(set(actual)):
+    raise SystemExit("duplicate paths in translation batch or staged index")
+if set(actual) != set(expected):
+    raise SystemExit("staged paths do not exactly match the current translation batch")
+PY
+    then
+        log "Staged paths do not exactly match branch '$branch'; refusing commit." "ERROR"
+        return 1
     fi
 
     if ! commit_staged_changes "$commit_msg"; then

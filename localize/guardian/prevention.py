@@ -479,7 +479,7 @@ def _validate_globs(values: Sequence[str], *, label: str) -> tuple[str, ...]:
                 and len(value.encode("utf-8")) > _MAX_ARGUMENT_BYTES
             ):
                 raise PreventionPolicyError(
-                    f"{label} path glob exceeds 4096 UTF-8 bytes"
+                    f"{label} path glob exceeds {_MAX_ARGUMENT_BYTES} UTF-8 bytes"
                 )
             raise PreventionPolicyError(f"{label} path glob is unsafe")
         parts = value.split("/")

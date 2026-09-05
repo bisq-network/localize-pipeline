@@ -613,7 +613,42 @@ def test_codex_driver_does_not_retry_permanent_auth_failures(tmp_path, monkeypat
 
     assert calls == 1
     assert api_key not in str(exc_info.value)
-    assert "[REDACTED_CODEX_API_KEY]" in str(exc_info.value)
+    assert "diagnostic output withheld" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("secret", "diagnostic"),
+    (
+        (
+            'sk-quoted-"-backslash-\\-snow-雪',
+            '{"error":"sk-quoted-\\"-backslash-\\\\-snow-\\u96ea"}',
+        ),
+        ("sk-provider/a+b", '{"error":"sk-provider\\/a+b"}'),
+        ("sk-雪", '{"error":"sk-\\u96EA"}'),
+        (
+            'sk-"\\tail',
+            '{"outer":"{\\"error\\":\\"sk-\\\\\\"\\\\\\\\tail\\"}"}',
+        ),
+    ),
+)
+def test_codex_diagnostic_redaction_withholds_all_credential_output_forms(
+    secret: str,
+    diagnostic: str,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        ("codex",),
+        1,
+        stdout=diagnostic,
+        stderr="",
+    )
+
+    detail = codex._redacted_detail(  # noqa: SLF001
+        completed,
+        {"CODEX_API_KEY": secret},
+    )
+
+    assert detail == "diagnostic output withheld because a model credential was present"
+    assert diagnostic not in detail
 
 
 def test_codex_driver_does_not_retry_exhausted_plan_allowance(tmp_path, monkeypatch):

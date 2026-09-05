@@ -29,6 +29,7 @@ runtime:
   # mode additionally requires an absolute model-key helper, and write modes an
   # absolute signing program. Keep helpers outside monitored repositories.
   # codex_executable: /absolute/path/to/codex
+  # git_executable: /absolute/path/to/git
   # github_token_command: [/absolute/path/to/github-token-helper]
   # API billing is explicit opt-in. Change codex_auth_mode to api-key, set this
   # helper, and uncomment both USD limits below.
@@ -111,7 +112,8 @@ repositories:
     # and requires a narrower lookback. Each selected PR gets three immediate
     # hydration attempts before a current-cycle skip and durable priority retry
     # on later polls, including outside the discovery window.
-    # A pending multi-source remediation batch is recovered as one atomic group.
+    # A pending multi-source remediation batch is recovered as one bounded,
+    # all-or-nothing local-state group; final remote checks are sequential.
     # The time window admits new evidence only; durable hydration retries remain
     # prioritized even after their source PRs leave that window, so a durable
     # pending group cannot age out. Historical PRs are read-only evidence
@@ -155,15 +157,17 @@ repositories:
     # Prevention is intentionally absent in the report-only default. To use
     # `propose-prevention`, every repository needs its own explicit block like
     # the one below, with operator-controlled IDs, refs, paths, tests, and a
-    # credential-free test environment and operator-maintained sandbox prefix.
-    # Guardian probes the exact prefix before each command. The probe requires
+    # credential-free test environment and one directly invoked, operator-
+    # maintained sandbox wrapper. Guardian probes the exact wrapper before each
+    # command. The probe requires
     # workspace read/write, denies outside read/write, and denies AF_INET bind,
     # loopback-connect, and (where supported) filesystem AF_UNIX-connect canaries.
     # Commands are argv arrays, never shell. Exact checkouts have no ignored
     # project venv, so use an absolute operator-controlled test interpreter.
     # Hard bounds: <=100 code globs, <=100 test globs, <=64 focused commands,
-    # <=256 strings per focused argv or sandbox prefix, and <=4096 UTF-8 bytes
-    # per string. max_changed_files is <=100. The branch prefix must leave 77
+    # <=256 strings per focused argv, exactly one sandbox-wrapper executable,
+    # and <=4096 UTF-8 bytes per string. max_changed_files is <=100. The branch
+    # prefix must leave 77
     # characters inside Git's 255-character generated branch-name limit.
     # Canonical policy and maximum test-result attestations must each fit 512 KiB;
     # combining many individually maximal strings can therefore still fail closed.
@@ -195,10 +199,7 @@ repositories:
     #   focused_test_argv:
     #     - [/absolute/path/to/python, -m, pytest, tests/unit/test_rules.py, -q]
     #   sandbox_argv_prefix:
-    #     - /usr/bin/sandbox-exec
-    #     - -f
-    #     - /Users/operator/.config/localize-guardian/test.sb
-    #     - --
+    #     - /absolute/path/to/guardian-sandbox-wrapper
     #   max_changed_files: 4
     #   max_changed_bytes: 262144
     #   private_target_model_opt_in: false

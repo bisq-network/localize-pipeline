@@ -22,12 +22,13 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from localize.guardian.deadline import PollDeadline
+from localize.guardian.deadline import PollDeadline, deadline_httpx_timeout
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
     SecretCommand,
 )
+from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.models import AllowedHeadRepository, TrustedActor
 
 
@@ -50,9 +51,7 @@ _MAX_REPOSITORY_PATH_BYTES = 4096
 _MAX_CLOSED_PULL_REQUESTS_PER_POLL = 100
 _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL = 100
 _MAX_CLOSED_PULL_HYDRATION_ATTEMPTS = 3
-_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE = (
-    _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL * 100
-)
+_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE = _MAX_CLOSED_PULL_LIST_PAGES_PER_POLL * 100
 _MAX_CLOSED_PULL_EXCLUSIONS = _MAX_PAGINATION_ITEMS
 
 _RATE_LIMIT_MARKERS = (
@@ -158,7 +157,9 @@ class GitHubRepositoryPolicy:
         if not self.allowed_pr_authors:
             raise ValueError("allowed_pr_authors must contain typed numeric identities")
         if not self.allowed_head_owners:
-            raise ValueError("allowed_head_owners must contain typed numeric identities")
+            raise ValueError(
+                "allowed_head_owners must contain typed numeric identities"
+            )
         if not self.allowed_head_repositories:
             raise ValueError("allowed_head_repositories must contain exact identities")
         if not self.branch_globs or any(
@@ -170,7 +171,10 @@ class GitHubRepositoryPolicy:
     def permits(self, pull_request: "PullRequestSnapshot") -> bool:
         if pull_request.repository != self.repository:
             return False
-        if self.repository_id is not None and pull_request.base_repository_id != self.repository_id:
+        if (
+            self.repository_id is not None
+            and pull_request.base_repository_id != self.repository_id
+        ):
             return False
         if pull_request.base_ref != self.base_branch:
             return False
@@ -206,7 +210,9 @@ class GitHubRepositoryPolicy:
         )
         if head_repository is None:
             return False
-        return any(fnmatchcase(pull_request.head_ref, pattern) for pattern in self.branch_globs)
+        return any(
+            fnmatchcase(pull_request.head_ref, pattern) for pattern in self.branch_globs
+        )
 
 
 @dataclass(frozen=True)
@@ -317,30 +323,40 @@ class ChangedFile:
 
 @dataclass(frozen=True)
 class OpenPullPathIdentity:
-    """Exact identity permitted to be excluded from an open-path fence."""
+    """Open-pull identity, exact only while its head repository still exists."""
 
     repository: str
     repository_id: int
     pull_id: int
     number: int
     head_repository: str
-    head_repository_id: int
+    head_repository_id: int | None
     head_ref: str
     head_sha: str
 
     def __post_init__(self) -> None:
-        if not _valid_repository_name(self.repository) or not _valid_repository_name(
-            self.head_repository
-        ):
+        if not _valid_repository_name(self.repository):
             raise ValueError("open pull repositories must use owner/name form")
+        if not isinstance(self.head_repository, str):
+            raise ValueError("open pull head repository identity is malformed")
+        exact_head_repository = self.head_repository_id is not None
+        if (not exact_head_repository and self.head_repository != "") or (
+            exact_head_repository and not _valid_repository_name(self.head_repository)
+        ):
+            raise ValueError("open pull head repository identity is malformed")
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
             for value in (
                 self.repository_id,
                 self.pull_id,
                 self.number,
-                self.head_repository_id,
             )
+        ):
+            raise ValueError("open pull numeric identities must be positive integers")
+        if exact_head_repository and (
+            isinstance(self.head_repository_id, bool)
+            or not isinstance(self.head_repository_id, int)
+            or self.head_repository_id <= 0
         ):
             raise ValueError("open pull numeric identities must be positive integers")
         if (
@@ -481,7 +497,9 @@ def _optional_int(value: Any, *, label: str) -> int | None:
     return value
 
 
-def _parse_pull_request(repository: str, payload: Mapping[str, Any]) -> PullRequestSnapshot:
+def _parse_pull_request(
+    repository: str, payload: Mapping[str, Any]
+) -> PullRequestSnapshot:
     head = _as_mapping(payload.get("head"), label="pull-request head")
     base = _as_mapping(payload.get("base"), label="pull-request base")
     # GitHub returns ``head.repo: null`` after a contributor deletes a fork.
@@ -579,7 +597,9 @@ def _parse_feedback(
         pull_number=pull_number,
         kind=kind,
         source_id=source_id,
-        node_id=str(payload.get("node_id")) if payload.get("node_id") is not None else None,
+        node_id=str(payload.get("node_id"))
+        if payload.get("node_id") is not None
+        else None,
         author_login=str(user.get("login") or ""),
         author_id=_optional_int(user.get("id"), label="feedback author id"),
         author_type=str(user.get("type") or ""),
@@ -587,10 +607,14 @@ def _parse_feedback(
         created_at=created_at,
         updated_at=updated_at,
         html_url=str(payload.get("html_url") or ""),
-        review_state=str(payload.get("state")) if payload.get("state") is not None else None,
+        review_state=str(payload.get("state"))
+        if payload.get("state") is not None
+        else None,
         path=str(payload.get("path")) if payload.get("path") is not None else None,
         line=line,
-        commit_id=str(payload.get("commit_id")) if payload.get("commit_id") is not None else None,
+        commit_id=str(payload.get("commit_id"))
+        if payload.get("commit_id") is not None
+        else None,
     )
 
 
@@ -604,9 +628,7 @@ def _parse_changed_file(payload: Mapping[str, Any]) -> ChangedFile:
             if payload.get("previous_filename") is not None
             else None
         ),
-        patch=(
-            str(payload.get("patch")) if payload.get("patch") is not None else None
-        ),
+        patch=(str(payload.get("patch")) if payload.get("patch") is not None else None),
     )
 
 
@@ -628,7 +650,11 @@ def _latest_by_object(
     latest: dict[tuple[str, int, FeedbackKind, str], FeedbackRevision] = {}
     for revision in feedback:
         current = latest.get(revision.object_key)
-        if current is None or (revision.updated_at, revision.deleted, revision.revision_id) > (
+        if current is None or (
+            revision.updated_at,
+            revision.deleted,
+            revision.revision_id,
+        ) > (
             current.updated_at,
             current.deleted,
             current.revision_id,
@@ -667,29 +693,14 @@ class _GitHubHTTP:
         self.deadline = deadline
 
     def _request_timeout(self) -> httpx.Timeout:
-        if self.deadline is None:
-            return self.client.timeout
-        remaining = self.deadline.remaining()
-        configured = self.client.timeout
-
-        def clamp(value: float | None) -> float:
-            return remaining if value is None else min(float(value), remaining)
-
-        return httpx.Timeout(
-            connect=clamp(configured.connect),
-            read=clamp(configured.read),
-            write=clamp(configured.write),
-            pool=clamp(configured.pool),
-        )
+        return deadline_httpx_timeout(self.deadline, self.client.timeout)
 
     @staticmethod
     def _raise_for_status(response: httpx.Response, *, method: str) -> None:
         if 200 <= response.status_code < 300:
             return
         retry_after = response.headers.get("retry-after", "").strip()
-        rate_limit_remaining = response.headers.get(
-            "x-ratelimit-remaining", ""
-        ).strip()
+        rate_limit_remaining = response.headers.get("x-ratelimit-remaining", "").strip()
         rate_limit_reset = response.headers.get("x-ratelimit-reset", "").strip()
         is_rate_limited = bool(retry_after) or (
             rate_limit_remaining == "0" and bool(rate_limit_reset)
@@ -722,11 +733,9 @@ class _GitHubHTTP:
         except httpx.HTTPError as exc:
             raise GitHubAPIError(f"GitHub API {label} response failed") from exc
         try:
-            return json.loads(content)
+            return loads_bounded_json(content)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-            raise GitHubAPIError(
-                f"GitHub API {label} returned invalid JSON"
-            ) from exc
+            raise GitHubAPIError(f"GitHub API {label} returned invalid JSON") from exc
 
     def request_json(
         self,
@@ -813,7 +822,9 @@ class _GitHubHTTP:
             except httpx.HTTPError as exc:
                 raise GitHubAPIError("GitHub API GET request failed") from exc
             if not isinstance(page, list):
-                raise GitHubAPIError("GitHub API GET returned malformed pagination data")
+                raise GitHubAPIError(
+                    "GitHub API GET returned malformed pagination data"
+                )
             if len(items) + len(page) > effective_item_limit:
                 raise GitHubAPIError("GitHub API pagination item limit was exceeded")
             for item in page:
@@ -848,7 +859,10 @@ class GitHubReader:
         repository_id = _as_int(payload.get("id"), label="repository id")
         if full_name != self.policy.repository:
             raise PolicyViolation("GitHub repository identity no longer matches policy")
-        if self.policy.repository_id is not None and repository_id != self.policy.repository_id:
+        if (
+            self.policy.repository_id is not None
+            and repository_id != self.policy.repository_id
+        ):
             raise PolicyViolation("GitHub repository id no longer matches policy")
         private = payload.get("private")
         if not isinstance(private, bool):
@@ -954,9 +968,7 @@ class GitHubReader:
         self,
         *,
         previous_feedback: Iterable[FeedbackRevision] = (),
-        previous_feedback_for_pull: Callable[
-            [int], Iterable[FeedbackRevision]
-        ]
+        previous_feedback_for_pull: Callable[[int], Iterable[FeedbackRevision]]
         | None = None,
     ) -> tuple[PullRequestFeedbackSnapshot, ...]:
         """Poll all open PRs; never gate discovery on PR creation time or head SHA."""
@@ -977,9 +989,9 @@ class GitHubReader:
             dict[tuple[str, int, FeedbackKind, str], FeedbackRevision],
         ] = {}
 
-        def previous_for(pull_number: int) -> Mapping[
-            tuple[str, int, FeedbackKind, str], FeedbackRevision
-        ]:
+        def previous_for(
+            pull_number: int,
+        ) -> Mapping[tuple[str, int, FeedbackKind, str], FeedbackRevision]:
             if previous_feedback_for_pull is None:
                 return previous_by_pull.get(pull_number, {})
             if pull_number not in loaded_previous:
@@ -1047,9 +1059,7 @@ class GitHubReader:
                 pull_ids.add(pull.pull_id)
                 pull_numbers.add(pull.number)
                 pulls.append(pull)
-            return tuple(
-                sorted(pulls, key=lambda item: (item.number, item.pull_id))
-            )
+            return tuple(sorted(pulls, key=lambda item: (item.number, item.pull_id)))
 
         def changed_files(pull: PullRequestSnapshot) -> tuple[ChangedFile, ...]:
             changed = tuple(
@@ -1130,11 +1140,9 @@ class GitHubReader:
                     label="open pull path-authority revalidation",
                 ),
             )
-            if (
-                final_pull.state.casefold() != "open"
-                or _pull_hydration_identity(final_pull)
-                != _pull_hydration_identity(pull)
-            ):
+            if final_pull.state.casefold() != "open" or _pull_hydration_identity(
+                final_pull
+            ) != _pull_hydration_identity(pull):
                 raise GitHubAPIError(
                     "GitHub open pull changed during path-authority hydration"
                 )
@@ -1146,11 +1154,7 @@ class GitHubReader:
                         pull_id=pull.pull_id,
                         number=pull.number,
                         head_repository=pull.head_repository,
-                        head_repository_id=(
-                            pull.head_repository_id
-                            if pull.head_repository_id is not None
-                            else 0
-                        ),
+                        head_repository_id=pull.head_repository_id,
                         head_ref=pull.head_ref,
                         head_sha=pull.head_sha,
                     ),
@@ -1199,9 +1203,7 @@ class GitHubReader:
             not isinstance(expected_pull, tuple)
             or len(expected_pull) != 2
             or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value <= 0
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
                 for value in expected_pull
             )
         ):
@@ -1251,9 +1253,7 @@ class GitHubReader:
                 not isinstance(identity, tuple)
                 or len(identity) != 2
                 or any(
-                    isinstance(value, bool)
-                    or not isinstance(value, int)
-                    or value <= 0
+                    isinstance(value, bool) or not isinstance(value, int) or value <= 0
                     for value in identity
                 )
             ):
@@ -1261,10 +1261,7 @@ class GitHubReader:
                     "exact closed pull identities must contain positive integer pairs"
                 )
             pull_id, pull_number = identity
-            if (
-                pull_id in pull_numbers_by_id
-                or pull_number in pull_ids_by_number
-            ):
+            if pull_id in pull_numbers_by_id or pull_number in pull_ids_by_number:
                 raise ValueError(
                     "exact closed pull identities must be unique by id and number"
                 )
@@ -1311,9 +1308,7 @@ class GitHubReader:
         excluded_pulls: Iterable[tuple[int, int]] = (),
         priority_pull_groups: Iterable[Iterable[tuple[int, int]]] = (),
         previous_feedback: Iterable[FeedbackRevision] = (),
-        previous_feedback_for_pull: Callable[
-            [int], Iterable[FeedbackRevision]
-        ]
+        previous_feedback_for_pull: Callable[[int], Iterable[FeedbackRevision]]
         | None = None,
     ) -> ClosedPullScanResult:
         """Restart at page one and hydrate bounded unseen pulls in one window."""
@@ -1330,9 +1325,7 @@ class GitHubReader:
         if (
             isinstance(max_prs_per_poll, bool)
             or not isinstance(max_prs_per_poll, int)
-            or not 1
-            <= max_prs_per_poll
-            <= _MAX_CLOSED_PULL_REQUESTS_PER_POLL
+            or not 1 <= max_prs_per_poll <= _MAX_CLOSED_PULL_REQUESTS_PER_POLL
         ):
             raise ValueError(
                 "max_prs_per_poll must be between 1 and "
@@ -1408,9 +1401,7 @@ class GitHubReader:
             raise ValueError("priority_pull_groups must not contain empty groups")
         priorities = tuple(identity for group in priority_groups for identity in group)
         if len(priorities) > max_prs_per_poll:
-            raise ValueError(
-                "priority_pull_groups must fit within max_prs_per_poll"
-            )
+            raise ValueError("priority_pull_groups must fit within max_prs_per_poll")
         normalized_identities(
             priorities,
             label="priority pull identities",
@@ -1418,9 +1409,7 @@ class GitHubReader:
         )
         priority_set = frozenset(priorities)
         if priority_set & excluded:
-            raise ValueError(
-                "priority_pull_groups must not overlap excluded_pulls"
-            )
+            raise ValueError("priority_pull_groups must not overlap excluded_pulls")
         normalized_identities(
             tuple(dict.fromkeys((*seen, *priorities))),
             label="closed pull identities",
@@ -1439,9 +1428,9 @@ class GitHubReader:
             dict[tuple[str, int, FeedbackKind, str], FeedbackRevision],
         ] = {}
 
-        def previous_for(pull_number: int) -> Mapping[
-            tuple[str, int, FeedbackKind, str], FeedbackRevision
-        ]:
+        def previous_for(
+            pull_number: int,
+        ) -> Mapping[tuple[str, int, FeedbackKind, str], FeedbackRevision]:
             if previous_feedback_for_pull is None:
                 return previous_by_pull.get(pull_number, {})
             if pull_number not in loaded_previous:
@@ -1540,9 +1529,7 @@ class GitHubReader:
                     },
                 )
                 if not isinstance(raw_page, list) or len(raw_page) > 100:
-                    raise GitHubAPIError(
-                        "GitHub returned a malformed closed-pull page"
-                    )
+                    raise GitHubAPIError("GitHub returned a malformed closed-pull page")
                 if not raw_page:
                     return True
                 for raw in raw_page:
@@ -1634,10 +1621,7 @@ class GitHubReader:
                     # durable, already-authorized recovery group: a published branch
                     # can still need reconciliation after its source PR ages out (or
                     # moves beyond the cycle's frozen upper bound).
-                    if (
-                        pull.state != "closed"
-                        or not self.policy.permits(pull)
-                    ):
+                    if pull.state != "closed" or not self.policy.permits(pull):
                         group_is_eligible = False
                     group_pulls.append(pull)
             except GitHubAuthenticationError:
@@ -1649,8 +1633,7 @@ class GitHubReader:
                 )
                 if (
                     hydration_attempts >= max_prs_per_poll
-                    or len(covered_identities)
-                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                    or len(covered_identities) >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
                 ):
                     return ClosedPullScanResult(
                         items=tuple(items),
@@ -1662,8 +1645,7 @@ class GitHubReader:
                 record_priority_group_failure(priority_group)
                 if (
                     hydration_attempts >= max_prs_per_poll
-                    or len(covered_identities)
-                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                    or len(covered_identities) >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
                 ):
                     return ClosedPullScanResult(
                         items=tuple(items),
@@ -1693,8 +1675,7 @@ class GitHubReader:
                 ]
             if (
                 hydration_attempts >= max_prs_per_poll
-                or len(covered_identities)
-                >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                or len(covered_identities) >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
             ):
                 return ClosedPullScanResult(
                     items=tuple(items),
@@ -1758,10 +1739,7 @@ class GitHubReader:
                 seen_pull_identities.add(identity)
                 pull_numbers_by_id[pull.pull_id] = pull.number
                 pull_ids_by_number[pull.number] = pull.pull_id
-                if (
-                    previous_updated_at is not None
-                    and updated_at > previous_updated_at
-                ):
+                if previous_updated_at is not None and updated_at > previous_updated_at:
                     raise GitHubAPIError(
                         "GitHub closed pulls were not in descending updated_at order"
                     )
@@ -1785,10 +1763,7 @@ class GitHubReader:
                     or not self.policy.permits(pull)
                 ):
                     continue
-                if (
-                    len(covered_identities)
-                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
-                ):
+                if len(covered_identities) >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE:
                     raise GitHubAPIError(
                         "GitHub closed-pull hydration would exceed the "
                         f"{_MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE:,}-identity "
@@ -1800,8 +1775,7 @@ class GitHubReader:
                 )
                 if (
                     hydration_attempts >= max_prs_per_poll
-                    or len(covered_identities)
-                    >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
+                    or len(covered_identities) >= _MAX_CLOSED_PULL_IDENTITIES_PER_CYCLE
                 ):
                     at_known_end = len(raw_page) < 100 and offset == len(raw_page) - 1
                     return ClosedPullScanResult(
@@ -1850,6 +1824,7 @@ class GitHubReader:
                 f"/repos/{self.policy.repository}/pulls/{pull.number}/comments",
             ),
         )
+
         def collect_material() -> tuple[
             tuple[FeedbackRevision, ...],
             tuple[ChangedFile, ...],
@@ -1924,10 +1899,7 @@ class GitHubReader:
 
         current, changed_files = collect_material()
         confirmed_feedback, confirmed_changed_files = collect_material()
-        if (
-            confirmed_feedback != current
-            or confirmed_changed_files != changed_files
-        ):
+        if confirmed_feedback != current or confirmed_changed_files != changed_files:
             raise GitHubAPIError("GitHub pull request changed during hydration")
 
         final_pull = _parse_pull_request(
@@ -1949,10 +1921,7 @@ class GitHubReader:
 
         current_by_object = {revision.object_key: revision for revision in current}
         for object_key, old_revision in previous_by_object.items():
-            if (
-                object_key[0] != self.policy.repository
-                or object_key[1] != pull.number
-            ):
+            if object_key[0] != self.policy.repository or object_key[1] != pull.number:
                 continue
             if object_key not in current_by_object and not old_revision.deleted:
                 current_by_object[object_key] = replace(
@@ -1966,14 +1935,16 @@ class GitHubReader:
                 "GitHub pull-request feedback authority exceeded the intake bound"
             )
 
-        current = tuple(sorted(
-            current_by_object.values(),
-            key=lambda item: (
-                item.kind.value,
-                int(item.source_id),
-                item.revision_id,
-            ),
-        ))
+        current = tuple(
+            sorted(
+                current_by_object.values(),
+                key=lambda item: (
+                    item.kind.value,
+                    int(item.source_id),
+                    item.revision_id,
+                ),
+            )
+        )
         visible = tuple(item for item in current if not item.deleted)
         return PullRequestFeedbackSnapshot(
             repository_identity=repository_identity,
@@ -2080,7 +2051,10 @@ class GitHubWriteBroker:
         if str(payload.get("full_name") or "") != self.policy.repository:
             raise PolicyViolation("GitHub repository identity no longer matches policy")
         repository_id = _as_int(payload.get("id"), label="repository id")
-        if self.policy.repository_id is not None and repository_id != self.policy.repository_id:
+        if (
+            self.policy.repository_id is not None
+            and repository_id != self.policy.repository_id
+        ):
             raise PolicyViolation("GitHub repository id no longer matches policy")
 
     def _fresh_pull(
@@ -2259,7 +2233,9 @@ class GitHubWriteBroker:
         self._validate_sha(commit_sha, label="commit_sha")
         self._validate_expected_actor(expected_actor)
         if commit_sha != expected_head_sha:
-            raise PolicyViolation("status reply commit is not the current reviewed head")
+            raise PolicyViolation(
+                "status reply commit is not the current reviewed head"
+            )
         self._validate_marker_id(action_id, label="action_id")
         self._validate_marker_id(event_revision_id, label="event_revision_id")
         marker = self._reply_marker(action_id, event_revision_id)
@@ -2274,7 +2250,9 @@ class GitHubWriteBroker:
                 expected_head_sha=expected_head_sha,
                 expected_base_sha=expected_base_sha,
             )
-            comments_url = f"/repos/{self.policy.repository}/issues/{pull_number}/comments"
+            comments_url = (
+                f"/repos/{self.policy.repository}/issues/{pull_number}/comments"
+            )
             body = self._reply_body(
                 marker=marker,
                 head_repository=pull.head_repository,
@@ -2303,6 +2281,9 @@ class GitHubWriteBroker:
             if before_create is not None:
                 before_create()
             self._require_expected_actor(http, expected_actor=expected_actor)
+            # The source callback may perform slow local preparation and
+            # remote hydration. Re-read the destination only after it and the
+            # writer identity are both current, immediately before the POST.
             pull = self._fresh_pull(
                 http,
                 pull_number=pull_number,
@@ -2315,8 +2296,11 @@ class GitHubWriteBroker:
                 commit_sha=commit_sha,
             )
             if before_create is not None:
+                # The exact source snapshot includes the pull authority and
+                # trusted feedback that the destination-only read above does
+                # not hydrate. Keep that full source authority as the final
+                # remote observation before the irreversible comment POST.
                 before_create()
-            self._require_expected_actor(http, expected_actor=expected_actor)
             created = _as_mapping(
                 http.request_json("POST", comments_url, payload={"body": fresh_body}),
                 label="created comment",

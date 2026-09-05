@@ -6,6 +6,11 @@ import math
 import time
 from collections.abc import Callable
 
+import httpx
+
+
+_MAX_HTTP_PHASE_SLICE_SECONDS = 5.0
+
 
 class PollDeadlineExceeded(RuntimeError):
     """The current poll exhausted its wall-clock budget."""
@@ -53,4 +58,35 @@ class PollDeadline:
         self.remaining()
 
 
-__all__ = ("PollDeadline", "PollDeadlineExceeded")
+def deadline_httpx_timeout(
+    deadline: PollDeadline | None,
+    configured: float | httpx.Timeout,
+) -> httpx.Timeout:
+    """Bound each synchronous HTTP phase within one poll deadline.
+
+    HTTPX applies pool/connect/write/read limits independently. When a poll
+    deadline exists, reserve at most one quarter of the current remainder for
+    each phase and cap every blocking phase at five seconds. Streaming callers
+    still recheck the absolute deadline after every received chunk.
+    """
+
+    timeout = configured if isinstance(configured, httpx.Timeout) else httpx.Timeout(configured)
+    if deadline is None:
+        return timeout
+    phase_budget = min(
+        _MAX_HTTP_PHASE_SLICE_SECONDS,
+        deadline.remaining() / 4,
+    )
+
+    def clamp(value: float | None) -> float:
+        return phase_budget if value is None else min(float(value), phase_budget)
+
+    return httpx.Timeout(
+        connect=clamp(timeout.connect),
+        read=clamp(timeout.read),
+        write=clamp(timeout.write),
+        pool=clamp(timeout.pool),
+    )
+
+
+__all__ = ("PollDeadline", "PollDeadlineExceeded", "deadline_httpx_timeout")

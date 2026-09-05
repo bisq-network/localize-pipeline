@@ -104,7 +104,7 @@ def _prevention_policy() -> PreventionPolicy:
         focused_test_argv=(
             ("/opt/localize-guardian/bin/pytest", "tests/unit/test_rule.py", "-q"),
         ),
-        sandbox_argv_prefix=("/usr/bin/sandbox-exec", "-f", "/safe.sb"),
+        sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=16_384,
     )
@@ -130,8 +130,8 @@ def _config(mode: GuardianMode = GuardianMode.OBSERVE) -> GuardianConfig:
             codex_executable="/opt/bin/codex",
             git_executable="/opt/bin/git",
             signing_program="/opt/bin/gpg",
-            github_token_command=("/opt/bin/github-token", "read"),
-            codex_api_key_command=("/opt/bin/model-token", "read"),
+            github_token_command=("/opt/bin/github-token",),
+            codex_api_key_command=("/opt/bin/model-token",),
             signing_key="A" * 40,
         ),
     )
@@ -258,6 +258,41 @@ def test_scheduled_executable_authority_is_rechecked_at_runtime(tmp_path: Path) 
     Path(commands[0]).chmod(0o722)
     with pytest.raises(runtime.GuardianRuntimeError, match="executable authority"):
         runtime._validate_scheduled_executables(config)
+
+
+def test_scheduled_authority_uses_direct_helper_and_sandbox_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(GuardianMode.PROPOSE_PREVENTION)
+    ordinary_fields: list[str] = []
+    direct_fields: list[str] = []
+    wrapper_fields: list[str] = []
+    monkeypatch.setattr(
+        runtime,
+        "require_absolute_trusted_executable",
+        lambda _command, *, field: ordinary_fields.append(field),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "require_absolute_trusted_direct_executable",
+        lambda _command, *, field, **_kwargs: direct_fields.append(field),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "require_absolute_trusted_wrapper",
+        lambda _command, *, field: wrapper_fields.append(field),
+    )
+
+    runtime._validate_scheduled_executables(config)
+
+    assert direct_fields == [
+        "runtime.github_token_command",
+        "runtime.codex_api_key_command",
+    ]
+    assert wrapper_fields == [
+        "repositories.0.prevention.sandbox_argv_prefix",
+    ]
+    assert "repositories.0.prevention.focused_test_argv" in ordinary_fields
 
 
 def test_scheduled_signing_program_is_required_only_for_write_modes(

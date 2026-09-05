@@ -17,7 +17,10 @@ import pytest
 import yaml
 
 from localize.guardian import controller as guardian_controller
-from localize.guardian.authorization import authorize_historical_feedback
+from localize.guardian.authorization import (
+    authorize_feedback,
+    authorize_historical_feedback,
+)
 from localize.guardian.codex import (
     CodexAuthenticationError,
     CodexCapacityError,
@@ -120,7 +123,7 @@ def _insert_legacy_publication(
     occurred_at: datetime,
     phase: str = "prepared",
 ) -> str:
-    """Seed a pre-v8 publication, then let v8 migrate its actor to NULL."""
+    """Seed a pre-v8 publication, then exercise the v7-to-current migration."""
 
     assert phase in {"prepared", "replied"}
     payload = (
@@ -128,7 +131,7 @@ def _insert_legacy_publication(
     )
     publication_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
         # Restore the pre-v8 table shape while the production connection is
         # closed. The next GuardianState open performs the real v7 -> v8
         # migration and reinstalls every dropped production trigger.
@@ -141,10 +144,13 @@ def _insert_legacy_publication(
             "publication_events_replied_complete",
             "publication_events_abandoned_complete",
             "publication_events_actor_safe",
+            "publication_events_repository_id_safe",
             "publication_completion_plans_prepared",
             "remediation_successor_intents_prepared",
         ):
             connection.execute(f"DROP TRIGGER {trigger}")  # noqa: S608
+        connection.execute("DROP INDEX publication_events_pending_by_repository_id")
+        connection.execute("DROP INDEX publication_events_replied_by_repository_id")
         connection.execute(
             "ALTER TABLE publication_completion_plan_items "
             "DROP COLUMN publication_actor_type"
@@ -159,6 +165,7 @@ def _insert_legacy_publication(
         connection.execute(
             "ALTER TABLE publication_events DROP COLUMN publication_actor_id"
         )
+        connection.execute("ALTER TABLE publication_events DROP COLUMN repository_id")
         connection.execute("PRAGMA user_version = 7")
         connection.execute(
             """
@@ -281,7 +288,7 @@ def _prevention_policy() -> PreventionPolicy:
         focused_test_argv=(
             ("/opt/localize/venv/bin/pytest", "tests/unit/test_rule.py", "-q"),
         ),
-        sandbox_argv_prefix=("/usr/bin/sandbox-exec", "-f", "/safe.sb"),
+        sandbox_argv_prefix=("/usr/bin/guardian-sandbox-wrapper",),
         max_changed_files=4,
         max_changed_bytes=16_384,
     )
@@ -400,6 +407,21 @@ def test_open_translation_overlap_excludes_only_the_exact_attested_pull(
         authorities=(OpenPullPathAuthority(exact, (TARGET_PATH,)),),
         excluded_pull=exact,
     )
+
+
+def test_deleted_fork_open_pull_still_blocks_overlapping_remediation() -> None:
+    unknown_head = _open_pull_path_identity(
+        head_repository="",
+        head_repository_id=None,
+    )
+
+    with pytest.raises(RemediationOpenPullAuthorityError, match="overlaps"):
+        guardian_controller._assert_no_open_translation_overlap(
+            policy=_historical_policy(remediation=True),
+            candidate_paths=(TARGET_PATH,),
+            authorities=(OpenPullPathAuthority(unknown_head, (TARGET_PATH,)),),
+            excluded_pull=None,
+        )
 
 
 def test_open_translation_overlap_authority_enforces_runtime_bounds() -> None:
@@ -1844,9 +1866,12 @@ def test_open_prevention_revalidates_complete_trusted_authority_before_write(
     raced = replace(original, feedback=tuple(feedback))
 
     class RacingProvider(FakeSnapshotProvider):
+        revalidation_calls = 0
+
         def revalidate_open_pull_request(self, policy, source):
             del policy, source
-            return raced
+            self.revalidation_calls += 1
+            return original if self.revalidation_calls == 1 else raced
 
     class RevalidatingPrevention(FakePreventionRunner):
         def propose(self, **kwargs: object) -> PreventionBatchOutcome:
@@ -1860,13 +1885,14 @@ def test_open_prevention_revalidates_complete_trusted_authority_before_write(
 
     prevention = RevalidatingPrevention(sequence=sequence)
     policy = replace(_policy(), prevention=_prevention_policy())
+    racing_provider = RacingProvider((original,))
     with GuardianState(tmp_path / "state.sqlite3") as state:
         outcome = _controller(
             tmp_path=tmp_path,
             state=state,
             config=_config(GuardianMode.PROPOSE_PREVENTION, policies=(policy,)),
             checkout=checkout,
-            provider=RacingProvider((original,)),
+            provider=racing_provider,
             driver=RecurrenceCodexDriver(),
             broker=broker,
             prevention_runner=prevention,
@@ -1879,6 +1905,7 @@ def test_open_prevention_revalidates_complete_trusted_authority_before_write(
     assert sequence == []
     assert broker.verify_calls == []
     assert broker.reply_calls == []
+    assert racing_provider.revalidation_calls == 2
 
 
 @pytest.mark.parametrize("race", ("edited", "deleted", "added"))
@@ -3032,7 +3059,7 @@ def test_refuses_to_infer_actor_or_lineage_for_a_legacy_prepared_push(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 8
+            == 9
         )
         installed_triggers = {
             row["name"]
@@ -3078,7 +3105,7 @@ def test_refuses_to_infer_actor_or_lineage_for_a_legacy_prepared_push(
 
         with pytest.raises(
             guardian_controller._PublicationRecoveryManualRequired,
-            match="actor authority is unavailable or malformed",
+            match="publication authority is unavailable or malformed",
         ):
             controller._recover_publications(
                 policy=_policy(),
@@ -3142,7 +3169,7 @@ def test_refuses_to_infer_actor_or_open_authority_for_a_legacy_publication(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 8
+            == 9
         )
         installed_triggers = {
             row["name"]
@@ -3179,7 +3206,7 @@ def test_refuses_to_infer_actor_or_open_authority_for_a_legacy_publication(
 
         with pytest.raises(
             guardian_controller._PublicationRecoveryManualRequired,
-            match="actor authority is unavailable or malformed",
+            match="publication authority is unavailable or malformed",
         ):
             controller._recover_publications(
                 policy=_policy(),
@@ -4190,6 +4217,74 @@ def test_published_commit_reply_recovers_idempotently_without_a_second_model_cal
         )
 
 
+def test_publication_recovery_overflow_defers_new_model_work(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    driver = FakeCodexDriver()
+    provider.snapshots = (_snapshot(pull=_pull(head_sha=COMMIT_SHA)),)
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        event = authorize_feedback(
+            policy=_policy(),
+            snapshot=_snapshot(),
+            path_locales={TARGET_PATH: "ru"},
+            changed_locales=("ru",),
+        ).events[0]
+        revision = state.record_feedback_event(event, observed_at=NOW)
+        run_id = state.start_run(
+            repository="acme/widgets",
+            locale="ru",
+            mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            started_at=NOW,
+        )
+        for index in range(101):
+            commit_sha = COMMIT_SHA if index == 100 else f"{index + 100:040x}"
+            state.record_publication_event(
+                run_id=run_id,
+                repository="acme/widgets",
+                pr_number=12,
+                original_head_sha=HEAD_SHA,
+                base_sha=BASE_SHA,
+                commit_sha=commit_sha,
+                publication_actor_id=8,
+                publication_actor_type="User",
+                event_revision_ids=(revision.revision_id,),
+                open_source=OpenPullAuthorityReference(
+                    repository="acme/widgets",
+                    repository_id=42,
+                    pull_id=500,
+                    pr_number=12,
+                    authority_digest=f"{index + 1:064x}",
+                    head_sha=HEAD_SHA,
+                    base_sha=BASE_SHA,
+                    feedback_digest=f"{index + 200:064x}",
+                ),
+                phase="prepared",
+                completion_actions=(
+                    (revision.revision_id, "completed", {"outcome": "applied"}),
+                ),
+                occurred_at=NOW,
+            )
+
+        outcome = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+            checkout=checkout,
+            provider=provider,
+            driver=driver,
+            broker=broker,
+        ).poll_once()
+
+        assert outcome.failures == ("_PublicationRecoveryBacklog",)
+        assert driver.calls == []
+        remaining = state.pending_publications(repository_id=42)
+        assert len(remaining) == 1
+        assert remaining[0].commit_sha == COMMIT_SHA
+        assert broker.reply_calls == []
+
+
 def test_recovery_rejects_changed_publication_actor_before_broker_use(
     tmp_path: Path,
     runtime,
@@ -4301,6 +4396,99 @@ def test_recovery_accepts_renamed_publication_actor_login(
         assert state.pending_publications() == ()
         assert len(driver.calls) == 1
         assert broker.reply_calls[-1]["expected_actor"] == renamed_actor
+
+
+def test_published_reply_recovery_survives_base_repository_rename(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    driver = FakeCodexDriver()
+    broker.reply_error = RuntimeError("connection dropped after publication")
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        first = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+            checkout=checkout,
+            provider=provider,
+            driver=driver,
+            broker=broker,
+        ).poll_once()
+
+        assert first.runs_failed == 1
+        original = state.pending_publications()[0]
+        assert original.phase == "published"
+        renamed_policy = _policy(repository="acme/renamed-widgets")
+        renamed_snapshot = guardian_controller._repository_route_alias(
+            _snapshot(pull=_pull(head_sha=COMMIT_SHA)),
+            repository=renamed_policy.base_repo,
+        )
+        provider.snapshots = (renamed_snapshot,)
+        broker.reply_error = None
+
+        second = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(
+                GuardianMode.APPLY_OWNED_TRANSLATIONS,
+                policies=(renamed_policy,),
+            ),
+            checkout=checkout,
+            provider=provider,
+            driver=driver,
+            broker=broker,
+        ).poll_once()
+
+        assert second.failures == ()
+        assert state.pending_publications(repository_id=42) == ()
+        assert len(driver.calls) == 1
+        replied = state.replied_publication_for_head(
+            repository="acme/renamed-widgets",
+            repository_id=42,
+            pr_number=12,
+            head_sha=COMMIT_SHA,
+            publication_actor_id=8,
+            publication_actor_type="User",
+        )
+        assert replied is not None
+        assert replied.repository == "acme/widgets"
+
+
+def test_repository_route_alias_preserves_open_authority_hashes() -> None:
+    original_policy = _policy()
+    original_snapshot = _snapshot()
+    original_authorized = authorize_feedback(
+        policy=original_policy,
+        snapshot=original_snapshot,
+        path_locales={TARGET_PATH: "ru"},
+        changed_locales=("ru",),
+    )
+    original = GuardianController._open_pull_authority_reference(
+        policy=original_policy,
+        snapshot=original_snapshot,
+        authorized=original_authorized,
+    )
+    renamed_policy = _policy(repository="acme/renamed-widgets")
+    renamed_snapshot = guardian_controller._repository_route_alias(
+        original_snapshot,
+        repository=renamed_policy.base_repo,
+    )
+    renamed_authorized = authorize_feedback(
+        policy=renamed_policy,
+        snapshot=renamed_snapshot,
+        path_locales={TARGET_PATH: "ru"},
+        changed_locales=("ru",),
+    )
+
+    routed = GuardianController._open_pull_authority_reference(
+        policy=renamed_policy,
+        snapshot=renamed_snapshot,
+        authorized=renamed_authorized,
+        authority_repository=original_policy.base_repo,
+    )
+
+    assert routed == original
 
 
 @pytest.mark.parametrize("race", ("edited", "deleted", "added"))
@@ -6250,7 +6438,7 @@ def test_deterministic_closed_pr_policy_rejection_completes_all_scopes(
         "remediation-recover:acme/widgets",
         "history:acme/widgets",
     ]
-    assert len(current_provider.calls) == 4
+    assert len(current_provider.calls) == 3
     assert all(
         policy == _historical_policy(remediation=True)
         for policy in current_provider.calls
@@ -6322,7 +6510,7 @@ def test_historical_prevention_aggregates_candidates_and_completes_its_scope(
     assert [
         tuple(source.pr_number for source in call["sources"])
         for call in provider.exact_calls
-    ] == [(12,), (13,)]
+    ] == [(12,), (12,), (13,), (13,)]
 
 
 def test_transient_historical_checkout_failure_remains_retryable(
@@ -6824,6 +7012,233 @@ def test_operator_quarantine_vetoes_exact_source_reauthorization(
             )
 
     assert historical.exact_calls == []
+
+
+@pytest.mark.parametrize("mutation", ("lifecycle", "feedback", "base", "head"))
+def test_historical_source_race_after_local_checkout_stops_publication_guard(
+    mutation: str,
+    tmp_path: Path,
+    runtime,
+) -> None:
+    base, head, checkout, _provider, broker, _sequence = runtime
+    policy = _historical_policy(remediation=True)
+    original = _snapshot(pull=_pull(state="closed"))
+    mutated = original
+    if mutation == "lifecycle":
+        mutated = replace(
+            original,
+            pull_request=replace(original.pull_request, state="open"),
+        )
+    elif mutation == "feedback":
+        mutated = replace(
+            original,
+            feedback=(
+                replace(
+                    original.feedback[0],
+                    body="Trusted feedback changed during local checkout.",
+                    updated_at="2026-08-30T11:00:00Z",
+                ),
+            ),
+        )
+    elif mutation == "base":
+        mutated = replace(
+            original,
+            pull_request=replace(original.pull_request, base_sha="8" * 40),
+        )
+    else:
+        mutated = replace(
+            original,
+            pull_request=replace(original.pull_request, head_sha="9" * 40),
+        )
+
+    calls = 0
+
+    def exact_source_provider(
+        _policy: RepositoryPolicy,
+        _sources: tuple[HistoricalPullReference, ...],
+    ) -> tuple[PullRequestFeedbackSnapshot, ...]:
+        nonlocal calls
+        calls += 1
+        return (original if calls == 1 else mutated,)
+
+    pull = original.pull_request
+    source = HistoricalPullReference(
+        repository=policy.base_repo,
+        repository_id=policy.base_repo_id,
+        pull_id=pull.pull_id,
+        pr_number=pull.number,
+        pull_revision_digest="a" * 64,
+        authority_digest=_authorized_historical_digest(policy, original),
+        policy_digest="b" * 64,
+        head_sha=pull.head_sha,
+        base_sha=pull.base_sha,
+    )
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        controller = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(
+                GuardianMode.APPLY_OWNED_TRANSLATIONS,
+                policies=(policy,),
+            ),
+            checkout=checkout,
+            provider=FakeSnapshotProvider(()),
+            driver=FakeCodexDriver(),
+            broker=broker,
+            historical_snapshot_provider=FakeHistoricalSnapshotProvider((original,)),
+            historical_source_snapshot_provider=exact_source_provider,
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(
+                base,
+                head,
+                tmp_path,
+            ),
+            current_base_provider=FakeCurrentBaseProvider(),
+            remediation_runner=FakeRemediationRunner(),
+        )
+
+        with pytest.raises(
+            RemediationSourceAuthorityError,
+            match="changed during authority validation",
+        ):
+            controller._require_exact_historical_sources_still_closed(
+                policy=policy,
+                sources=(source,),
+                event_revision_ids=(),
+                operator_config=None,
+                require_live_lease=lambda: None,
+            )
+
+    assert calls == 2
+
+
+def test_historical_source_revalidation_survives_base_repository_rename(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    base, head, checkout, _provider, broker, _sequence = runtime
+    original_policy = _historical_policy(remediation=True)
+    original = _snapshot(pull=_pull(state="closed"))
+    source = HistoricalPullReference(
+        repository=original_policy.base_repo,
+        repository_id=original_policy.base_repo_id,
+        pull_id=original.pull_request.pull_id,
+        pr_number=original.pull_request.number,
+        pull_revision_digest="a" * 64,
+        authority_digest=_authorized_historical_digest(original_policy, original),
+        policy_digest="b" * 64,
+        head_sha=original.pull_request.head_sha,
+        base_sha=original.pull_request.base_sha,
+    )
+    renamed_policy = replace(
+        original_policy,
+        base_repo="acme/renamed-widgets",
+    )
+    renamed = guardian_controller._repository_route_alias(
+        original,
+        repository=renamed_policy.base_repo,
+    )
+    calls = 0
+
+    def exact_source_provider(
+        policy: RepositoryPolicy,
+        sources: tuple[HistoricalPullReference, ...],
+    ) -> tuple[PullRequestFeedbackSnapshot, ...]:
+        nonlocal calls
+        calls += 1
+        assert policy == renamed_policy
+        assert sources == (source,)
+        return (renamed,)
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        controller = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(
+                GuardianMode.APPLY_OWNED_TRANSLATIONS,
+                policies=(renamed_policy,),
+            ),
+            checkout=checkout,
+            provider=FakeSnapshotProvider(()),
+            driver=FakeCodexDriver(),
+            broker=broker,
+            historical_snapshot_provider=FakeHistoricalSnapshotProvider((renamed,)),
+            historical_source_snapshot_provider=exact_source_provider,
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(
+                base,
+                head,
+                tmp_path,
+            ),
+            current_base_provider=FakeCurrentBaseProvider(),
+            remediation_runner=FakeRemediationRunner(),
+        )
+
+        controller._require_exact_historical_sources_still_closed(
+            policy=renamed_policy,
+            sources=(source,),
+            event_revision_ids=(),
+            operator_config=None,
+            require_live_lease=lambda: None,
+        )
+
+    assert calls == 2
+
+
+def test_historical_publication_guard_leaves_source_as_last_remote_read(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    base, head, checkout, _provider, broker, _sequence = runtime
+    policy = _historical_policy(remediation=True)
+    snapshot = _snapshot(pull=_pull(state="closed"))
+    sequence: list[str] = []
+
+    class SequencedHistoricalProvider(FakeHistoricalSnapshotProvider):
+        def revalidate(self, policy, sources):
+            sequence.append("remote:source")
+            return super().revalidate(policy, sources)
+
+    class PublicationBoundaryRunner(FakeRemediationRunner):
+        def publish(self, **kwargs: object) -> RemediationBatchOutcome:
+            self.publish_calls.append(dict(kwargs))
+            guard = kwargs["require_exact_sources_still_closed"]
+            assert callable(guard)
+            guard(
+                tuple(kwargs["source_pulls"]),
+                tuple(kwargs["event_revision_ids"]),
+            )
+            sequence.append("remote:draft-post")
+            return self.publish_result
+
+    remediation = PublicationBoundaryRunner()
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        outcome = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(
+                GuardianMode.APPLY_OWNED_TRANSLATIONS,
+                policies=(policy,),
+            ),
+            checkout=checkout,
+            provider=FakeSnapshotProvider(()),
+            driver=FakeCodexDriver(),
+            broker=broker,
+            historical_snapshot_provider=FakeHistoricalSnapshotProvider((snapshot,)),
+            historical_source_snapshot_provider=SequencedHistoricalProvider(
+                (snapshot,)
+            ).revalidate,
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(
+                base,
+                head,
+                tmp_path,
+            ),
+            current_base_provider=FakeCurrentBaseProvider(sequence=sequence),
+            remediation_runner=remediation,
+        ).poll_once()
+
+    assert outcome.failures == ()
+    assert remediation.publish_calls
+    post_index = sequence.index("remote:draft-post")
+    assert sequence[post_index - 1] == "remote:source"
 
 
 def test_failed_open_scan_blocks_historical_remote_writes_for_repository(
@@ -8484,6 +8899,59 @@ def test_pending_two_source_batch_rehydrates_and_republishes_atomically(
     assert tuple(remediation.publish_calls[1]["source_pulls"]) == original_batch
     assert second.historical_pull_requests_completed == 2
     assert len(driver.calls) == 2
+
+
+def test_pending_recovery_survives_base_repository_rename(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    base, head, checkout, _provider, broker, _sequence = runtime
+    renamed_repository = "acme/renamed-widgets"
+    policy = replace(
+        _historical_policy(remediation=True),
+        base_repo=renamed_repository,
+    )
+    current_snapshot = guardian_controller._repository_route_alias(
+        _snapshot(pull=_pull(state="closed")),
+        repository=renamed_repository,
+    )
+    old_route_source = _retry_source(repository="acme/widgets")
+    provider = FakeHistoricalSnapshotProvider((current_snapshot,))
+    remediation = FakeRemediationRunner(
+        recover_result=RemediationBatchOutcome(
+            deferred=1,
+            retry_source_batches=((old_route_source,),),
+        )
+    )
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        outcome = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(
+                GuardianMode.APPLY_OWNED_TRANSLATIONS,
+                policies=(policy,),
+            ),
+            checkout=checkout,
+            provider=FakeSnapshotProvider(()),
+            driver=FakeCodexDriver(),
+            broker=broker,
+            historical_snapshot_provider=provider,
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(
+                base,
+                head,
+                tmp_path,
+            ),
+            current_base_provider=FakeCurrentBaseProvider(),
+            remediation_runner=remediation,
+        ).poll_once()
+
+    assert outcome.remediation_failures == ()
+    assert provider.calls[0]["priority_pull_groups"] == (((500, 12),),)
+    assert remediation.publish_calls[0]["source_pulls"][0].repository == (
+        renamed_repository
+    )
+    assert outcome.historical_pull_requests_completed == 1
 
 
 def test_pending_recovery_retries_once_then_allows_older_history(

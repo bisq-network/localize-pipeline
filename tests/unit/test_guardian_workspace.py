@@ -801,6 +801,34 @@ def test_openpgp_profile_keeps_the_existing_git_flags_and_environment(tmp_path):
         assert "SSH_AUTH_SOCK" not in environment
 
 
+def test_openpgp_commit_rejects_an_untrusted_signing_home_before_staging(tmp_path):
+    remote, _base_sha, head_sha = _create_remote(tmp_path)
+    gnupg_home = tmp_path / "gnupg"
+    gnupg_home.mkdir(mode=0o700)
+    gnupg_home.chmod(0o777)
+
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(),
+        allow_file_remote=True,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text(
+            "hello=Здравствуйте\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="0700"):
+            workspace.commit_validated_changes(
+                expected_paths=("i18n/messages_ru.properties",),
+                pull_number=7,
+                feedback_urls=(
+                    "https://github.example.com/acme/project/pull/7#discussion_r123",
+                ),
+                signing_environment={"GNUPGHOME": str(gnupg_home)},
+            )
+
+        assert _git(workspace.path, "diff", "--cached", "--name-only") == ""
+
+
 def test_ssh_signing_uses_exact_snapshot_and_limits_agent_socket_to_commit(
     tmp_path,
 ):

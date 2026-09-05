@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from jsonschema import Draft202012Validator
 
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.models import (
     CodexAuthMode,
     FeedbackEvent,
@@ -493,7 +494,7 @@ def _reject_duplicate_object_members(
 
 
 def _strict_json_loads(raw_json: str) -> object:
-    return json.loads(
+    return loads_bounded_json(
         raw_json,
         parse_constant=_reject_non_json_constant,
         object_pairs_hook=_reject_duplicate_object_members,
@@ -680,18 +681,22 @@ def _is_capacity_failure(output: str) -> bool:
     return any(marker in lowered for marker in _CAPACITY_FAILURE_MARKERS)
 
 
-def _redacted_detail(
-    completed: subprocess.CompletedProcess[str], environment: Mapping[str, str]
-) -> str:
-    detail = "\n".join(
+def _diagnostic_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    """Return bounded-process diagnostics for internal failure classification."""
+
+    return "\n".join(
         part.strip()
         for part in (completed.stderr or "", completed.stdout or "")
         if part and part.strip()
     )
-    for key_name in ("CODEX_API_KEY", "OPENAI_API_KEY"):
-        api_key = environment.get(key_name)
-        if api_key:
-            detail = detail.replace(api_key, f"[REDACTED_{key_name}]")
+
+
+def _redacted_detail(
+    completed: subprocess.CompletedProcess[str], environment: Mapping[str, str]
+) -> str:
+    if any(environment.get(key) for key in ("CODEX_API_KEY", "OPENAI_API_KEY")):
+        return "diagnostic output withheld because a model credential was present"
+    detail = _diagnostic_detail(completed)
     return detail[-2000:] if detail else "no diagnostic output"
 
 
@@ -904,6 +909,7 @@ class CodexDriver:
 
                 timed_out = False
                 if completed.returncode != 0:
+                    diagnostic = _diagnostic_detail(completed)
                     detail = _redacted_detail(completed, environment)
                     if attempt_observer is not None:
                         attempt_observer(
@@ -911,11 +917,11 @@ class CodexDriver:
                             "failed",
                             _extract_usage(completed.stdout),
                         )
-                    if _is_authentication_failure(detail):
+                    if _is_authentication_failure(diagnostic):
                         raise CodexAuthenticationError(
                             f"Codex failed to authenticate: {detail}"
                         )
-                    if _is_capacity_failure(detail):
+                    if _is_capacity_failure(diagnostic):
                         raise CodexCapacityError(
                             "Codex capacity is unavailable; inspect plan allowance, "
                             "credits, or API billing limits."
