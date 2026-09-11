@@ -105,7 +105,7 @@ def test_docs_homepage_links_to_primary_guides():
     assert "new-project-deployment.md" in links
     assert "repository-structure.md" in links
     assert "adding-new-locales.md" in links
-    assert "guardian.md" in links
+    assert "guardian.html" in links
 
 
 def test_docs_homepage_internal_links_exist():
@@ -118,4 +118,30 @@ def test_docs_homepage_internal_links_exist():
             target.relative_to(DOCS_ROOT)
         except ValueError as exc:
             raise AssertionError(f"docs homepage link escapes published docs root: {link}") from exc
-        assert target.exists(), f"docs homepage link is broken: {link}"
+        # GitHub Pages renders the source Markdown into this HTML route.
+        if parsed.path == "guardian.html":
+            assert target.with_suffix(".md").is_file()
+        else:
+            assert target.exists(), f"docs homepage link is broken: {link}"
+
+
+def test_guardian_has_a_homepage_section_with_setup_and_human_control():
+    html = (DOCS_ROOT / "index.html").read_text(encoding="utf-8")
+    match = re.search(r'<section\b[^>]*id="guardian"[^>]*>(.*?)</section>', html, re.S)
+    assert match is not None, "Guardian needs an explanatory section, not just a guide link"
+    section = " ".join(match.group(1).split())
+    assert 'aria-labelledby="guardian-title"' in match.group(0)
+    assert 'id="guardian-title"' in section
+    assert 'href="guardian.html"' in section
+    for concept in ("CodeRabbit", "reviewers", "self-hosted", "pipeline", "human", "merge"):
+        assert concept in section
+
+
+def test_design_context_preserves_existing_color_tokens():
+    import yaml
+
+    design = (PROJECT_ROOT / "DESIGN.md").read_text(encoding="utf-8")
+    tokens = yaml.safe_load(design.split("---", 2)[1])
+    css = (DOCS_ROOT / "assets/site.css").read_text(encoding="utf-8")
+    for name, value in tokens["colors"].items():
+        assert f"--{name}: {value};" in css

@@ -177,6 +177,8 @@ class GuardianFeedbackDecision:
     confidence: float
     rationale: str
     replacements: tuple[GuardianReplacement, ...]
+    report_reason: str = "unspecified"
+    decision_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +228,8 @@ def serialize_codex_result(result: CodexResult) -> str:
                 "verdict": decision.verdict,
                 "confidence": decision.confidence,
                 "rationale": decision.rationale,
+                "report_reason": decision.report_reason,
+                "decision_required": decision.decision_required,
                 "replacements": [
                     {
                         "path": replacement.path,
@@ -319,6 +323,18 @@ def _result_validator() -> Draft202012Validator:
 
 
 def _validate_schema(payload: object) -> Mapping[str, Any]:
+    # Old retained assessments predate public reporting. Conservative defaults
+    # allow replay without inventing agreement with a reviewer's suggestion.
+    if isinstance(payload, dict) and isinstance(payload.get("feedback"), list):
+        payload = {
+            **payload,
+            "feedback": [
+                {"report_reason": "unspecified", "decision_required": False, **item}
+                if isinstance(item, dict)
+                else item
+                for item in payload["feedback"]
+            ],
+        }
     errors = sorted(
         _result_validator().iter_errors(payload),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
@@ -410,6 +426,26 @@ def _parse_semantic_result(payload: Mapping[str, Any], *, attempts: int) -> Code
             )
 
         verdict = str(raw_decision["verdict"])
+        report_reason = str(raw_decision["report_reason"])
+        allowed_report_reasons = {
+            "apply": {
+                "unspecified", "as_suggested", "alternative_glossary",
+                "alternative_source_fidelity", "alternative_other",
+            },
+            "reject": {
+                "unspecified", "glossary_conflict", "policy_conflict",
+                "insufficient_evidence", "already_addressed", "not_applicable",
+            },
+            "needs_human": {
+                "unspecified", "glossary_conflict", "policy_conflict",
+                "insufficient_evidence",
+            },
+        }
+        if report_reason not in allowed_report_reasons[verdict]:
+            raise CodexOutputError(
+                f"Codex report_reason {report_reason!r} contradicts "
+                f"the {verdict!r} verdict for {feedback_id!r}."
+            )
         # Structured Outputs cannot express the conditional allOf/if/then
         # constraint; enforce the verdict/replacement relationship locally.
         if verdict == "apply" and not replacements:
@@ -429,6 +465,8 @@ def _parse_semantic_result(payload: Mapping[str, Any], *, attempts: int) -> Code
                 confidence=float(raw_decision["confidence"]),
                 rationale=rationale,
                 replacements=tuple(replacements),
+                report_reason=report_reason,
+                decision_required=raw_decision["decision_required"],
             )
         )
 
@@ -673,6 +711,8 @@ def to_guardian_assessments(
                 confidence=decision.confidence,
                 rationale=decision.rationale,
                 replacements=tuple(replacements),
+                report_reason=decision.report_reason,
+                decision_required=decision.decision_required,
                 recurrence_candidates=tuple(
                     candidate
                     for candidate in recurrence_candidates

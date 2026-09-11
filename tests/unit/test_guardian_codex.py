@@ -9,7 +9,7 @@ import pytest
 
 from localize.guardian import codex
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
-from localize.guardian.models import CodexAuthMode, FeedbackEvent
+from localize.guardian.models import CodexAuthMode, FeedbackEvent, GuardianAssessment
 
 
 def _valid_payload() -> dict:
@@ -57,6 +57,117 @@ def _payload_with_duplicate_member() -> str:
         '"schema_version": 1, "schema_version": 1',
         1,
     )
+
+
+@pytest.mark.parametrize(
+    ("verdict", "report_reason"),
+    [
+        ("apply", "already_addressed"),
+        ("apply", "not_applicable"),
+        ("apply", "glossary_conflict"),
+        ("apply", "policy_conflict"),
+        ("apply", "insufficient_evidence"),
+        ("reject", "as_suggested"),
+        ("reject", "alternative_glossary"),
+        ("reject", "alternative_source_fidelity"),
+        ("reject", "alternative_other"),
+        ("needs_human", "as_suggested"),
+        ("needs_human", "alternative_glossary"),
+        ("needs_human", "alternative_source_fidelity"),
+        ("needs_human", "alternative_other"),
+        ("needs_human", "already_addressed"),
+        ("needs_human", "not_applicable"),
+    ],
+)
+def test_cached_codex_result_rejects_contradictory_public_reason(verdict, report_reason):
+    """Do not publish an explanation contradicting the actual assessment verdict."""
+    payload = _valid_payload()
+    decision = payload["feedback"][0]
+    decision.update(verdict=verdict, report_reason=report_reason)
+    if verdict != "apply":
+        decision["replacements"] = []
+
+    with pytest.raises(codex.CodexOutputError, match="report_reason.*verdict"):
+        codex.parse_cached_codex_result(json.dumps(payload))
+
+
+@pytest.mark.parametrize("verdict", ["apply", "reject", "needs_human"])
+@pytest.mark.parametrize("explicit_reason", [False, True])
+def test_cached_codex_result_preserves_unspecified_reason_compatibility(
+    verdict, explicit_reason
+):
+    """Retained assessments remain replayable without inventing a specific reason."""
+    payload = _valid_payload()
+    decision = payload["feedback"][0]
+    decision["verdict"] = verdict
+    if verdict != "apply":
+        decision["replacements"] = []
+    if explicit_reason:
+        decision["report_reason"] = "unspecified"
+
+    result = codex.parse_cached_codex_result(json.dumps(payload))
+
+    assert result.feedback[0].verdict == verdict
+    assert result.feedback[0].report_reason == "unspecified"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "report_reason"),
+    [
+        ("apply", "as_suggested"),
+        ("apply", "alternative_glossary"),
+        ("apply", "alternative_source_fidelity"),
+        ("apply", "alternative_other"),
+        ("reject", "glossary_conflict"),
+        ("reject", "policy_conflict"),
+        ("reject", "insufficient_evidence"),
+        ("reject", "already_addressed"),
+        ("reject", "not_applicable"),
+        ("needs_human", "glossary_conflict"),
+        ("needs_human", "policy_conflict"),
+        ("needs_human", "insufficient_evidence"),
+    ],
+)
+def test_cached_codex_result_accepts_consistent_public_reason(verdict, report_reason):
+    """Preserve the intended explicit reasons through durable serialization."""
+    payload = _valid_payload()
+    decision = payload["feedback"][0]
+    decision.update(verdict=verdict, report_reason=report_reason)
+    if verdict != "apply":
+        decision["replacements"] = []
+
+    result = codex.parse_cached_codex_result(json.dumps(payload))
+    restored = codex.parse_cached_codex_result(codex.serialize_codex_result(result))
+
+    assert restored.feedback[0].verdict == verdict
+    assert restored.feedback[0].report_reason == report_reason
+
+
+@pytest.mark.parametrize("held_value_edits", [-1, 100001, True, False, 1.0, "1", None])
+def test_guardian_assessment_rejects_invalid_held_value_count(held_value_edits):
+    """Held-edit accounting must be bounded integer data, not truthy coercions."""
+    with pytest.raises(ValueError, match="held_value_edits"):
+        GuardianAssessment(
+            feedback_id="review_comment:123",
+            verdict="needs_human",
+            confidence=0.98,
+            rationale="A maintainer must decide on the terminology.",
+            held_value_edits=held_value_edits,
+        )
+
+
+@pytest.mark.parametrize("held_value_edits", [0, 1, 100000])
+def test_guardian_assessment_accepts_bounded_held_value_count(held_value_edits):
+    """Include both accounting boundaries and a normal pending edit."""
+    assessment = GuardianAssessment(
+        feedback_id="review_comment:123",
+        verdict="needs_human",
+        confidence=0.98,
+        rationale="A maintainer must decide on the terminology.",
+        held_value_edits=held_value_edits,
+    )
+
+    assert assessment.held_value_edits == held_value_edits
 
 
 def test_codex_output_schema_uses_supported_structured_output_keywords():
