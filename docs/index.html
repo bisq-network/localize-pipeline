@@ -6,7 +6,7 @@
     <title>Localize Pipeline - AI localization as pull requests</title>
     <meta
       name="description"
-      content="Localize Pipeline translates Java .properties and JSON localization files with provider abstraction, review gates, translation memory, and pull-request workflows."
+      content="Translate Java .properties and JSON files as pull requests. Follow up on translation reviews with the optional, self-hosted Guardian."
     >
     <meta name="robots" content="index,follow">
     <link rel="canonical" href="https://bisq-network.github.io/localize-pipeline/">
@@ -41,7 +41,7 @@
       <nav class="top-nav" aria-label="Primary">
         <a href="localization-cli.md">CLI</a>
         <a href="github-action.md">GitHub Action</a>
-        <a href="guardian.md">Guardian</a>
+        <a href="#guardian">Guardian</a>
         <a href="#formats">Formats</a>
         <a href="new-project-deployment.md">Runbook</a>
       </nav>
@@ -56,6 +56,7 @@
             Localize Pipeline watches changed source strings, translates Java .properties
             and JSON files, validates the result, and opens normal pull requests that
             maintainers can review, amend, and merge.
+            The optional Guardian follows up on translation reviews.
           </p>
           <div class="hero-actions" aria-label="Quick links">
             <a class="button primary" href="localization-cli.md">Start with the CLI</a>
@@ -112,7 +113,7 @@ localize quality-gate --repo-root . --changed-files ...</code></pre>
           <a href="https://github.com/bisq-network/localize-pipeline/blob/main/llms.txt">llms.txt</a>
           <a href="repository-structure.md">Repository structure</a>
           <a href="localization-cli.md">CLI commands</a>
-          <a href="guardian.md">Self-hosted Guardian</a>
+          <a href="guardian.html">Self-hosted Guardian</a>
         </div>
       </section>
 
@@ -140,6 +141,52 @@ localize quality-gate --repo-root . --changed-files ...</code></pre>
         </div>
       </section>
 
+      <section class="section split guardian-section" id="guardian" aria-labelledby="guardian-title">
+        <div>
+          <h2 id="guardian-title">The review can improve the next run, too.</h2>
+          <p class="lede">
+            Guardian follows up on translation PRs: checked corrections for this
+            review, proposed pipeline fixes for recurring problems.
+          </p>
+          <p>
+            It reads feedback from the human reviewers and bots you trust,
+            including CodeRabbit. You choose which repositories it watches,
+            what it may edit, and how much work it may start.
+          </p>
+          <p>
+            Guardian is optional and self-hosted. Your project runs it with its
+            own credentials and Codex plan. It starts in observation mode;
+            editing and PR creation require explicit configuration.
+          </p>
+          <a class="text-link" href="guardian.html">Set up Guardian</a>
+        </div>
+        <div class="guardian-workflow">
+          <h3>A review becomes a fix</h3>
+          <ol>
+            <li>
+              <strong>A reviewer flags a translation.</strong>
+              Guardian checks it against the current source, glossary, and
+              permitted edit scope.
+            </li>
+            <li>
+              <strong>A valid correction gets a signed commit.</strong>
+              A bot reply links the change. Alternatives, deferred work, and
+              glossary decisions stay visible for human review.
+            </li>
+            <li>
+              <strong>A recurring defect can get a pipeline PR.</strong>
+              The proposed fix includes a before-and-after regression test
+              and opens ready for review.
+            </li>
+          </ol>
+          <p>
+            <strong>You still decide what to merge.</strong> Guardian never
+            merges PRs or changes glossary policy on its own. Review follow-up
+            on its pipeline-improvement PRs is not yet automated.
+          </p>
+        </div>
+      </section>
+
       <section class="route-section" aria-labelledby="route-title">
         <div class="section-heading">
           <p class="eyebrow">Choose the path</p>
@@ -161,7 +208,7 @@ localize quality-gate --repo-root . --changed-files ...</code></pre>
             <strong>Scheduled production service</strong>
             <p>Run Docker Compose plus cron for repositories backed by external sources.</p>
           </a>
-          <a class="route-item" href="guardian.md">
+          <a class="route-item" href="guardian.html">
             <span>04</span>
             <strong>Self-hosted PR Guardian</strong>
             <p>Run an optional operator-owned review loop with explicit allowlists and your own model account.</p>

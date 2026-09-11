@@ -1750,6 +1750,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     try:
         with _locked_existing_state(config_path) as state:
             snapshot = None if state is None else state.status_snapshot(mode=config.mode)
+            reporting = (0, 0) if state is None else state.feedback_reporting_counts()
     except Exception:
         print("error: Guardian state is unavailable or invalid.", file=sys.stderr)
         return 1
@@ -1760,6 +1761,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f"last completed run: {snapshot.last_completed_run or 'none'}")
     print(f"last successful poll: {snapshot.last_successful_poll or 'none'}")
     print(f"pending feedback revisions: {snapshot.pending_revisions}")
+    print(f"pending explanation acknowledgements: {reporting[0]}")
+    print(f"recorded maintainer decisions: {reporting[1]}")
     actions = ", ".join(f"{status}={count}" for status, count in snapshot.actions)
     print(f"actions: {actions or 'none'}")
     health = ", ".join(f"{component}={status}" for component, status in snapshot.health)

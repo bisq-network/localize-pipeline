@@ -1368,8 +1368,24 @@ class GuardianAssessment:
     rationale: str
     replacements: tuple[ProposedReplacement, ...] = ()
     recurrence_candidates: tuple[RecurrenceCandidate, ...] = ()
+    report_reason: str = "unspecified"
+    decision_required: bool = False
+    held_value_edits: int = 0
 
     def __post_init__(self) -> None:
+        from localize.guardian.reporting import REASONS
+
+        if self.report_reason not in REASONS or not isinstance(
+            self.decision_required, bool
+        ):
+            raise ValueError("Invalid feedback reporting metadata.")
+        if (
+            type(self.held_value_edits) is not int
+            or not 0 <= self.held_value_edits <= 100000
+        ):
+            raise ValueError(
+                "held_value_edits must be an integer between 0 and 100000."
+            )
         if self.verdict not in {"apply", "reject", "needs_human"}:
             raise ValueError("verdict must be apply, reject, or needs_human.")
         if not 0.0 <= self.confidence <= 1.0:

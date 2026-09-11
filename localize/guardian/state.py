@@ -31,7 +31,7 @@ from localize.guardian.prevention import TestCommandResult, TestOutcome
 _UTC = timezone.utc
 # Version 11 prevents older runtimes from mistaking skipped partial batches for
 # resolved feedback. The ledger shape is unchanged; its resolution semantics are not.
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _SUPPORTED_SCHEMA_VERSIONS = frozenset(range(_SCHEMA_VERSION + 1))
 _TERMINAL_ACTION_STATUSES = frozenset({"completed", "skipped"})
 _ACTION_STATUSES = _TERMINAL_ACTION_STATUSES | {"failed", "pending"}
@@ -1789,6 +1789,13 @@ class GuardianState:
                 FOREIGN KEY (run_id) REFERENCES runs(run_id),
                 FOREIGN KEY (event_revision_id)
                     REFERENCES event_revisions(revision_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS feedback_report_deliveries (
+                report_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                result_json TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'posted', 'superseded'))
             );
 
             CREATE TABLE IF NOT EXISTS costs (
@@ -5763,6 +5770,11 @@ class GuardianState:
                 OR json_extract(a.details_json, '$.policy_digest') IS ?
             )"""
             parameters.append(policy_digest)
+            policy_filter += """ AND (
+                json_extract(a.details_json, '$.decision_required') IS NOT 1
+                OR json_extract(a.details_json, '$.report_policy_digest') IS ?
+            )"""
+            parameters.append(policy_digest)
         filters = [
             f"""NOT EXISTS (
                 SELECT 1 FROM actions AS a
@@ -8858,6 +8870,228 @@ class GuardianState:
                 ),
             )
         return int(cursor.lastrowid)
+
+    def latest_feedback_report(
+        self,
+        revision_id: int,
+        *,
+        repository_id: int | None = None,
+        actor_id: int | None = None,
+        actor_type: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        """The completed action itself is the durable reporting outbox intent.
+
+        Publication completion plans persist these details before a push, and
+        atomically recover them alongside the correction result after a crash.
+        """
+        row = self._connection.execute(
+            """SELECT details_json FROM actions WHERE event_revision_id = ?
+               AND json_extract(details_json, '$.report_reason') IS NOT NULL
+               ORDER BY action_id DESC LIMIT 1""",
+            (revision_id,),
+        ).fetchone()
+        if row is None and repository_id is not None and actor_id is not None:
+            # An acknowledged owned push creates a new head-bound revision.
+            # Replay only across that exact signed publication, with unchanged
+            # feedback content/base and immutable repository/writer identity.
+            row = self._connection.execute(
+                """SELECT a.details_json FROM event_revisions current
+                   JOIN event_revisions prior ON prior.repository = current.repository
+                     AND prior.pr_number = current.pr_number AND prior.kind = current.kind
+                     AND prior.event_id = current.event_id AND prior.revision_hash = current.revision_hash
+                   JOIN actions a ON a.event_revision_id = prior.revision_id
+                   JOIN publication_events p ON p.run_id = a.run_id
+                     AND p.original_head_sha = prior.head_sha AND p.base_sha = current.base_sha
+                     AND p.commit_sha = current.head_sha
+                   WHERE current.revision_id = ? AND p.repository_id = ?
+                     AND p.publication_actor_id = ? AND p.publication_actor_type = ?
+                     AND p.phase IN ('published', 'replied')
+                     AND json_extract(a.details_json, '$.report_reason') IS NOT NULL
+                   ORDER BY a.action_id DESC LIMIT 1""",
+                (revision_id, repository_id, actor_id, actor_type),
+            ).fetchone()
+        return json.loads(row["details_json"]) if row else None
+
+    def held_feedback_decision(
+        self,
+        *,
+        repository: str,
+        pr_number: int,
+        kind: str,
+        event_id: str,
+        config_digest: str,
+    ) -> Mapping[str, Any] | None:
+        """Head movement or bot replies cannot release a configuration decision."""
+        row = self._connection.execute(
+            """SELECT a.details_json FROM actions a
+               JOIN event_revisions e ON e.revision_id = a.event_revision_id
+               WHERE e.repository = ? AND e.pr_number = ? AND e.kind = ? AND e.event_id = ?
+               AND json_extract(a.details_json, '$.decision_required') = 1
+               AND json_extract(a.details_json, '$.report_config_digest') = ?
+               ORDER BY a.action_id DESC LIMIT 1""",
+            (repository, pr_number, kind, event_id, config_digest),
+        ).fetchone()
+        return json.loads(row["details_json"]) if row else None
+
+    def held_feedback_report_for_revision(
+        self,
+        revision_id: int,
+        policy_digest: str,
+    ) -> Mapping[str, Any] | None:
+        """Keep an unresolved decision visible without replaying an old correction."""
+        row = self._connection.execute(
+            """SELECT a.details_json FROM event_revisions current
+               JOIN event_revisions prior ON prior.repository = current.repository
+                 AND prior.pr_number = current.pr_number AND prior.kind = current.kind
+                 AND prior.event_id = current.event_id
+               JOIN actions a ON a.event_revision_id = prior.revision_id
+               WHERE current.revision_id = ?
+                 AND json_extract(a.details_json, '$.decision_required') = 1
+                 AND json_extract(a.details_json, '$.report_policy_digest') = ?
+               ORDER BY a.action_id DESC LIMIT 1""",
+            (revision_id, policy_digest),
+        ).fetchone()
+        if row is None:
+            return None
+        details = json.loads(row["details_json"])
+        details.update(outcome="needs_human", commit_sha=None)
+        details.pop("report_outcome", None)
+        if details.get("report_reason") == "alternative_glossary":
+            details["report_reason"] = "glossary_conflict"
+        return details
+
+    def feedback_report_delivery(self, report_key: str) -> Mapping[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT * FROM feedback_report_deliveries WHERE report_key = ?",
+            (report_key,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def feedback_summary_bodies(
+        self, repository_id: int, pr_number: int
+    ) -> tuple[str, ...]:
+        """Known exact summary versions, including ambiguous publication attempts."""
+        rows = self._connection.execute(
+            """SELECT payload_json FROM feedback_report_deliveries
+               WHERE json_extract(payload_json, '$.summary') = 1
+               AND json_extract(payload_json, '$.repository_id') = ?
+               AND json_extract(payload_json, '$.pr_number') = ?
+               ORDER BY rowid DESC LIMIT 100""",
+            (repository_id, pr_number),
+        ).fetchall()
+        return tuple(json.loads(row["payload_json"])["body"] for row in rows)
+
+    def feedback_reporting_counts(self) -> tuple[int, int]:
+        """Count delivery acknowledgements and latest recorded human decisions."""
+        pending = self._connection.execute(
+            "SELECT COUNT(*) FROM feedback_report_deliveries WHERE status = 'pending'"
+        ).fetchone()[0]
+        decisions = self._connection.execute(
+            """WITH latest AS (
+                SELECT a.details_json, ROW_NUMBER() OVER (
+                    PARTITION BY e.repository, e.pr_number, e.kind, e.event_id
+                    ORDER BY a.action_id DESC) AS position
+                FROM actions a JOIN event_revisions e ON e.revision_id = a.event_revision_id
+                WHERE json_extract(a.details_json, '$.report_reason') IS NOT NULL
+                  AND COALESCE(json_extract(a.details_json, '$.report_outcome'), '') != 'failed'
+            ) SELECT COUNT(*) FROM latest WHERE position = 1
+              AND json_extract(details_json, '$.decision_required') = 1"""
+        ).fetchone()[0]
+        return int(pending), int(decisions)
+
+    def supersede_inactive_feedback_report_pulls(
+        self,
+        repository_id: int,
+        open_pr_numbers: Sequence[int],
+    ) -> None:
+        """Retire delivery retries outside a complete authorized open-PR view.
+
+        This is not a delivery acknowledgement or a policy decision. If a pull
+        becomes eligible again, exact-source reconciliation can resume.
+        """
+        with self._connection:
+            self._connection.execute(
+                """UPDATE feedback_report_deliveries SET status = 'superseded'
+                   WHERE status = 'pending'
+                   AND json_extract(payload_json, '$.repository_id') = ?
+                   AND json_extract(payload_json, '$.pr_number') NOT IN
+                       (SELECT value FROM json_each(?))""",
+                (repository_id, json.dumps(tuple(open_pr_numbers))),
+            )
+
+    def supersede_unavailable_feedback_reports(
+        self, repository_id: int, pr_number: int, live_ids: Sequence[str]
+    ) -> None:
+        """Retire pending messages only after fresh intake withdrew their source."""
+        with self._connection:
+            self._connection.execute(
+                """UPDATE feedback_report_deliveries SET status = 'superseded'
+                   WHERE status = 'pending'
+                   AND json_extract(payload_json, '$.repository_id') = ?
+                   AND json_extract(payload_json, '$.pr_number') = ?
+                   AND json_extract(payload_json, '$.feedback_id') IS NOT NULL
+                   AND json_extract(payload_json, '$.feedback_id') NOT IN (SELECT value FROM json_each(?))""",
+                (repository_id, pr_number, json.dumps(tuple(live_ids))),
+            )
+
+    def queue_feedback_report(
+        self, report_key: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Preserve exact bytes for retry after an ambiguous GitHub response."""
+        encoded = _canonical_json(payload)
+        with self._connection:
+            if payload.get("feedback_id"):
+                self._connection.execute(
+                    """UPDATE feedback_report_deliveries SET status = 'superseded'
+                       WHERE status = 'pending' AND report_key != ?
+                       AND json_extract(payload_json, '$.repository_id') = ?
+                       AND json_extract(payload_json, '$.pr_number') = ?
+                       AND json_extract(payload_json, '$.feedback_id') = ?""",
+                    (
+                        report_key,
+                        payload["repository_id"],
+                        payload["pr_number"],
+                        payload["feedback_id"],
+                    ),
+                )
+            self._connection.execute(
+                "INSERT OR IGNORE INTO feedback_report_deliveries (report_key, payload_json, status) VALUES (?, ?, 'pending')",
+                (report_key, encoded),
+            )
+            row = self.feedback_report_delivery(report_key)
+            if row is None or row["payload_json"] != encoded:
+                raise ValueError(
+                    "Feedback report identity conflicts with its durable payload."
+                )
+
+    def finish_feedback_report(
+        self,
+        report_key: str,
+        *,
+        result: Mapping[str, Any] | None = None,
+        superseded: bool = False,
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE feedback_report_deliveries SET status = ?, result_json = ? WHERE report_key = ?",
+                (
+                    "superseded" if superseded else "posted",
+                    _canonical_json(result),
+                    report_key,
+                ),
+            )
+            row = self.feedback_report_delivery(report_key)
+            if row and not superseded:
+                payload = json.loads(row["payload_json"])
+                if payload.get("summary"):
+                    self._connection.execute(
+                        """UPDATE feedback_report_deliveries SET status = 'superseded'
+                           WHERE status = 'pending' AND report_key != ?
+                           AND json_extract(payload_json, '$.summary') = 1
+                           AND json_extract(payload_json, '$.repository_id') = ?
+                           AND json_extract(payload_json, '$.pr_number') = ?""",
+                        (report_key, payload["repository_id"], payload["pr_number"]),
+                    )
 
     def record_cost(
         self,

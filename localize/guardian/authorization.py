@@ -15,7 +15,11 @@ from localize.guardian.models import FeedbackEvent, RepositoryPolicy
 
 
 _FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-_GUARDIAN_MARKER = "<!-- localize-guardian:v1 "
+_GUARDIAN_MARKERS = (
+    "<!-- localize-guardian:v1 ",
+    "<!-- localize-guardian:feedback:",
+    "<!-- localize-guardian:feedback-summary:v1 -->",
+)
 
 
 class IntakePolicyError(ValueError):
@@ -169,7 +173,7 @@ def _authorize_feedback_for_state(
         if not revision.body.strip():
             skipped.append(_skip(revision, "blank"))
             continue
-        if _GUARDIAN_MARKER in revision.body:
+        if any(marker in revision.body for marker in _GUARDIAN_MARKERS):
             skipped.append(_skip(revision, "guardian_generated"))
             continue
         if revision.author_id is None:

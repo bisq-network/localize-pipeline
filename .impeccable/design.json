@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-11T18:25:00Z",
+  "title": "Design System: Localize Pipeline",
+  "extensions": {
+    "colorMeta": {
+      "green": {
+        "role": "primary",
+        "displayName": "green",
+        "tonalRamp": [
+          "oklch(15.00% 0.1995 144.24)",
+          "oklch(26.43% 0.1995 144.24)",
+          "oklch(37.86% 0.1995 144.24)",
+          "oklch(49.29% 0.1995 144.24)",
+          "oklch(60.71% 0.1995 144.24)",
+          "oklch(72.14% 0.1995 144.24)",
+          "oklch(83.57% 0.1995 144.24)",
+          "oklch(95.00% 0.1995 144.24)"
+        ]
+      },
+      "green-dark": {
+        "role": "primary",
+        "displayName": "green dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.1710 143.62)",
+          "oklch(26.43% 0.1710 143.62)",
+          "oklch(37.86% 0.1710 143.62)",
+          "oklch(49.29% 0.1710 143.62)",
+          "oklch(60.71% 0.1710 143.62)",
+          "oklch(72.14% 0.1710 143.62)",
+          "oklch(83.57% 0.1710 143.62)",
+          "oklch(95.00% 0.1710 143.62)"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "paper",
+        "tonalRamp": [
+          "oklch(15.00% 0.0013 106.42)",
+          "oklch(26.43% 0.0013 106.42)",
+          "oklch(37.86% 0.0013 106.42)",
+          "oklch(49.29% 0.0013 106.42)",
+          "oklch(60.71% 0.0013 106.42)",
+          "oklch(72.14% 0.0013 106.42)",
+          "oklch(83.57% 0.0013 106.42)",
+          "oklch(95.00% 0.0013 106.42)"
+        ]
+      },
+      "white": {
+        "role": "neutral",
+        "displayName": "white",
+        "tonalRamp": [
+          "oklch(15.00% 0.0013 106.42)",
+          "oklch(26.43% 0.0013 106.42)",
+          "oklch(37.86% 0.0013 106.42)",
+          "oklch(49.29% 0.0013 106.42)",
+          "oklch(60.71% 0.0013 106.42)",
+          "oklch(72.14% 0.0013 106.42)",
+          "oklch(83.57% 0.0013 106.42)",
+          "oklch(95.00% 0.0013 106.42)"
+        ]
+      },
+      "soft": {
+        "role": "neutral",
+        "displayName": "soft",
+        "tonalRamp": [
+          "oklch(15.00% 0.0000 89.88)",
+          "oklch(26.43% 0.0000 89.88)",
+          "oklch(37.86% 0.0000 89.88)",
+          "oklch(49.29% 0.0000 89.88)",
+          "oklch(60.71% 0.0000 89.88)",
+          "oklch(72.14% 0.0000 89.88)",
+          "oklch(83.57% 0.0000 89.88)",
+          "oklch(95.00% 0.0000 89.88)"
+        ]
+      },
+      "soft-green": {
+        "role": "neutral",
+        "displayName": "soft green",
+        "tonalRamp": [
+          "oklch(15.00% 0.0159 148.41)",
+          "oklch(26.43% 0.0159 148.41)",
+          "oklch(37.86% 0.0159 148.41)",
+          "oklch(49.29% 0.0159 148.41)",
+          "oklch(60.71% 0.0159 148.41)",
+          "oklch(72.14% 0.0159 148.41)",
+          "oklch(83.57% 0.0159 148.41)",
+          "oklch(95.00% 0.0159 148.41)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "ink",
+        "tonalRamp": [
+          "oklch(15.00% 0.0000 89.88)",
+          "oklch(26.43% 0.0000 89.88)",
+          "oklch(37.86% 0.0000 89.88)",
+          "oklch(49.29% 0.0000 89.88)",
+          "oklch(60.71% 0.0000 89.88)",
+          "oklch(72.14% 0.0000 89.88)",
+          "oklch(83.57% 0.0000 89.88)",
+          "oklch(95.00% 0.0000 89.88)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "muted",
+        "tonalRamp": [
+          "oklch(15.00% 0.0135 153.42)",
+          "oklch(26.43% 0.0135 153.42)",
+          "oklch(37.86% 0.0135 153.42)",
+          "oklch(49.29% 0.0135 153.42)",
+          "oklch(60.71% 0.0135 153.42)",
+          "oklch(72.14% 0.0135 153.42)",
+          "oklch(83.57% 0.0135 153.42)",
+          "oklch(95.00% 0.0135 153.42)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "line",
+        "tonalRamp": [
+          "oklch(15.00% 0.0080 139.44)",
+          "oklch(26.43% 0.0080 139.44)",
+          "oklch(37.86% 0.0080 139.44)",
+          "oklch(49.29% 0.0080 139.44)",
+          "oklch(60.71% 0.0080 139.44)",
+          "oklch(72.14% 0.0080 139.44)",
+          "oklch(83.57% 0.0080 139.44)",
+          "oklch(95.00% 0.0080 139.44)"
+        ]
+      },
+      "code": {
+        "role": "neutral",
+        "displayName": "code",
+        "tonalRamp": [
+          "oklch(15.00% 0.0074 164.08)",
+          "oklch(26.43% 0.0074 164.08)",
+          "oklch(37.86% 0.0074 164.08)",
+          "oklch(49.29% 0.0074 164.08)",
+          "oklch(60.71% 0.0074 164.08)",
+          "oklch(72.14% 0.0074 164.08)",
+          "oklch(83.57% 0.0074 164.08)",
+          "oklch(95.00% 0.0074 164.08)"
+        ]
+      },
+      "code-line": {
+        "role": "neutral",
+        "displayName": "code line",
+        "tonalRamp": [
+          "oklch(15.00% 0.0120 160.60)",
+          "oklch(26.43% 0.0120 160.60)",
+          "oklch(37.86% 0.0120 160.60)",
+          "oklch(49.29% 0.0120 160.60)",
+          "oklch(60.71% 0.0120 160.60)",
+          "oklch(72.14% 0.0120 160.60)",
+          "oklch(83.57% 0.0120 160.60)",
+          "oklch(95.00% 0.0120 160.60)"
+        ]
+      }
+    },
+    "shadows": [
+      {
+        "name": "run-example",
+        "value": "0 22px 60px rgb(25 25 25 / 10%)",
+        "purpose": "Existing run example panel only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "control",
+        "value": "160ms ease-out",
+        "purpose": "Existing control feedback; suppress for reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stack",
+        "value": "1040px"
+      },
+      {
+        "name": "mobile",
+        "value": "760px"
+      }
+    ],
+    "notes": [
+      "Tonal ramps are generated preview aids, not approved additional site colors.",
+      "Preview focus uses opaque deep green for legibility; current site focus is translucent green and remains unaudited."
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "One main action.",
+      "html": "<a class=\"ds-primary\" href=\"#start\">Start with the CLI</a>",
+      "css": ".ds-primary{display:inline-flex;align-items:center;min-height:46px;padding:0 18px;border:1px solid var(--ink,#191919);border-radius:4px;background:var(--ink,#191919);color:var(--white,#fffffe);font:600 16px \"IBM Plex Sans\",sans-serif;text-decoration:none;transition:background-color 160ms ease-out}.ds-primary:hover{background:var(--green-dark,#12871d)}.ds-primary:active{transform:translateY(1px)}.ds-primary:focus-visible{outline:3px solid #12871d;outline-offset:4px}"
+    },
+    {
+      "name": "Secondary action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Alternative setup path.",
+      "html": "<a class=\"ds-secondary\" href=\"#action\">Use the GitHub Action</a>",
+      "css": ".ds-secondary{display:inline-flex;align-items:center;min-height:46px;padding:0 18px;border:1px solid var(--ink,#191919);border-radius:4px;color:var(--ink,#191919);font:600 16px \"IBM Plex Sans\",sans-serif;text-decoration:none}.ds-secondary:hover{color:var(--green-dark,#12871d);border-color:var(--green,#25b135)}.ds-secondary:active{transform:translateY(1px)}.ds-secondary:focus-visible{outline:3px solid #12871d;outline-offset:4px}"
+    },
+    {
+      "name": "Navigation",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Short text routes, wrapping on narrow screens.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Documentation\"><a href=\"#cli\">CLI</a><a href=\"#guardian\">Guardian</a><a href=\"#formats\">Formats</a></nav>",
+      "css": ".ds-nav{display:flex;flex-wrap:wrap;gap:18px 28px;font:500 14px \"IBM Plex Sans\",sans-serif}.ds-nav a{color:var(--muted,#626a64);text-decoration:none}.ds-nav a:hover{color:var(--green-dark,#12871d)}.ds-nav a:focus-visible{outline:3px solid #12871d;outline-offset:4px}"
+    },
+    {
+      "name": "Format tag",
+      "kind": "chip",
+      "refersTo": "tag",
+      "description": "Non-interactive metadata, not status.",
+      "html": "<span class=\"ds-tag\">Java .properties</span>",
+      "css": ".ds-tag{display:inline-block;padding:7px 10px;border:1px solid rgb(37 177 53 / 24%);background:var(--soft-green,#eef8ef);color:var(--ink,#191919);font:500 13px \"IBM Plex Sans\",sans-serif}"
+    },
+    {
+      "name": "Reference row",
+      "kind": "custom",
+      "refersTo": "route-link",
+      "description": "Guide link with one useful description.",
+      "html": "<a class=\"ds-route\" href=\"#guardian\"><strong>Self-hosted Guardian</strong><span>Follow up on translation reviews.</span></a>",
+      "css": ".ds-route{display:flex;flex-wrap:wrap;gap:12px 24px;padding:24px 0;border-top:1px solid var(--line,#d9ddd8);border-bottom:1px solid var(--line,#d9ddd8);color:var(--ink,#191919);text-decoration:none;font:300 16px \"IBM Plex Sans\",sans-serif}.ds-route strong{font-size:20px;font-weight:600}.ds-route:hover{color:var(--green-dark,#12871d)}.ds-route:focus-visible{outline:3px solid #12871d;outline-offset:4px}"
+    },
+    {
+      "name": "Command panel",
+      "kind": "custom",
+      "refersTo": "command-panel",
+      "description": "Portable copyable command, not simulated status.",
+      "html": "<pre class=\"ds-command\"><code>localize guardian status --config guardian.yaml</code></pre>",
+      "css": ".ds-command{max-width:100%;margin:0;padding:20px;border:1px solid var(--code-line,#2a312d);background:var(--code,#111513);color:#ecf2ed;overflow:auto}.ds-command code{font:16px/1.7 \"IBM Plex Mono\",monospace;white-space:pre-wrap;overflow-wrap:anywhere}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Bisq developer guide",
+    "overview": "Preserve the current GitHub Pages style. A maintainer reading the site alongside\na repository should find it familiar, spacious, and easy to scan. This is a\nlight documentation surface within the Bisq family, not a new product identity.",
+    "keyCharacteristics": [
+      "Near-white pages, charcoal text, and a restrained Bisq green accent.",
+      "Left-aligned headings, generous section spacing, and thin dividing rules.",
+      "Practical examples and direct links, with technical depth one level away."
+    ],
+    "rules": [
+      {
+        "name": "The Contrast Rule",
+        "body": "Do not assume brand green is readable on every surface. Use deep green for new small text and check every new foreground/background pair. Existing bright-green button hover and translucent focus styling are recorded below, not certified as accessibility-compliant.",
+        "section": "colors"
+      },
+      {
+        "name": "The Reading Rule",
+        "body": "Keep new explanatory prose near 65–75 characters per line. Use a short heading and a concrete example before a list of constraints. No all-caps paragraphs, invented metrics, or repeated promotional kickers.",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do preserve the approved light theme, Bisq logo, and IBM Plex typography.",
+      "Do explain a feature with a concrete workflow and a clear next step.",
+      "Do keep setup, limits, and evidence easy to find without repeating the manual.",
+      "Do test new sections on narrow screens and with keyboard navigation."
+    ],
+    "donts": [
+      "Don't add dense AI-generated text blocks that bury the useful outcome.",
+      "Don't use generic AI-service marketing or promise flawless automation.",
+      "Don't redesign the current GitHub Pages style or import Bisq's dark theme.",
+      "Don't imply automatic policy approval, automatic merging, or free hosted operation."
+    ]
+  }
+}
