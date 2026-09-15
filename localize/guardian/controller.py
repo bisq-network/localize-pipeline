@@ -5756,11 +5756,6 @@ class GuardianController:
                     policy_digest=_patch_policy_digest(self.config, policy, scope),
                 )
             )
-            self._flush_feedback_reports(
-                policy=policy, snapshot=snapshot, current=tuple(current.values()),
-                open_source=open_source, lease_owner=lease_owner,
-                policy_digest=_patch_policy_digest(self.config, policy, scope),
-            )
             current_revision_ids = {
                 revision.revision_id for _event, revision in current.values()
             }
@@ -5777,6 +5772,11 @@ class GuardianController:
                 in {pending_revision.revision_id for pending_revision in pending}
             )
             if not superseded and not current_pending:
+                self._flush_feedback_reports(
+                    policy=policy, snapshot=snapshot, current=tuple(current.values()),
+                    open_source=open_source, lease_owner=lease_owner,
+                    policy_digest=_patch_policy_digest(self.config, policy, scope),
+                )
                 return
 
             locale_label = ",".join(
@@ -5868,10 +5868,18 @@ class GuardianController:
                     finished_at=observed_at,
                 )
                 outcome.runs_completed += 1
+                self._flush_feedback_reports(
+                    policy=policy, snapshot=snapshot, current=tuple(current.values()),
+                    open_source=open_source, lease_owner=lease_owner,
+                    policy_digest=_patch_policy_digest(self.config, policy, scope),
+                )
                 return
 
             try:
                 with self.checkout_factory(head_revision) as head_workspace:
+                    # Status replies can trigger immediate reviewer-bot updates.
+                    # Assess/publish actionable work before draining old reports,
+                    # or those updates can starve repairs on every fresh poll.
                     publications_before = len(outcome.applied_commits)
                     self._assess_and_act(
                         policy=policy,
