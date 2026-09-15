@@ -537,6 +537,16 @@ calls (completed plus active or unknown reservations) without printing raw
 review bodies or secrets. In API-key mode it additionally shows committed API
 cost (settled cost plus active or unknown reservations).
 
+Failed polls also print a short stderr alert pointing to `guardian status`.
+That command shows the latest private failure ID, timestamp and structured
+diagnostic: poll ID, available source PR/run identity, operation, exit or HTTP
+status, fixed reason codes and pipeline code locations. At most 32 diagnostics
+are appended per poll to the existing private audit database. Unknown errors
+remain `unclassified` with code locations; raw stderr, exception prose, command
+arguments, credentials and absolute paths are never stored in these records or
+copied into public replies. A later failure does not replace the last-success
+timestamp. Desktop notifications depend on the operator's scheduler wrapper.
+
 Two bounded, redacted operator worklists expose durable recovery state under
 the same exclusive poll lock:
 
@@ -939,6 +949,14 @@ also incur another charge. Prevention authoring is likewise bounded but is not
 replayed from an assessment cache. Treat limits as start-call guards and inspect
 the local ledger after recovery; API-key operators should also compare it with
 provider billing.
+
+Cache admission and reuse both check feedback IDs, authorized target paths and
+key existence against the trusted source evidence. A rejected old cache entry
+is removed with a private audit record; existing cost and call records remain.
+Fresh invalid assessments use the same configured attempt limit as other model
+failures, not an additional retry loop. Each started attempt counts toward the
+daily session cap. Guardian never repairs a model-invented key by guessing its
+intended spelling, and repeated invalid output cannot publish edits.
 
 After `raw_retention_days`, raw comment-body rows are logically deleted from the
 active SQLite tables; their body hash and revision metadata remain. SQLite

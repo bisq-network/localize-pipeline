@@ -23,6 +23,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from localize.guardian.deadline import PollDeadline, deadline_httpx_timeout
+from localize.guardian.diagnostics import http_failure
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
@@ -736,14 +737,20 @@ class _GitHubHTTP:
         is_rate_limited = bool(retry_after) or (
             rate_limit_remaining == "0" and bool(rate_limit_reset)
         )
+        create_pr = method == "POST" and response.request.url.path.endswith("/pulls")
         if response.status_code == 403 and is_rate_limited:
-            raise GitHubAPIError(f"GitHub API {method} request was rate limited")
+            raise http_failure(GitHubAPIError(f"GitHub API {method} request was rate limited"),
+                               method=method, status=response.status_code,
+                               create_pr=create_pr, reason="rate_limited")
         if response.status_code in {401, 403}:
-            raise GitHubAuthenticationError(
-                f"GitHub API {method} authentication failed"
+            raise http_failure(GitHubAuthenticationError(
+                f"GitHub API {method} authentication failed"),
+                method=method, status=response.status_code,
+                create_pr=create_pr, reason="authentication_failed",
             )
-        raise GitHubAPIError(
-            f"GitHub API {method} request failed with status {response.status_code}"
+        raise http_failure(GitHubAPIError(
+            f"GitHub API {method} request failed with status {response.status_code}"),
+            method=method, status=response.status_code, create_pr=create_pr,
         )
 
     def _bounded_json(self, response: httpx.Response, *, label: str) -> Any:

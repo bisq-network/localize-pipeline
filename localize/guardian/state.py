@@ -9395,6 +9395,41 @@ class GuardianState:
             raise RuntimeError("assessment cache identity collision")
         return str(row["result_json"])
 
+    def invalidate_assessment_result(
+        self,
+        *,
+        cache_key: str,
+        result_json: str,
+        invalidated_at: datetime | None = None,
+    ) -> None:
+        """Evict only the rejected bytes, retaining billing and an atomic audit."""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
+            raise ValueError("assessment cache key must be a SHA-256 digest")
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM assessment_results WHERE cache_key = ? AND result_json = ?",
+                (cache_key, result_json),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Rejected assessment changed before invalidation.")
+            self._connection.execute(
+                """
+                INSERT INTO health (
+                    component, status, message, details_json, checked_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "guardian-assessment-cache", "warning",
+                    "Invalid cached assessment evicted; bounded reassessment required.",
+                    _canonical_json({
+                        "cache_key": cache_key,
+                        "reason": "invalid_cached_assessment",
+                    }),
+                    _serialize_datetime(invalidated_at or _now()),
+                ),
+            )
+
     def cache_assessment_and_settle_budget(
         self,
         *,

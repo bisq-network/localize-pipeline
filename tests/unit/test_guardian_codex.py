@@ -1201,9 +1201,11 @@ def test_wire_result_conversion_requires_trusted_source_value():
         attempts=1,
     )
 
-    with pytest.raises(codex.CodexOutputError, match="Trusted source lookup"):
+    with pytest.raises(codex.CodexOutputError, match="Trusted source lookup") as caught:
         codex.to_guardian_assessments(
             result,
             feedback_events=(event,),
             source_values={},
         )
+    assert caught.value.guardian_failure.reason == "missing_trusted_source"
+    assert caught.value.guardian_failure.stage == "validate-assessment"

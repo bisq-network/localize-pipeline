@@ -34,6 +34,7 @@ from localize.guardian.authorization import (
 from localize.guardian.codex import (
     CodexAuthenticationError,
     CodexCapacityError,
+    CodexOutputError,
     CodexResult,
     CodexTask,
     CodexUsage,
@@ -43,6 +44,7 @@ from localize.guardian.codex import (
     to_guardian_assessments,
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import record_failure
 from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
 from localize.guardian.github import (
@@ -718,9 +720,10 @@ class _PublicationRecoveryBacklog(RuntimeError):
     """Bounded publication recovery must finish before new repository work."""
 
 
-def _safe_failure_name(error: BaseException) -> str:
+def _safe_failure_name(error: BaseException, **context: object) -> str:
     """Return an audit-safe failure identifier without untrusted text."""
 
+    record_failure(error, **context)
     return type(error).__name__
 
 
@@ -4424,6 +4427,10 @@ class GuardianController:
                         snapshot=snapshot,
                         run_id=run_id,
                         prompt=_HISTORICAL_ASSESSMENT_PROMPT,
+                        feedback_events=events,
+                        target_locales_by_feedback=_replacement_target_locales(
+                            policy, events, current_scope.path_locales,
+                        ),
                     )
                     self._require_live_lease(lease_owner)
                     assessments = self.assessment_converter(
@@ -5272,10 +5279,16 @@ class GuardianController:
         except PollDeadlineExceeded:
             raise
         except RemediationSourceAuthorityError as exc:
-            outcome.remediation_failures.append(_safe_failure_name(exc))
+            outcome.remediation_failures.append(_safe_failure_name(
+                exc, repository=policy.base_repo, run_id=participating[0].run_id,
+                pull_numbers=[item.snapshot.pull_request.number for item in participating],
+            ))
             return
         except Exception as exc:
-            outcome.remediation_failures.append(_safe_failure_name(exc))
+            outcome.remediation_failures.append(_safe_failure_name(
+                exc, repository=policy.base_repo, run_id=participating[0].run_id,
+                pull_numbers=[item.snapshot.pull_request.number for item in participating],
+            ))
             if not recovery_attempt and active_exact_batch_exists():
                 retry_immediately.update(
                     item.snapshot.pull_request.pull_id for item in participating
@@ -5918,6 +5931,8 @@ class GuardianController:
         policy: RepositoryPolicy,
         snapshot: PullRequestFeedbackSnapshot,
         run_id: str,
+        feedback_events: Sequence[FeedbackEvent],
+        target_locales_by_feedback: Mapping[str, Mapping[str, str]],
         prompt: str = _ASSESSMENT_PROMPT,
     ) -> CodexResult:
         model = self.codex_driver.model
@@ -5937,8 +5952,29 @@ class GuardianController:
             model=model,
             reasoning_effort=reasoning_effort,
         )
+        source_values = _source_values(bundle)
+
+        def validate_result(result: CodexResult) -> None:
+            # This is cache admission, independent of the later action converter.
+            # Both open and historical work must match the trusted task exactly.
+            to_guardian_assessments(
+                result,
+                feedback_events=feedback_events,
+                source_values=source_values,
+                target_locales_by_feedback=target_locales_by_feedback,
+            )
+
         if cached is not None:
-            return parse_cached_codex_result(cached)
+            try:
+                result = parse_cached_codex_result(cached)
+                validate_result(result)
+            except CodexOutputError:
+                self.state.invalidate_assessment_result(
+                    cache_key=cache_key, result_json=cached,
+                    invalidated_at=_as_utc(self.now()),
+                )
+            else:
+                return result
 
         api_key = None
         if self.config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
@@ -6046,12 +6082,15 @@ class GuardianController:
             usage: CodexUsage | None,
             result: CodexResult,
         ) -> None:
+            # Reject before popping reservations or writing the durable cache;
+            # the driver accounts this response and may use its remaining retry.
+            validate_result(result)
+            serialized_result = serialize_codex_result(result)
             call_id = attempt_calls.pop(attempt, None)
             if call_id is None:
                 raise RuntimeError(
                     "Codex success has no matching model call reservation."
                 )
-            serialized_result = serialize_codex_result(result)
             created_at = _as_utc(self.now())
             if not api_billed:
                 self.state.cache_assessment_result(
@@ -6173,6 +6212,10 @@ class GuardianController:
                         policy=policy,
                         snapshot=snapshot,
                         run_id=run_id,
+                        feedback_events=events,
+                        target_locales_by_feedback=_replacement_target_locales(
+                            policy, events, scope.path_locales,
+                        ),
                     )
                 except _ModelCredentialUnavailable:
                     self._fail_actions(
@@ -6544,10 +6587,14 @@ class GuardianController:
             raise
         except Exception as exc:
             if self.state.has_pending_publication_for_run(run_id):
+                record_failure(exc, repository=policy.base_repo, run_id=run_id,
+                               pull_numbers=[snapshot.pull_request.number])
                 # A prepared or published cursor owns truthful recovery. Do not
                 # append failure rows ahead of recovery's atomic local finalizer.
                 outcome.runs_failed += 1
                 raise exc
+            record_failure(exc, repository=policy.base_repo, run_id=run_id,
+                           pull_numbers=[snapshot.pull_request.number])
             if self.state.get_run(run_id).status != "running":
                 # Reporting has its own durable retry path. Do not relabel a
                 # completed correction or try to finish its run a second time.

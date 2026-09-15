@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from jsonschema import Draft202012Validator
 
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import AdapterFailure
 from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.reporting import validated_decision_required
 from localize.guardian.models import (
@@ -676,10 +677,14 @@ def to_guardian_assessments(
                     )
             source_location = (replacement.path, replacement.key)
             if source_location not in source_values:
-                raise CodexOutputError(
+                error = CodexOutputError(
                     "Trusted source lookup has no value for "
                     f"{replacement.path}:{replacement.key}."
                 )
+                error.guardian_failure = AdapterFailure(
+                    "validate-assessment", "source-lookup", "missing_trusted_source",
+                )
+                raise error
             replacements.append(
                 ProposedReplacement(
                     feedback_id=event.feedback_id,
@@ -1014,7 +1019,25 @@ class CodexDriver:
                     usage=usage,
                 )
                 if success_observer is not None:
-                    success_observer(attempt, usage, successful_result)
+                    try:
+                        # The controller validates trusted task identities before
+                        # persistence. Rejections use this same bounded loop.
+                        success_observer(attempt, usage, successful_result)
+                    except CodexOutputError as exc:
+                        last_output_error = exc
+                        if attempt_observer is not None:
+                            attempt_observer(attempt, "failed", usage)
+                        if attempt == self.max_attempts:
+                            raise
+                        # Never reflect untrusted result text or exception details
+                        # into the next prompt as authoritative instructions.
+                        prompt = task.prompt + (
+                            "\nThe previous result failed trusted-task validation. "
+                            "Re-read the evidence and use only its exact keys, "
+                            "authorized paths and feedback IDs. If evidence is "
+                            "insufficient, return needs_human without replacements."
+                        )
+                        continue
                 if attempt_observer is not None:
                     attempt_observer(attempt, "succeeded", usage)
                 return successful_result

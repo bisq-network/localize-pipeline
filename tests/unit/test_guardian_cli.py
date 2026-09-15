@@ -2260,6 +2260,25 @@ def test_status_distinguishes_last_successful_poll_from_later_failure(tmp_path, 
     assert "health: guardian=failed" in output
 
 
+def test_status_exposes_private_failure_reference_without_raw_exception(tmp_path, capsys):
+    from localize.guardian.diagnostics import failure_audit, git_failure, record_failure
+    from localize.guardian.workspace import WorkspaceError
+
+    config_path = _init_config(tmp_path)
+    capsys.readouterr()
+    with GuardianState(cli.guardian_state_path(config_path)) as state, failure_audit(state):
+        record_failure(git_failure(WorkspaceError("secret /Users/private"),
+                                   operation="push", returncode=128,
+                                   output="Permission denied: secret /Users/private"))
+    assert cli.main(["status", "--config", str(config_path)]) == 0
+    output = capsys.readouterr().out
+    assert "last failure diagnostic: #" in output
+    assert '"stage": "push"' in output
+    assert '"exit_code": 128' in output
+    assert "secret" not in output
+    assert "/Users/" not in output
+
+
 def test_status_is_read_only_when_no_state_database_exists(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

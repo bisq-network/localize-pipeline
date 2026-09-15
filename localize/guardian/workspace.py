@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from localize.guardian.deadline import PollDeadline
 from localize.guardian.deadline import PollDeadlineExceeded
+from localize.guardian.diagnostics import git_failure
 from localize.guardian.executable_trust import require_absolute_trusted_executable
 from localize.guardian.filesystem_trust import resolve_trusted_private_directory
 from localize.guardian.models import SigningFormat
@@ -479,13 +480,19 @@ class _GitRunner:
                 except PollDeadlineExceeded:
                     raise
             operation = arguments[0] if arguments else "command"
-            raise WorkspaceError(f"git {operation} timed out") from exc
+            raise git_failure(WorkspaceError(f"git {operation} timed out"),
+                              operation=operation, reason="timeout") from exc
         except OSError as exc:
             operation = arguments[0] if arguments else "command"
-            raise WorkspaceError(f"git {operation} could not start") from exc
+            raise git_failure(WorkspaceError(f"git {operation} could not start"),
+                              operation=operation, reason="could_not_start") from exc
         if check and completed.returncode != 0:
             operation = arguments[0] if arguments else "command"
-            raise WorkspaceError(f"git {operation} failed with exit code {completed.returncode}")
+            raise git_failure(
+                WorkspaceError(f"git {operation} failed with exit code {completed.returncode}"),
+                operation=operation, returncode=completed.returncode,
+                output=completed.stderr + completed.stdout,
+            )
         return completed
 
     def revision(self, expression: str) -> str:

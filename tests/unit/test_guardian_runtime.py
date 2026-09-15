@@ -1522,6 +1522,40 @@ def test_run_once_creates_private_state_and_uses_bounded_controller(
     )
 
 
+def test_failed_poll_retains_diagnostic_and_announces_without_raw_error(
+    tmp_path, monkeypatch, capsys,
+):
+    from localize.guardian.controller import _safe_failure_name
+    from localize.guardian.diagnostics import git_failure
+    from localize.guardian.workspace import WorkspaceError
+
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+
+    class FailedController:
+        def poll_once(self):
+            error = git_failure(WorkspaceError("secret /Users/private"),
+                                operation="push", returncode=128,
+                                output="Permission denied: secret /Users/private")
+            name = _safe_failure_name(error, repository="acme/widgets", run_id="run-1")
+            return PollOutcome(lease_acquired=True, remediation_failures=(name,))
+
+    @contextmanager
+    def credentials(*_args, **_kwargs):
+        yield lambda: {}
+
+    monkeypatch.setattr(runtime, "git_credential_environment", credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_kwargs: FailedController())
+    assert runtime.run_once(config_path=config_path) == 1
+    output = capsys.readouterr().err
+    assert "Guardian poll failed; private diagnostic #" in output
+    assert "secret" not in output
+    assert "/Users/" not in output
+    with GuardianState(tmp_path / ".guardian/state.sqlite3") as state:
+        assert state.latest_health("guardian-failure").details["operation"] == "push"
+        assert state.status_snapshot(mode=GuardianMode.OBSERVE).last_successful_poll is None
+
+
 def test_run_once_shares_one_rotating_github_credential_with_rest_and_git(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
