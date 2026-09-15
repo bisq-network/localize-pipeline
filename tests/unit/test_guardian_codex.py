@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,37 @@ def test_cached_codex_result_accepts_consistent_public_reason(verdict, report_re
 
     assert restored.feedback[0].verdict == verdict
     assert restored.feedback[0].report_reason == report_reason
+
+
+@pytest.mark.parametrize("reason", ["as_suggested", "alternative_other"])
+def test_assessment_rejects_incompatible_reason_after_verdict_rewrite(reason):
+    """Internal rewrites obey the same reason contract as cached model results."""
+    with pytest.raises(ValueError, match="report_reason.*verdict"):
+        GuardianAssessment(
+            feedback_id="review_comment:123", verdict="needs_human",
+            confidence=0.98, rationale="A prior decision remains held.",
+            report_reason=reason, decision_required=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "verdict,reason", [("needs_human", "unspecified"),
+                       ("apply", "alternative_glossary"),
+                       ("reject", "glossary_conflict")]
+)
+def test_required_decision_survives_cache_round_trip(verdict, reason):
+    """Legacy or omitted flags cannot hide a decision implied by the verdict."""
+    payload = _valid_payload()
+    payload["feedback"][0].update(verdict=verdict, report_reason=reason)
+    if verdict != "apply":
+        payload["feedback"][0]["replacements"] = []
+    result = codex.parse_cached_codex_result(json.dumps(payload))
+    assert result.feedback[0].decision_required is True
+    result = replace(result, feedback=(replace(
+        result.feedback[0], decision_required=False
+    ),))
+    encoded = codex.serialize_codex_result(result)
+    assert json.loads(encoded)["feedback"][0]["decision_required"] is True
 
 
 @pytest.mark.parametrize("held_value_edits", [-1, 100001, True, False, 1.0, "1", None])

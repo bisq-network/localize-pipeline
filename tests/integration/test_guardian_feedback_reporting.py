@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 
+import pytest
+
 from localize.guardian.models import GuardianMode
 from localize.guardian.state import GuardianState
 from tests.unit.test_guardian_controller import (
@@ -18,6 +20,56 @@ from tests.unit.test_guardian_controller import (
 from tests.unit.test_guardian_controller import runtime as _runtime_fixture
 
 runtime = _runtime_fixture
+
+
+@pytest.mark.parametrize(
+    "reason", ["as_suggested", "alternative_source_fidelity", "alternative_other"]
+)
+def test_held_accepted_decision_is_normalized_before_replay_and_persistence(
+    tmp_path, runtime, reason
+):
+    """A later hold must not claim that a new correction was accepted."""
+    _, _, checkout, provider, broker, _ = runtime
+
+    class AcceptedDecisionDriver(DecisionDriver):
+        @staticmethod
+        def decision(result):
+            return replace(result, feedback=(replace(
+                result.feedback[0], report_reason=reason, decision_required=True
+            ),))
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        common = dict(
+            tmp_path=tmp_path, state=state,
+            checkout=checkout, provider=provider, broker=broker,
+        )
+        first = _controller(
+            **common, config=_config(GuardianMode.OBSERVE),
+            driver=AcceptedDecisionDriver(),
+        ).poll_once()
+        assert first.failures == () and first.applied_commits == ()
+        revision = state.latest_event_revisions()[0]
+        original = state.latest_feedback_report(revision.revision_id)
+        replay = state.held_feedback_report_for_revision(
+            revision.revision_id, original["report_policy_digest"]
+        )
+        assert replay["report_reason"] == "insufficient_evidence"
+        assert replay["verdict"] == "needs_human"
+        provider.snapshots = (_snapshot(pull=_pull(head_sha="d" * 40)),)
+        second = _controller(
+            **common, config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+            driver=FakeCodexDriver(),
+        ).poll_once()
+        assert second.failures == () and second.applied_commits == ()
+        held_reports = [reply.body for reply in broker.feedback_reports.values()
+                        if "Maintainer decision needed" in reply.body]
+        assert held_reports
+        assert all("insufficient to authorize" in body for body in held_reports)
+        revision = state.latest_event_revisions()[0]
+        details = state.latest_feedback_report(revision.revision_id)
+        assert details["verdict"] == "needs_human"
+        assert details["report_reason"] == "insufficient_evidence"
+        assert details["decision_required"] is True
 
 
 class DecisionDriver(FakeCodexDriver):

@@ -26,6 +26,50 @@ REASONS = {
 }
 
 
+_VERDICT_REASONS = {
+    "apply": {
+        "unspecified", "as_suggested", "alternative_glossary",
+        "alternative_source_fidelity", "alternative_other",
+    },
+    "reject": {
+        "unspecified", "glossary_conflict", "policy_conflict",
+        "insufficient_evidence", "already_addressed", "not_applicable",
+    },
+    "needs_human": {
+        "unspecified", "glossary_conflict", "policy_conflict", "insufficient_evidence",
+    },
+}
+
+
+def validated_decision_required(
+    verdict: str, report_reason: str, decision_required: bool
+) -> bool:
+    """Validate explanation semantics and retain every implied human decision.
+
+    Older assessments omit the flag. Normalize those conservatively without
+    inventing a reason or rejecting a still-valid retained assessment.
+    """
+    if report_reason not in _VERDICT_REASONS.get(verdict, ()):
+        raise ValueError("report_reason contradicts the assessment verdict.")
+    if not isinstance(decision_required, bool):
+        raise ValueError("decision_required must be a boolean.")
+    return (
+        decision_required or verdict == "needs_human"
+        or report_reason in {"glossary_conflict", "alternative_glossary"}
+    )
+
+
+def held_report_reason(reason: str) -> str:
+    """Convert a previous assessment's reason into a current held-decision reason."""
+    if reason not in REASONS:
+        raise ValueError("Unsupported held explanation code.")
+    if reason == "alternative_glossary":
+        return "glossary_conflict"
+    if reason in _VERDICT_REASONS["needs_human"]:
+        return reason
+    return "insufficient_evidence"
+
+
 def report_disposition(details: Mapping[str, object]) -> str:
     """A correction, decision, and delivery status are independent facts."""
     outcome = details.get("report_outcome", details.get("outcome"))

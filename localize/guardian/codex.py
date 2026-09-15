@@ -23,6 +23,7 @@ from jsonschema import Draft202012Validator
 
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.json_safety import loads_bounded_json
+from localize.guardian.reporting import validated_decision_required
 from localize.guardian.models import (
     CodexAuthMode,
     FeedbackEvent,
@@ -251,7 +252,9 @@ def serialize_codex_result(result: CodexResult) -> str:
             for candidate in result.recurrence_candidates
         ],
     }
-    _parse_semantic_result(_validate_schema(payload), attempts=0)
+    validated = _parse_semantic_result(_validate_schema(payload), attempts=0)
+    for item, decision in zip(payload["feedback"], validated.feedback, strict=True):
+        item["decision_required"] = decision.decision_required
     serialized = json.dumps(
         payload,
         ensure_ascii=False,
@@ -427,25 +430,12 @@ def _parse_semantic_result(payload: Mapping[str, Any], *, attempts: int) -> Code
 
         verdict = str(raw_decision["verdict"])
         report_reason = str(raw_decision["report_reason"])
-        allowed_report_reasons = {
-            "apply": {
-                "unspecified", "as_suggested", "alternative_glossary",
-                "alternative_source_fidelity", "alternative_other",
-            },
-            "reject": {
-                "unspecified", "glossary_conflict", "policy_conflict",
-                "insufficient_evidence", "already_addressed", "not_applicable",
-            },
-            "needs_human": {
-                "unspecified", "glossary_conflict", "policy_conflict",
-                "insufficient_evidence",
-            },
-        }
-        if report_reason not in allowed_report_reasons[verdict]:
-            raise CodexOutputError(
-                f"Codex report_reason {report_reason!r} contradicts "
-                f"the {verdict!r} verdict for {feedback_id!r}."
+        try:
+            decision_required = validated_decision_required(
+                verdict, report_reason, raw_decision["decision_required"]
             )
+        except ValueError as exc:
+            raise CodexOutputError(str(exc)) from exc
         # Structured Outputs cannot express the conditional allOf/if/then
         # constraint; enforce the verdict/replacement relationship locally.
         if verdict == "apply" and not replacements:
@@ -466,7 +456,7 @@ def _parse_semantic_result(payload: Mapping[str, Any], *, attempts: int) -> Code
                 rationale=rationale,
                 replacements=tuple(replacements),
                 report_reason=report_reason,
-                decision_required=raw_decision["decision_required"],
+                decision_required=decision_required,
             )
         )
 

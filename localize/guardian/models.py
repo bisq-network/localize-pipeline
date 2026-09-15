@@ -1373,12 +1373,11 @@ class GuardianAssessment:
     held_value_edits: int = 0
 
     def __post_init__(self) -> None:
-        from localize.guardian.reporting import REASONS
+        from localize.guardian.reporting import validated_decision_required
 
-        if self.report_reason not in REASONS or not isinstance(
-            self.decision_required, bool
-        ):
-            raise ValueError("Invalid feedback reporting metadata.")
+        object.__setattr__(self, "decision_required", validated_decision_required(
+            self.verdict, self.report_reason, self.decision_required
+        ))
         if (
             type(self.held_value_edits) is not int
             or not 0 <= self.held_value_edits <= 100000

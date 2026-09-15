@@ -8954,10 +8954,14 @@ class GuardianState:
         if row is None:
             return None
         details = json.loads(row["details_json"])
-        details.update(outcome="needs_human", commit_sha=None)
+        from localize.guardian.reporting import held_report_reason
+
+        details.update(
+            outcome="needs_human", verdict="needs_human", commit_sha=None,
+            report_reason=held_report_reason(details["report_reason"]),
+            decision_required=True,
+        )
         details.pop("report_outcome", None)
-        if details.get("report_reason") == "alternative_glossary":
-            details["report_reason"] = "glossary_conflict"
         return details
 
     def feedback_report_delivery(self, report_key: str) -> Mapping[str, Any] | None:

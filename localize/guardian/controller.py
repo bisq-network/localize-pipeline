@@ -43,7 +43,7 @@ from localize.guardian.codex import (
     to_guardian_assessments,
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
-from localize.guardian.reporting import report_body, report_disposition, report_key, summary_body
+from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
 from localize.guardian.github import (
     BaseRevisionSnapshot,
@@ -6304,9 +6304,9 @@ class GuardianController:
                         config_digest=config_digest,
                     )
                     if held:
-                        reason = str(held.get("report_reason", "insufficient_evidence"))
-                        if reason == "alternative_glossary":
-                            reason = "glossary_conflict"
+                        reason = held_report_reason(str(
+                            held.get("report_reason", "insufficient_evidence")
+                        ))
                         assessment = replace(
                             assessment,
                             verdict="needs_human",
