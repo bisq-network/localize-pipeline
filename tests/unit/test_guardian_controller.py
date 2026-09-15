@@ -131,7 +131,7 @@ def _insert_legacy_publication(
     )
     publication_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
         # Restore the pre-v8 table shape while the production connection is
         # closed. The next GuardianState open performs the real v7 -> v8
         # migration and reinstalls every dropped production trigger.
@@ -1661,6 +1661,7 @@ def test_historical_remediation_repository_order_rotates_after_last_publisher() 
 
 
 class FakeBroker:
+    web_base_url = "https://github.com"
     def __init__(self, sequence: list[str]) -> None:
         """Record injected test dependencies without accessing external services."""
         self.sequence = sequence
@@ -1669,6 +1670,31 @@ class FakeBroker:
         self.reply_calls = []
         self.posted_replies = []
         self.reply_error: Exception | None = None
+        self.feedback_reports = {}
+        self.feedback_summary = None
+        self.report_error = None
+
+    def post_feedback_report(self, **kwargs):
+        from types import SimpleNamespace
+        from localize.guardian.reporting import report_body
+        kwargs["before_create"]()
+        key = kwargs["report_id"]
+        if key not in self.feedback_reports:
+            body = report_body(kwargs["details"], repository="acme/widgets", feedback_id=kwargs["feedback_id"])
+            self.feedback_reports[key] = SimpleNamespace(
+                body=body, html_url=f"https://github.com/acme/widgets/pull/12#discussion_r{100 + len(self.feedback_reports)}")
+        if self.report_error:
+            raise self.report_error
+        return self.feedback_reports[key]
+
+    def post_feedback_summary(self, **kwargs):
+        from types import SimpleNamespace
+        from localize.guardian.reporting import summary_body
+        kwargs["before_create"]()
+        self.feedback_summary = SimpleNamespace(
+            body=summary_body(kwargs["reports"], repository="acme/widgets", pull_number=kwargs["pull_number"]),
+            html_url=f"https://github.com/acme/widgets/pull/{kwargs['pull_number']}#issuecomment-900")
+        return self.feedback_summary
 
     def verify_pull(self, **kwargs):
         self.sequence.append("verify")
@@ -3104,7 +3130,7 @@ def test_refuses_to_infer_actor_or_lineage_for_a_legacy_prepared_push(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 11
+            == 12
         )
         installed_triggers = {
             row["name"]
@@ -3215,7 +3241,7 @@ def test_refuses_to_infer_actor_or_open_authority_for_a_legacy_publication(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 11
+            == 12
         )
         installed_triggers = {
             row["name"]

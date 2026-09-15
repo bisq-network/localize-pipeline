@@ -23,6 +23,7 @@ from jsonschema import Draft202012Validator
 
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.json_safety import loads_bounded_json
+from localize.guardian.reporting import validated_decision_required
 from localize.guardian.models import (
     CodexAuthMode,
     FeedbackEvent,
@@ -177,6 +178,8 @@ class GuardianFeedbackDecision:
     confidence: float
     rationale: str
     replacements: tuple[GuardianReplacement, ...]
+    report_reason: str = "unspecified"
+    decision_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,8 @@ def serialize_codex_result(result: CodexResult) -> str:
                 "verdict": decision.verdict,
                 "confidence": decision.confidence,
                 "rationale": decision.rationale,
+                "report_reason": decision.report_reason,
+                "decision_required": decision.decision_required,
                 "replacements": [
                     {
                         "path": replacement.path,
@@ -247,7 +252,9 @@ def serialize_codex_result(result: CodexResult) -> str:
             for candidate in result.recurrence_candidates
         ],
     }
-    _parse_semantic_result(_validate_schema(payload), attempts=0)
+    validated = _parse_semantic_result(_validate_schema(payload), attempts=0)
+    for item, decision in zip(payload["feedback"], validated.feedback, strict=True):
+        item["decision_required"] = decision.decision_required
     serialized = json.dumps(
         payload,
         ensure_ascii=False,
@@ -319,6 +326,18 @@ def _result_validator() -> Draft202012Validator:
 
 
 def _validate_schema(payload: object) -> Mapping[str, Any]:
+    # Old retained assessments predate public reporting. Conservative defaults
+    # allow replay without inventing agreement with a reviewer's suggestion.
+    if isinstance(payload, dict) and isinstance(payload.get("feedback"), list):
+        payload = {
+            **payload,
+            "feedback": [
+                {"report_reason": "unspecified", "decision_required": False, **item}
+                if isinstance(item, dict)
+                else item
+                for item in payload["feedback"]
+            ],
+        }
     errors = sorted(
         _result_validator().iter_errors(payload),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
@@ -410,6 +429,13 @@ def _parse_semantic_result(payload: Mapping[str, Any], *, attempts: int) -> Code
             )
 
         verdict = str(raw_decision["verdict"])
+        report_reason = str(raw_decision["report_reason"])
+        try:
+            decision_required = validated_decision_required(
+                verdict, report_reason, raw_decision["decision_required"]
+            )
+        except ValueError as exc:
+            raise CodexOutputError(str(exc)) from exc
         # Structured Outputs cannot express the conditional allOf/if/then
         # constraint; enforce the verdict/replacement relationship locally.
         if verdict == "apply" and not replacements:
@@ -429,6 +455,8 @@ def _parse_semantic_result(payload: Mapping[str, Any], *, attempts: int) -> Code
                 confidence=float(raw_decision["confidence"]),
                 rationale=rationale,
                 replacements=tuple(replacements),
+                report_reason=report_reason,
+                decision_required=decision_required,
             )
         )
 
@@ -673,6 +701,8 @@ def to_guardian_assessments(
                 confidence=decision.confidence,
                 rationale=decision.rationale,
                 replacements=tuple(replacements),
+                report_reason=decision.report_reason,
+                decision_required=decision.decision_required,
                 recurrence_candidates=tuple(
                     candidate
                     for candidate in recurrence_candidates

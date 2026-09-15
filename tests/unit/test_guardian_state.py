@@ -2205,7 +2205,7 @@ def test_state_migrates_v1_database_to_historical_completion_schema(
         )
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_populated_v1_event_remains_idempotent_after_migration(
@@ -2327,7 +2327,7 @@ def test_v2_remediation_edit_table_gains_target_mapping_column(
         assert "target_hash" in columns
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
@@ -2352,7 +2352,7 @@ def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
         )
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM historical_pull_retry_events"
@@ -2367,7 +2367,7 @@ def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
         )
 
 
-def test_empty_v0_database_upgrades_to_v11(tmp_path: Path) -> None:
+def test_empty_v0_database_upgrades_to_v12(tmp_path: Path) -> None:
     """Initialize an empty database at the current supported schema version."""
     database = tmp_path / "guardian.sqlite3"
     with sqlite3.connect(database):
@@ -2378,7 +2378,7 @@ def test_empty_v0_database_upgrades_to_v11(tmp_path: Path) -> None:
         assert state.status_snapshot(mode=GuardianMode.OBSERVE).pending_revisions == 0
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_v10_upgrade_preserves_audit_and_refuses_old_resolution_semantics(
@@ -2394,11 +2394,11 @@ def test_v10_upgrade_preserves_audit_and_refuses_old_resolution_semantics(
         assert state.get_event_revision(revision.revision_id) is not None
         assert state.status_snapshot(mode=GuardianMode.PROPOSE_PREVENTION).pending_revisions == 1
     monkeypatch.setattr(guardian_state, "_SUPPORTED_SCHEMA_VERSIONS", frozenset(range(11)))
-    with pytest.raises(RuntimeError, match="Unsupported guardian state schema version 11"):
+    with pytest.raises(RuntimeError, match="Unsupported guardian state schema version 12"):
         GuardianState(database)
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_assessment_cache_and_cost_settlement_are_one_transaction(
@@ -4485,7 +4485,7 @@ def test_v7_publication_actor_migration_is_explicit_and_fails_closed(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 11
+            == 12
         )
         for table in (
             "publication_events",
@@ -5988,7 +5988,7 @@ def test_migration_accepts_each_remediation_write_run_mode(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 11
+            == 12
         )
 
 
@@ -7710,7 +7710,7 @@ def test_state_migrates_v1_database_to_remediation_ledger(tmp_path: Path) -> Non
         assert len(state.pending_remediation_drafts()) == 1
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_state_migrates_successor_publication_actor_columns_fail_closed(
@@ -10106,7 +10106,7 @@ def test_v4_migration_keeps_unattested_completion_upgradeable_and_is_idempotent(
             state._connection.execute(  # noqa: SLF001
                 "PRAGMA user_version"
             ).fetchone()[0]
-            == 11
+            == 12
         )
         assert "branch_identity_version" in {
             row["name"]
