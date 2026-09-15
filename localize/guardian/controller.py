@@ -6552,10 +6552,14 @@ class GuardianController:
             raise
         except Exception as exc:
             if self.state.has_pending_publication_for_run(run_id):
+                record_failure(exc, repository=policy.base_repo, run_id=run_id,
+                               pull_numbers=[snapshot.pull_request.number])
                 # A prepared or published cursor owns truthful recovery. Do not
                 # append failure rows ahead of recovery's atomic local finalizer.
                 outcome.runs_failed += 1
                 raise exc
+            record_failure(exc, repository=policy.base_repo, run_id=run_id,
+                           pull_numbers=[snapshot.pull_request.number])
             if self.state.get_run(run_id).status != "running":
                 # Reporting has its own durable retry path. Do not relabel a
                 # completed correction or try to finish its run a second time.

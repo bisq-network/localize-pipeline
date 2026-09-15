@@ -93,6 +93,7 @@ class _Audit:
     poll_id: str = field(default_factory=lambda: str(uuid4()))
     count: int = 0
     last_id: int | None = None
+    seen: list[BaseException] = field(default_factory=list)
 
 
 _AUDIT: ContextVar[_Audit | None] = ContextVar("guardian_failure_audit", default=None)
@@ -100,7 +101,11 @@ _AUDIT: ContextVar[_Audit | None] = ContextVar("guardian_failure_audit", default
 
 def record_failure(error, **context):
     audit = _AUDIT.get()
-    if audit is None or audit.count >= 32:
+    if (
+        audit is None
+        or audit.count >= 32
+        or any(error is prior for prior in audit.seen)
+    ):
         return
     if type(error).__name__ == "GuardianRuntimeError" and audit.count:
         return  # Retain the already-recorded underlying error, not its public wrapper.
@@ -168,6 +173,7 @@ def record_failure(error, **context):
         details=details,
     )
     audit.count += 1
+    audit.seen.append(error)
 
 
 def announce_failure():

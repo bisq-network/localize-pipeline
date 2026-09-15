@@ -10,6 +10,14 @@ from localize.guardian.controller import _safe_failure_name
 from localize.guardian.github import GitHubAPIError, _GitHubHTTP
 from localize.guardian.state import GuardianState
 from localize.guardian.workspace import WorkspaceError, _GitRunner
+from tests.unit.test_guardian_controller import (
+    FakeCodexDriver,
+    _config,
+    _controller,
+    runtime,
+)
+
+controller_runtime = runtime
 
 
 @pytest.mark.parametrize(
@@ -111,3 +119,54 @@ def test_diagnostic_scope_restores_after_exception_and_bounds_records(tmp_path):
             ).fetchone()[0]
         )
         assert all("secret" not in row[0] for row in rows)
+
+
+def test_same_exception_is_not_recorded_again_at_outer_boundary(tmp_path):
+    from localize.guardian.diagnostics import failure_audit, record_failure
+
+    with GuardianState(tmp_path / "state.sqlite3") as state, failure_audit(state):
+        error = RuntimeError("private detail")
+        record_failure(
+            error, run_id="run-1", repository="acme/widgets", pull_numbers=[7]
+        )
+        _safe_failure_name(error)
+        record = state.latest_health("guardian-failure")
+        assert record.details["run_id"] == "run-1"
+        assert (
+            state._connection.execute(
+                "SELECT COUNT(*) FROM health WHERE component='guardian-failure'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_open_assessment_failure_keeps_run_and_pr_identity(
+    tmp_path, controller_runtime
+):
+    from localize.guardian.codex import CodexOutputError
+    from localize.guardian.diagnostics import failure_audit
+    from localize.guardian.models import GuardianMode
+
+    _base, _head, checkout, provider, broker, _sequence = controller_runtime
+
+    def fail_conversion(*_args, **_kwargs):
+        raise CodexOutputError("private replacement data")
+
+    with GuardianState(tmp_path / "state.sqlite3") as state, failure_audit(state):
+        controller = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.OBSERVE),
+            checkout=checkout,
+            provider=provider,
+            driver=FakeCodexDriver(),
+            broker=broker,
+        )
+        controller.assessment_converter = fail_conversion
+        outcome = controller.poll_once()
+        assert outcome.runs_failed == 1
+        diagnostic = state.latest_health("guardian-failure")
+        assert diagnostic.details["repository"] == "acme/widgets"
+        assert diagnostic.details["pull_numbers"]
+        assert state.get_run(diagnostic.details["run_id"]).status == "failed"
+        assert "private replacement" not in json.dumps(diagnostic.details)

@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from jsonschema import Draft202012Validator
 
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import AdapterFailure
 from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.reporting import validated_decision_required
 from localize.guardian.models import (
@@ -676,10 +677,14 @@ def to_guardian_assessments(
                     )
             source_location = (replacement.path, replacement.key)
             if source_location not in source_values:
-                raise CodexOutputError(
+                error = CodexOutputError(
                     "Trusted source lookup has no value for "
                     f"{replacement.path}:{replacement.key}."
                 )
+                error.guardian_failure = AdapterFailure(
+                    "validate-assessment", "source-lookup", "missing_trusted_source",
+                )
+                raise error
             replacements.append(
                 ProposedReplacement(
                     feedback_id=event.feedback_id,
