@@ -164,6 +164,12 @@ call or correction. Changed feedback must be revalidated/reassessed before any
 new post, and closed PRs cannot receive these open-PR reports. `observe` and
 `prepare` never publish explanations.
 
+When actionable corrections are pending, Guardian assesses and attempts them
+before sending old status explanations. A reviewer bot can react immediately to
+a status reply and change the trusted snapshot; such replies must not repeatedly
+starve the repair itself. Reporting-only polls still reconcile pending replies
+without a model call. Every publication retains the same fresh authority checks.
+
 A complete open-PR intake retires pending deliveries for pulls no longer eligible
 for these reports. Retirement is not a delivery acknowledgement or a policy
 decision; a reopened eligible pull can reconcile its exact report again. Failed
