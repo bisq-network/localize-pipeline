@@ -12,9 +12,10 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 ### Fixed
 
 - Protect numeric React-i18next component tags during translation and review,
-  and check their exact token counts alongside other placeholders. Missing,
-  changed, duplicated, or malformed numeric tags now fail parity validation.
-  This does not repair existing translations or validate component nesting.
+  and check their exact token counts alongside other placeholders. Reject
+  missing, changed, or duplicated numeric placeholders, including malformed
+  replacements for valid source tags. This does not repair existing translations
+  or validate component nesting.
 - Apply retained-source-word checks and language allowlists consistently to
   regional locale codes such as `en-GB` and `pt_BR`.
 - Validate restored translations against the current source and keep selected
