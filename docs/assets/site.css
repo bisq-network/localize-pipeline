@@ -533,6 +533,33 @@ h3 {
   margin-top: 26px;
 }
 
+.guardian-section {
+  scroll-margin-top: 90px;
+}
+
+.guardian-section p {
+  max-width: 70ch;
+}
+
+.guardian-workflow {
+  padding-top: 8px;
+}
+
+.guardian-workflow ol {
+  margin: 20px 0 28px;
+  padding-left: 22px;
+}
+
+.guardian-workflow li {
+  margin-bottom: 20px;
+  color: var(--muted);
+}
+
+.guardian-workflow strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .tag-row span {
   background: var(--soft-green);
   border-color: rgb(37 177 53 / 24%);

@@ -182,7 +182,12 @@ def test_issue_comment_is_ambiguous_when_actor_is_whitelisted_for_two_changed_lo
     assert result.skipped[0].reason == "ambiguous_locale"
 
 
-def test_excludes_deleted_blank_and_guardian_generated_feedback():
+@pytest.mark.parametrize("marker", [
+    "<!-- localize-guardian:v1 action=x event=y -->",
+    "<!-- localize-guardian:feedback:abc -->",
+    "<!-- localize-guardian:feedback-summary:v1 -->",
+])
+def test_excludes_deleted_blank_and_guardian_generated_feedback(marker):
     result = authorize_feedback(
         policy=_policy(),
         snapshot=_snapshot(
@@ -190,7 +195,7 @@ def test_excludes_deleted_blank_and_guardian_generated_feedback():
             _feedback(2, body=""),
             _feedback(
                 3,
-                body="<!-- localize-guardian:v1 action=x event=y -->\nBot status",
+                body=marker + "\nBot status",
             ),
         ),
         path_locales={"l10n/messages_ru.properties": "ru"},

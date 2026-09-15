@@ -1,20 +1,27 @@
 # Localize Guardian
 
-Localize Guardian is an optional, self-hosted review loop for translation pull
-requests. It revisits open PRs and, when explicitly configured, a bounded set of
-closed PRs; records new authorized reviewer feedback revisions; asks Codex CLI
-for a structured assessment; and applies only corrections that pass
-deterministic localization policy.
+Guardian follows up on translation reviews. It checks trusted feedback against
+the current source and glossary, applies permitted corrections, and can propose
+pipeline fixes when a problem keeps recurring. You decide what it may change;
+humans still review and merge the results.
 
-This is not a hosted service. The operator runs the Guardian on infrastructure
-they control, supplies their own Codex/ChatGPT plan or explicitly opts into API
-billing, and bears any GitHub costs. The operator is responsible for its
-allowlists, credentials, logs, updates, plan allowance or API charges, and
-recovery. Operating it does not grant the translation pipeline maintainers
-credentials or private access to the consuming project.
+This is an optional, self-hosted tool, not a hosted service. Each project supplies
+its own machine, credentials, trusted-reviewer list, and Codex/ChatGPT plan
+(or explicitly opts into API billing). The operator handles costs, updates, logs,
+and recovery. Pipeline maintainers receive no credentials or private access.
 
-Start with `observe`. Treat every broader mode as a local write-authority change
-that needs review on the operator-controlled Guardian host.
+Start with `observe`, which records assessments without GitHub writes. Enable
+editing only after checking a successful observation run and its configuration.
+
+- [Install and configure](#install-and-configure): authentication and first run.
+- [Authority modes](#authority-modes): what each mode may change.
+- [Feedback explanations](#feedback-explanations-and-maintainer-decisions): corrections,
+  alternatives, deferred work, and unresolved policy decisions.
+- [Daily macOS schedule](#daily-launchd-schedule-on-macos): unattended operation.
+- [State and recovery](#durable-state-budgets-and-recovery): limits and failed runs.
+
+The rest of this page is the operator reference. Closed-PR remediation and
+pipeline-prevention work each require their own explicit policy.
 
 ## Authority modes
 
@@ -125,9 +132,61 @@ Poll outcomes and the latest Guardian health record expose `deferred_value_edits
 `deferred_feedback_items`, and `translation_policy_rejections` separately from
 failed runs. A successful bounded poll does not mean every correction is finished.
 Audit rows use `translation_batch_deferred` with the actual changed/deferred counts
-and published commit where applicable. State schema 11 prevents older runtimes
-from silently treating these skipped-but-pending rows as resolved. Back up the
-idle database before upgrading; do not downgrade a schema-11 database.
+and published commit where applicable. State schema 12 also records public
+explanation delivery and held decisions. Back up the idle database before
+upgrading; do not downgrade a schema-12 database.
+
+### Feedback explanations and maintainer decisions
+
+In the two publishing modes, completed open-PR assessments produce bot-labelled
+explanations at the original review thread. Issue comments and review summaries
+instead receive a PR comment linking to the source feedback. Explanations
+distinguish validated corrections, alternatives, already-addressed findings,
+inapplicable suggestions, deferred work, and maintainer decisions. Applied
+corrections link to the recorded commit. Threads are never automatically resolved.
+
+Public reasons are fixed templates selected by schema-validated codes, not raw
+model rationale, configuration paths, credentials, or replacement text. An
+alternative selected to respect the glossary still requires a terminology
+decision; publishing that correction does not settle the disagreement.
+
+One managed **summary comment** links to individual explanations and highlights
+decisions. This is the safe fallback rather than editing PR descriptions: the
+original CI/translation report, human text, and exact Guardian-generated PR body
+recovery contracts remain untouched. External edits to a managed comment cause
+publication to stop rather than overwrite them.
+
+Completed action records (including atomic publication recovery plans) are the
+durable explanation intents. Exact public payloads and acknowledgements are
+persisted separately. A lost GitHub response is recovered by checking the exact
+marker, writer identity, content, and thread; it does not require another model
+call or correction. Changed feedback must be revalidated/reassessed before any
+new post, and closed PRs cannot receive these open-PR reports. `observe` and
+`prepare` never publish explanations.
+
+A complete open-PR intake retires pending deliveries for pulls no longer eligible
+for these reports. Retirement is not a delivery acknowledgement or a policy
+decision; a reopened eligible pull can reconcile its exact report again. Failed
+processing records a generic deferred explanation for the next authorized intake,
+without exposing provider errors or bypassing a quota/authentication circuit.
+
+A recorded decision remains held across model reassessments, PR head movement,
+and bot replies under the same trusted configuration snapshot. A maintainer must
+choose the policy, and the operator must deliberately update the governed
+configuration before reconsideration. This feature does not interpret comments,
+thread resolution, or merging as glossary-policy authorization. Keep unrelated
+configuration changes separate from decision resolution and review the next
+assessment; changing the trusted configuration invalidates the old hold context.
+If a bounded batch applies part of a glossary alternative, its remaining edits
+are explicitly reported as human-held. They are not silently discarded, claimed
+complete, or automatically reconsidered while the policy decision remains held.
+
+`guardian status` exposes pending explanation acknowledgements and recorded
+maintainer decisions alongside reporting health. These are separate from pending
+translation edits and last successful poll. A successful correction or poll does
+not imply every decision has been settled. Model/session limits, subscription
+authentication, retry bounds, signing, and existing repository authority remain
+unchanged. Rendering and delivering reports use no additional model session.
 
 Assessment explicitly considers recurring failures, including untranslated
 source-identical text and lost safety warnings, as well as individual corrections.
