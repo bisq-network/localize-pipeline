@@ -40,6 +40,7 @@ from localize.guardian.credentials import (
     resolve_model_api_key,
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import announce_failure, failure_audit, record_failure
 from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_direct_executable,
@@ -1546,7 +1547,7 @@ def _poll_with_locked_state(
         raise GuardianRuntimeError("Guardian private state is unavailable.") from None
 
     try:
-        with state_context as state:
+        with state_context as state, failure_audit(state):
             attempted_at = _local_now()
             if scheduled and not _scheduled_poll_is_due(
                 state,
@@ -1635,11 +1636,15 @@ def _poll_with_locked_state(
                     )
                     try:
                         outcome = controller.poll_once()
-                    except Exception:
+                    except Exception as error:
+                        record_failure(error)
                         raise GuardianRuntimeError(
                             "Guardian poll failed before a bounded outcome was recorded."
                         ) from None
-                    return _exit_code(outcome)
+                    result = _exit_code(outcome)
+                    if result:
+                        announce_failure()
+                    return result
     except GuardianRuntimeError:
         raise
     except Exception:

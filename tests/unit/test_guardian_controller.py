@@ -9120,6 +9120,8 @@ def test_transient_remediation_publication_failure_retries_without_new_model_cal
     tmp_path: Path,
     runtime,
 ) -> None:
+    from localize.guardian.diagnostics import failure_audit
+
     base, head, checkout, _provider, broker, _sequence = runtime
     pull = _pull(state="closed")
     provider = FakeHistoricalSnapshotProvider((_snapshot(pull=pull),))
@@ -9148,7 +9150,13 @@ def test_transient_remediation_publication_failure_retries_without_new_model_cal
             current_base_provider=FakeCurrentBaseProvider(),
             remediation_runner=remediation,
         )
-        first = controller.poll_once()
+        with failure_audit(state):
+            first = controller.poll_once()
+        diagnostic = state.latest_health("guardian-failure")
+        assert diagnostic.details["repository"] == pull.repository
+        assert diagnostic.details["pull_numbers"] == [pull.number]
+        assert diagnostic.details["run_id"]
+        assert "temporary draft failure" not in str(diagnostic.details)
         remediation.publish_error = None
         second = controller.poll_once()
 

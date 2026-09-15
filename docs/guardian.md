@@ -537,6 +537,16 @@ calls (completed plus active or unknown reservations) without printing raw
 review bodies or secrets. In API-key mode it additionally shows committed API
 cost (settled cost plus active or unknown reservations).
 
+Failed polls also print a short stderr alert pointing to `guardian status`.
+That command shows the latest private failure ID, timestamp and structured
+diagnostic: poll ID, available source PR/run identity, operation, exit or HTTP
+status, fixed reason codes and pipeline code locations. At most 32 diagnostics
+are appended per poll to the existing private audit database. Unknown errors
+remain `unclassified` with code locations; raw stderr, exception prose, command
+arguments, credentials and absolute paths are never stored in these records or
+copied into public replies. A later failure does not replace the last-success
+timestamp. Desktop notifications depend on the operator's scheduler wrapper.
+
 Two bounded, redacted operator worklists expose durable recovery state under
 the same exclusive poll lock:
 

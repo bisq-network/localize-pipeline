@@ -1751,6 +1751,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         with _locked_existing_state(config_path) as state:
             snapshot = None if state is None else state.status_snapshot(mode=config.mode)
             reporting = (0, 0) if state is None else state.feedback_reporting_counts()
+            diagnostic = None if state is None else state.latest_health("guardian-failure")
     except Exception:
         print("error: Guardian state is unavailable or invalid.", file=sys.stderr)
         return 1
@@ -1760,6 +1761,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     print(f"last completed run: {snapshot.last_completed_run or 'none'}")
     print(f"last successful poll: {snapshot.last_successful_poll or 'none'}")
+    if diagnostic is not None:
+        print(f"last failure diagnostic: #{diagnostic.health_id} at {diagnostic.checked_at.isoformat()}")
+        print(json.dumps(diagnostic.details, sort_keys=True))
     print(f"pending feedback revisions: {snapshot.pending_revisions}")
     print(f"pending explanation acknowledgements: {reporting[0]}")
     print(f"recorded maintainer decisions: {reporting[1]}")

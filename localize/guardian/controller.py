@@ -43,6 +43,7 @@ from localize.guardian.codex import (
     to_guardian_assessments,
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import record_failure
 from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
 from localize.guardian.github import (
@@ -718,9 +719,10 @@ class _PublicationRecoveryBacklog(RuntimeError):
     """Bounded publication recovery must finish before new repository work."""
 
 
-def _safe_failure_name(error: BaseException) -> str:
+def _safe_failure_name(error: BaseException, **context: object) -> str:
     """Return an audit-safe failure identifier without untrusted text."""
 
+    record_failure(error, **context)
     return type(error).__name__
 
 
@@ -5272,10 +5274,16 @@ class GuardianController:
         except PollDeadlineExceeded:
             raise
         except RemediationSourceAuthorityError as exc:
-            outcome.remediation_failures.append(_safe_failure_name(exc))
+            outcome.remediation_failures.append(_safe_failure_name(
+                exc, repository=policy.base_repo, run_id=participating[0].run_id,
+                pull_numbers=[item.snapshot.pull_request.number for item in participating],
+            ))
             return
         except Exception as exc:
-            outcome.remediation_failures.append(_safe_failure_name(exc))
+            outcome.remediation_failures.append(_safe_failure_name(
+                exc, repository=policy.base_repo, run_id=participating[0].run_id,
+                pull_numbers=[item.snapshot.pull_request.number for item in participating],
+            ))
             if not recovery_attempt and active_exact_batch_exists():
                 retry_immediately.update(
                     item.snapshot.pull_request.pull_id for item in participating
