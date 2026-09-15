@@ -25,6 +25,8 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Changed
 
+- Explain Guardian feedback with deterministic bot replies and a managed summary,
+  retaining maintainer decisions across reassessment and report-delivery retries.
 - Batch eligible Guardian corrections within the existing per-run edit limit,
   retaining deferred feedback for later polls and reporting partial progress
   separately from whole-poll success.
@@ -40,8 +42,8 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Migration
 
-- Guardian uses state schema 11. Back up its idle database before upgrading;
-  do not run an older Guardian against a schema-11 database. Guardian remains
+- Guardian uses state schema 12. Back up its idle database before upgrading;
+  do not run an older Guardian against a schema-12 database. Guardian remains
   optional and operator-managed.
 
 ## [0.1.20] - 2026-09-05
