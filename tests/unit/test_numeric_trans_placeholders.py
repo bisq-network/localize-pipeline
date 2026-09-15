@@ -41,9 +41,15 @@ def test_numeric_trans_parity_allows_translation_and_reordering():
     assert check_placeholder_parity('<1>Warning</1> <3>Help</3>', '<3>Ayuda</3> <1>Aviso</1>')
 
 
-@pytest.mark.parametrize('text', ['1 < 3 > 2', '<3.14>', '<1word>', '<1\n>', '<1 attr="x">'])
+@pytest.mark.parametrize('text', ['1 < 3 > 2', '<3.14>', '<1word>', '<1\n>', '<1 attr="x">', '<1 >', '</1/>'])
 def test_numeric_trans_detection_does_not_consume_prose_or_invalid_tags(text):
     assert extract_placeholder_tokens(text) == Counter()
+    assert strip_placeholder_tokens(text) == text
+
+
+@pytest.mark.parametrize('target', ['<1 >Warning</1>', '<1>Warning</1/>'])
+def test_numeric_trans_parity_rejects_malformed_open_or_close(target):
+    assert not check_placeholder_parity('<1>Warning</1>', target)
 
 
 def test_numeric_trans_tags_do_not_split_outer_placeholders_or_named_html():
