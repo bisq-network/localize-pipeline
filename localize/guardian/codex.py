@@ -1019,7 +1019,25 @@ class CodexDriver:
                     usage=usage,
                 )
                 if success_observer is not None:
-                    success_observer(attempt, usage, successful_result)
+                    try:
+                        # The controller validates trusted task identities before
+                        # persistence. Rejections use this same bounded loop.
+                        success_observer(attempt, usage, successful_result)
+                    except CodexOutputError as exc:
+                        last_output_error = exc
+                        if attempt_observer is not None:
+                            attempt_observer(attempt, "failed", usage)
+                        if attempt == self.max_attempts:
+                            raise
+                        # Never reflect untrusted result text or exception details
+                        # into the next prompt as authoritative instructions.
+                        prompt = task.prompt + (
+                            "\nThe previous result failed trusted-task validation. "
+                            "Re-read the evidence and use only its exact keys, "
+                            "authorized paths and feedback IDs. If evidence is "
+                            "insufficient, return needs_human without replacements."
+                        )
+                        continue
                 if attempt_observer is not None:
                     attempt_observer(attempt, "succeeded", usage)
                 return successful_result

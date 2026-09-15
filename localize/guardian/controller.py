@@ -34,6 +34,7 @@ from localize.guardian.authorization import (
 from localize.guardian.codex import (
     CodexAuthenticationError,
     CodexCapacityError,
+    CodexOutputError,
     CodexResult,
     CodexTask,
     CodexUsage,
@@ -4426,6 +4427,10 @@ class GuardianController:
                         snapshot=snapshot,
                         run_id=run_id,
                         prompt=_HISTORICAL_ASSESSMENT_PROMPT,
+                        feedback_events=events,
+                        target_locales_by_feedback=_replacement_target_locales(
+                            policy, events, current_scope.path_locales,
+                        ),
                     )
                     self._require_live_lease(lease_owner)
                     assessments = self.assessment_converter(
@@ -5926,6 +5931,8 @@ class GuardianController:
         policy: RepositoryPolicy,
         snapshot: PullRequestFeedbackSnapshot,
         run_id: str,
+        feedback_events: Sequence[FeedbackEvent],
+        target_locales_by_feedback: Mapping[str, Mapping[str, str]],
         prompt: str = _ASSESSMENT_PROMPT,
     ) -> CodexResult:
         model = self.codex_driver.model
@@ -5945,8 +5952,29 @@ class GuardianController:
             model=model,
             reasoning_effort=reasoning_effort,
         )
+        source_values = _source_values(bundle)
+
+        def validate_result(result: CodexResult) -> None:
+            # This is cache admission, independent of the later action converter.
+            # Both open and historical work must match the trusted task exactly.
+            to_guardian_assessments(
+                result,
+                feedback_events=feedback_events,
+                source_values=source_values,
+                target_locales_by_feedback=target_locales_by_feedback,
+            )
+
         if cached is not None:
-            return parse_cached_codex_result(cached)
+            try:
+                result = parse_cached_codex_result(cached)
+                validate_result(result)
+            except CodexOutputError:
+                self.state.invalidate_assessment_result(
+                    cache_key=cache_key, result_json=cached,
+                    invalidated_at=_as_utc(self.now()),
+                )
+            else:
+                return result
 
         api_key = None
         if self.config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
@@ -6054,12 +6082,15 @@ class GuardianController:
             usage: CodexUsage | None,
             result: CodexResult,
         ) -> None:
+            # Reject before popping reservations or writing the durable cache;
+            # the driver accounts this response and may use its remaining retry.
+            validate_result(result)
+            serialized_result = serialize_codex_result(result)
             call_id = attempt_calls.pop(attempt, None)
             if call_id is None:
                 raise RuntimeError(
                     "Codex success has no matching model call reservation."
                 )
-            serialized_result = serialize_codex_result(result)
             created_at = _as_utc(self.now())
             if not api_billed:
                 self.state.cache_assessment_result(
@@ -6181,6 +6212,10 @@ class GuardianController:
                         policy=policy,
                         snapshot=snapshot,
                         run_id=run_id,
+                        feedback_events=events,
+                        target_locales_by_feedback=_replacement_target_locales(
+                            policy, events, scope.path_locales,
+                        ),
                     )
                 except _ModelCredentialUnavailable:
                     self._fail_actions(

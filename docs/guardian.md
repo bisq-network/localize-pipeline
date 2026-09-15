@@ -950,6 +950,14 @@ replayed from an assessment cache. Treat limits as start-call guards and inspect
 the local ledger after recovery; API-key operators should also compare it with
 provider billing.
 
+Cache admission and reuse both check feedback IDs, authorized target paths and
+key existence against the trusted source evidence. A rejected old cache entry
+is removed with a private audit record; existing cost and call records remain.
+Fresh invalid assessments use the same configured attempt limit as other model
+failures, not an additional retry loop. Each started attempt counts toward the
+daily session cap. Guardian never repairs a model-invented key by guessing its
+intended spelling, and repeated invalid output cannot publish edits.
+
 After `raw_retention_days`, raw comment-body rows are logically deleted from the
 active SQLite tables; their body hash and revision metadata remain. SQLite
 freelists, WAL files, filesystem snapshots, and backups can retain older bytes,
