@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -18,6 +19,42 @@ from tests.unit.test_guardian_controller import (
 )
 
 controller_runtime = runtime
+
+
+def test_prevention_signing_failure_survives_coordinator_catch(tmp_path, monkeypatch):
+    from localize.guardian.diagnostics import failure_audit, git_failure
+    from localize.guardian.models import GuardianMode
+    from tests.unit.test_guardian_prevention_runtime import (
+        OPEN_SOURCE_REVISION_ID, _FakeAuthor, _FakeBroker, _FakeWorkspace,
+        _candidate, _coordinator, _current_base, _live_lease,
+        _open_source_kwargs, _repository_policy,
+    )
+
+    def fail_signing(*args, **kwargs):
+        raise git_failure(
+            WorkspaceError("private signing details"), operation="commit",
+            returncode=128, output="gpg failed to sign private-secret",
+        )
+
+    monkeypatch.setattr(_FakeWorkspace, "commit_prevention_changes", fail_signing)
+    now = datetime(2026, 8, 30, 12, tzinfo=timezone.utc)
+    with GuardianState(tmp_path / "state.sqlite3") as state, failure_audit(state):
+        run_id = state.start_run(repository="acme/translations", locale="ru",
+                                 mode=GuardianMode.PROPOSE_PREVENTION, started_at=now)
+        coordinator = _coordinator(state=state, tmp_path=tmp_path,
+                                   broker=_FakeBroker(), author=_FakeAuthor())
+        outcome = coordinator.propose(
+            policy=_repository_policy(), recurrence_candidates=(_candidate(),),
+            evidence_revision_ids={"review_comment:42": OPEN_SOURCE_REVISION_ID},
+            run_id=run_id, observed_at=now, require_live_lease=_live_lease,
+            require_current_base_unchanged=_current_base, **_open_source_kwargs(),
+        )
+        assert outcome.failures == ("WorkspaceError",)
+        details = state.latest_health("guardian-failure").details
+        assert details["stage"] == "sign"
+        assert details["reason"] == "signing_failed"
+        assert details["run_id"] == run_id
+        assert "private" not in json.dumps(details)
 
 
 @pytest.mark.parametrize(

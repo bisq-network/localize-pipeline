@@ -5783,6 +5783,7 @@ class GuardianState:
                   AND a.status IN ({terminal_placeholders})
                   AND json_extract(a.details_json, '$.outcome')
                       IS NOT 'translation_batch_deferred'
+                  AND json_extract(a.details_json, '$.prevention_pending') IS NOT 1
                   {mode_filter}
                   {policy_filter}
             )"""
@@ -8947,6 +8948,7 @@ class GuardianState:
                JOIN actions a ON a.event_revision_id = prior.revision_id
                WHERE current.revision_id = ?
                  AND json_extract(a.details_json, '$.decision_required') = 1
+                 AND json_extract(a.details_json, '$.report_reason') IS NOT NULL
                  AND json_extract(a.details_json, '$.report_policy_digest') = ?
                ORDER BY a.action_id DESC LIMIT 1""",
             (revision_id, policy_digest),
@@ -9716,6 +9718,7 @@ class GuardianState:
                   AND json_extract(a.details_json, '$.outcome')
                       IS NOT 'translation_batch_deferred'
                   AND r.mode IN ({placeholders})
+                  AND json_extract(a.details_json, '$.prevention_pending') IS NOT 1
             )
             """,
             resolution_modes,
@@ -10410,6 +10413,22 @@ class GuardianState:
         return frozenset(
             revision_id for revision_id, _status, details in plan
             if loads_bounded_json(details).get("outcome") == "translation_batch_deferred"
+        )
+
+    def publication_pending_prevention_revision_ids(
+        self, publication: PublicationRecord,
+    ) -> frozenset[int]:
+        """Identify completed translations whose prevention work remains pending."""
+        exists = self._connection.execute(
+            "SELECT 1 FROM publication_completion_plan_items "
+            "WHERE publication_key = ? LIMIT 1", (publication.publication_key,),
+        ).fetchone()
+        if exists is None:
+            return frozenset()
+        plan = self._publication_completion_plan_in_transaction(publication)
+        return frozenset(
+            revision_id for revision_id, _status, details in plan
+            if loads_bounded_json(details).get("prevention_pending") is True
         )
 
     def _record_publication_completion_plan_in_transaction(

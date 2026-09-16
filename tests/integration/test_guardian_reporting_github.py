@@ -200,6 +200,7 @@ def test_summary_is_single_managed_comment_and_preserves_external_edits(boundary
         **arguments(), reports=reports, previous_body=first.body
     )
     assert updated.comment_id == first.comment_id
+    assert not updated.created
     assert "maintainer decision still required" in updated.body
     state["comments"][-1]["body"] += "\nHuman annotation"
     reports[0]["disposition"] = "needs_human"
@@ -209,6 +210,33 @@ def test_summary_is_single_managed_comment_and_preserves_external_edits(boundary
         )
     assert state["comments"][-1]["body"].endswith("Human annotation")
     assert len(state["comments"]) == 2
+
+
+@pytest.mark.parametrize("route,spoof", [
+    ("summary", "actor"), ("summary", "type"),
+    ("thread", "actor"), ("thread", "type"), ("thread", "parent"),
+])
+def test_copied_markers_outside_writer_and_route_do_not_block_reports(boundary, route, spoof):
+    broker, state = boundary
+    def post():
+        if route == "summary":
+            return broker.post_feedback_summary(**arguments(), reports=[], previous_body=None)
+        return broker.post_feedback_report(**report_arguments())
+    first = post()
+    legitimate = dict(state["comments"][0])
+    rogue = {**legitimate, "id": 987}
+    if spoof == "parent":
+        rogue["in_reply_to_id"] = 99
+    else:
+        rogue["user"] = {**rogue["user"], **({"id": 999} if spoof == "actor" else {"type": "Bot"})}
+    state["comments"][:] = [rogue]
+    replacement = post()
+    assert replacement.created
+    assert replacement.comment_id != first.comment_id
+    recovered = post()
+    assert not recovered.created
+    assert recovered.comment_id == replacement.comment_id
+    assert state["comments"][0] == rogue
 
 
 def test_review_summary_uses_linked_issue_comment(boundary):
