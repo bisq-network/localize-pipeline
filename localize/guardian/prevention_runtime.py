@@ -43,6 +43,7 @@ from localize.guardian.deadline import (
     PollDeadlineExceeded,
     deadline_httpx_timeout,
 )
+from localize.guardian.diagnostics import record_failure
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
@@ -4865,6 +4866,7 @@ class PreventionCoordinator:
                 raise
             except Exception as exc:
                 _require_live_prevention_lease(require_live_lease)
+                record_failure(exc, repository=policy.base_repo, run_id=run_id)
                 failures.append(type(exc).__name__)
                 continue
             drafts.append(draft)

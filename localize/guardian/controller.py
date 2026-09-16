@@ -82,7 +82,6 @@ from localize.guardian.policy import PatchPolicyError, PatchResult, apply_replac
 from localize.guardian.prevention_runtime import (
     PreventionBatchOutcome,
     PreventionLeaseLostError,
-    PreventionRuntimeError,
     PreventionSourceAuthorityError,
 )
 from localize.guardian.state import (
@@ -5695,12 +5694,21 @@ class GuardianController:
                 deferred_revisions = self.state.publication_deferred_revision_ids(
                     replied_publication
                 )
+                pending_prevention = self.state.publication_pending_prevention_revision_ids(
+                    replied_publication
+                )
                 for revision_id in replied_publication.event_revision_ids:
                     if revision_id in deferred_revisions:
                         continue
                     prior_revision = self.state.get_event_revision(revision_id)
                     if prior_revision is not None:
-                        signature_target.add(
+                        target = (
+                            translation_applied_signatures
+                            if self.config.mode is GuardianMode.PROPOSE_PREVENTION
+                            and revision_id in pending_prevention
+                            else signature_target
+                        )
+                        target.add(
                             (
                                 prior_revision.kind,
                                 prior_revision.event_id,
@@ -6473,12 +6481,10 @@ class GuardianController:
                     outcome=outcome,
                 )
                 if prevention_outcome.failures or prevention_outcome.deferred:
-                    # Leave the feedback revisions retryable. Successful drafts
-                    # are durably deduplicated, so a later run can continue the
-                    # remaining bounded candidates without duplicating them.
-                    raise PreventionRuntimeError(
-                        "Prevention candidates remain incomplete."
-                    )
+                    # Persist independent prevention work in the same atomic
+                    # completion plan as the translation publication. A retry
+                    # may continue prevention but must not repeat signed edits.
+                    report_context = {**report_context, "prevention_pending": True}
 
             replacements = _eligible_replacements(
                 assessments,
@@ -7231,7 +7237,7 @@ class GuardianController:
             completion_actions.append(
                 (
                     revision.revision_id,
-                    "skipped" if remaining else "completed",
+                    "skipped" if remaining or (report_context or {}).get("prevention_pending") else "completed",
                     {
                         "outcome": (
                             "translation_batch_deferred"

@@ -3494,11 +3494,12 @@ def test_incomplete_prevention_candidate_leaves_feedback_retryable(
             prevention_runner=prevention,
         ).poll_once()
 
-        assert outcome.runs_failed == 1
+        assert outcome.runs_completed == 1
         assert outcome.prevention_items_deferred == 1
         assert outcome.prevention_failures == ("PreventionPolicyError",)
-        assert outcome.failures == ("PreventionRuntimeError",)
-        assert sequence == ["prevention"]
+        assert outcome.failures == ()
+        assert outcome.applied_commits == (COMMIT_SHA,)
+        assert sequence.count("publish") == 1
         assert state.pending_event_revisions(mode=GuardianMode.PROPOSE_PREVENTION)
 
 

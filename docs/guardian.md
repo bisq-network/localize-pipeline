@@ -929,6 +929,16 @@ instead of cutting through a Unicode character or Markdown item.
 Do not use prevention PRs for project terminology or locale style that belongs
 in the consuming project's own config or glossary.
 
+An ordinary prevention-draft failure or exhausted draft slot does not block an
+otherwise authorized correction on an open translation PR. The signed
+correction and pending prevention work are recorded separately; later polls
+retry prevention without repeating the correction. Authentication, quota,
+lease, source-authority and publication checks still stop work at their
+respective boundaries. A published correction is not evidence that its
+prevention PR succeeded: inspect the poll's prevention failures and deferred
+counts as well. Private failure diagnostics retain the underlying adapter
+stage and reason, not raw stderr or credentials.
+
 Prevention recovery also requires the canonical GitHub URL; exact generated
 title and Guardian-authored body including its marker; exact head, base, and candidate; and
 `maintainer_can_modify: false`. Ready-created PRs, untouched legacy open drafts,
