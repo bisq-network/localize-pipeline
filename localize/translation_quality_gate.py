@@ -92,6 +92,7 @@ class SourceIdenticalStats:
     source_identical_count: int = 0
     expected_source_identical_count: int = 0
     unexpected_source_identical_count: int = 0
+    localized_to_source_regression_count: int = 0
     unexpected_source_identical_ratio: float = 0.0
     control_character_findings_count: int = 0
     examples: List[Dict[str, str]] = field(default_factory=list)
@@ -210,6 +211,12 @@ def _analyze_source_identical_translation_changes(
 
         stats.checked_entries_count += 1
         stats.unexpected_source_identical_count += 1
+        if (
+            change.old_value is not None
+            and normalize_value(change.old_value)
+            and normalize_value(change.old_value) != normalize_value(source_value)
+        ):
+            stats.localized_to_source_regression_count += 1
         if len(stats.examples) < examples_limit:
             stats.examples.append(
                 {
@@ -699,13 +706,23 @@ def build_quality_gate_report(
         "remediated_ai_findings_count": remediated_ai_findings_count,
     }
 
-    # An unexpected source echo is a correctness failure, not a volume-based
-    # quality signal.  Allowlisted keys have already been excluded while
-    # collecting ``source_stats``.
-    source_identical_blocking = bool(source_stats.unexpected_source_identical_count)
+    # Never tolerate destruction of an existing localized value. Thresholds
+    # still govern new source-identical entries; do not silently ignore config.
+    if source_stats.localized_to_source_regression_count:
+        blocking_reasons.append(
+            "Existing localized values were replaced by unexpected source-identical text."
+        )
+    source_identical_blocking = (
+        source_stats.unexpected_source_identical_count
+        >= config.source_identical_min_block_count
+        and (
+            source_stats.unexpected_source_identical_count > config.source_identical_max_count
+            or source_stats.unexpected_source_identical_ratio > config.source_identical_max_ratio
+        )
+    )
     if source_identical_blocking:
         blocking_reasons.append(
-            "Unexpected source-identical changed values require manual resolution."
+            "Unexpected source-identical changed values exceed configured quality thresholds."
         )
 
     if config.block_on_pipeline_warnings and pipeline_warnings:

@@ -448,7 +448,12 @@ def test_quality_gate_blocks_many_unexpected_source_identical_changes(tmp_path):
     assert report["status_state"] == "failure"
 
 
-def test_quality_gate_blocks_single_source_echo_and_ignores_allowlisted_key(tmp_path):
+@pytest.mark.parametrize("removed,blocking", [
+    ("-payment.safety=Bewahren Sie den Beleg für {0} Tage auf.\n", True),
+    ("", False),
+    ("-payment.safety=Keep the receipt for {0} days.\n", False),
+])
+def test_quality_gate_blocks_regression_but_respects_new_entry_thresholds(tmp_path, removed, blocking):
     repo_root = tmp_path
     input_folder = repo_root / "resources"
     _write_properties(
@@ -460,9 +465,9 @@ def test_quality_gate_blocks_single_source_echo_and_ignores_allowlisted_key(tmp_
     )
     diff_text = """diff --git a/resources/mobile_de.properties b/resources/mobile_de.properties
 +++ b/resources/mobile_de.properties
-+payment.safety=Keep the receipt for {0} days.
+REMOVED+payment.safety=Keep the receipt for {0} days.
 +metadata.source=Imported from {0}.
-"""
+""".replace("REMOVED", removed)
 
     stats = analyze_source_identical_changes(
         diff_text=diff_text,
@@ -493,7 +498,7 @@ def test_quality_gate_blocks_single_source_echo_and_ignores_allowlisted_key(tmp_
             "value": "Keep the receipt for {0} days.",
         }
     ]
-    assert report["blocking"] is True
+    assert report["blocking"] is blocking
 
 
 def test_pipeline_warnings_are_blocking_when_configured():
