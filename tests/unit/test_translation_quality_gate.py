@@ -448,6 +448,54 @@ def test_quality_gate_blocks_many_unexpected_source_identical_changes(tmp_path):
     assert report["status_state"] == "failure"
 
 
+def test_quality_gate_blocks_single_source_echo_and_ignores_allowlisted_key(tmp_path):
+    repo_root = tmp_path
+    input_folder = repo_root / "resources"
+    _write_properties(
+        input_folder / "mobile.properties",
+        {
+            "payment.safety": "Keep the receipt for {0} days.",
+            "metadata.source": "Imported from {0}.",
+        },
+    )
+    diff_text = """diff --git a/resources/mobile_de.properties b/resources/mobile_de.properties
++++ b/resources/mobile_de.properties
++payment.safety=Keep the receipt for {0} days.
++metadata.source=Imported from {0}.
+"""
+
+    stats = analyze_source_identical_changes(
+        diff_text=diff_text,
+        repo_root=str(repo_root),
+        input_folder=str(input_folder),
+        locale_codes=["de"],
+        brand_glossary=[],
+        ignore_key_patterns=[r"^metadata\."],
+    )
+    report = build_quality_gate_report(
+        source_stats=stats,
+        semantic_stats=None,
+        validation_summary={"files": {}, "pipeline_warnings": []},
+        changed_files=["resources/mobile_de.properties"],
+        input_folder=str(input_folder),
+        config=QualityGateConfig(
+            source_identical_min_block_count=99,
+            source_identical_max_count=99,
+            source_identical_max_ratio=1.0,
+        ),
+    )
+
+    assert stats.unexpected_source_identical_count == 1
+    assert stats.examples == [
+        {
+            "file": "mobile_de.properties",
+            "key": "payment.safety",
+            "value": "Keep the receipt for {0} days.",
+        }
+    ]
+    assert report["blocking"] is True
+
+
 def test_pipeline_warnings_are_blocking_when_configured():
     report = build_quality_gate_report(
         source_stats=analyze_source_identical_changes(

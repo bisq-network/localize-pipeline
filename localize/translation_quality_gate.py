@@ -699,19 +699,13 @@ def build_quality_gate_report(
         "remediated_ai_findings_count": remediated_ai_findings_count,
     }
 
-    source_identical_blocking = (
-        source_stats.unexpected_source_identical_count
-        >= config.source_identical_min_block_count
-        and (
-            source_stats.unexpected_source_identical_count
-            > config.source_identical_max_count
-            or source_stats.unexpected_source_identical_ratio
-            > config.source_identical_max_ratio
-        )
-    )
+    # An unexpected source echo is a correctness failure, not a volume-based
+    # quality signal.  Allowlisted keys have already been excluded while
+    # collecting ``source_stats``.
+    source_identical_blocking = bool(source_stats.unexpected_source_identical_count)
     if source_identical_blocking:
         blocking_reasons.append(
-            "Unexpected source-identical changed values exceed configured quality thresholds."
+            "Unexpected source-identical changed values require manual resolution."
         )
 
     if config.block_on_pipeline_warnings and pipeline_warnings:
