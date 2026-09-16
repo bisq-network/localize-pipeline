@@ -38,6 +38,7 @@ def test_translation_publishes_once_while_prevention_retries(
         first = controller.poll_once()
         assert first.applied_commits == (COMMIT_SHA,)
         assert state.pending_event_revisions(mode=GuardianMode.PROPOSE_PREVENTION)
+        assert state.status_snapshot(mode=GuardianMode.PROPOSE_PREVENTION).pending_revisions > 0
         provider.snapshots = (_snapshot(pull=_pull(head_sha=COMMIT_SHA)),)
         second = controller.poll_once()
         assert second.applied_commits == ()

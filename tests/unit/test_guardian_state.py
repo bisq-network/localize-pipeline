@@ -2367,6 +2367,18 @@ def test_v3_pending_retry_survives_upgrade_and_gains_resolution_ledger(
         )
 
 
+def test_held_report_ignores_legacy_action_without_report_reason(tmp_path):
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        revision = state.record_feedback_event(_event())
+        run_id = state.start_run(repository="acme/widgets", locale="de", mode=GuardianMode.OBSERVE)
+        state.record_action(
+            run_id=run_id, event_revision_id=revision.revision_id,
+            action=GuardianMode.OBSERVE.value, status="completed",
+            details={"decision_required": True, "report_policy_digest": "a" * 64},
+        )
+        assert state.held_feedback_report_for_revision(revision.revision_id, "a" * 64) is None
+
+
 def test_empty_v0_database_upgrades_to_v12(tmp_path: Path) -> None:
     """Initialize an empty database at the current supported schema version."""
     database = tmp_path / "guardian.sqlite3"

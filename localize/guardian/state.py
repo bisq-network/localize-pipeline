@@ -8948,6 +8948,7 @@ class GuardianState:
                JOIN actions a ON a.event_revision_id = prior.revision_id
                WHERE current.revision_id = ?
                  AND json_extract(a.details_json, '$.decision_required') = 1
+                 AND json_extract(a.details_json, '$.report_reason') IS NOT NULL
                  AND json_extract(a.details_json, '$.report_policy_digest') = ?
                ORDER BY a.action_id DESC LIMIT 1""",
             (revision_id, policy_digest),
@@ -9717,6 +9718,7 @@ class GuardianState:
                   AND json_extract(a.details_json, '$.outcome')
                       IS NOT 'translation_batch_deferred'
                   AND r.mode IN ({placeholders})
+                  AND json_extract(a.details_json, '$.prevention_pending') IS NOT 1
             )
             """,
             resolution_modes,

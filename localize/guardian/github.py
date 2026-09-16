@@ -2408,7 +2408,14 @@ class GitHubWriteBroker:
                     raise PolicyViolation("Review comment belongs to a different pull request.")
                 parent_id = _as_int(parent.get("in_reply_to_id") or parent.get("id"), label="review parent id")
             collection = f"{prefix}/pulls/{pull_number}/comments" if parent_id else f"{prefix}/issues/{pull_number}/comments"
-            matches = [item for item in http.paginate(collection) if marker in str(item.get("body") or "")]
+            matches = [
+                item for item in http.paginate(collection)
+                if isinstance(item.get("user"), Mapping)
+                and (item["user"].get("id"), item["user"].get("type"))
+                == (expected_actor.id, expected_actor.type)
+                and item.get("in_reply_to_id") == parent_id
+                and marker in str(item.get("body") or "")
+            ]
             if len(matches) > 1:
                 raise PolicyViolation("Ambiguous Guardian explanation markers.")
 
@@ -2444,7 +2451,7 @@ class GitHubWriteBroker:
                 validate(_as_mapping(http.request_json("GET", target), label="summary"), exact_previous_body, False)
                 before_create()
             response = _as_mapping(http.request_json(method, target, payload={"body": body}), label="explanation")
-            return validate(response, body, True)
+            return validate(response, body, method == "POST")
 
     def post_feedback_summary(
         self, *, pull_number: int, expected_head_sha: str, expected_base_sha: str,
