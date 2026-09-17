@@ -56,6 +56,7 @@ def test_invalid_machine_only_path_is_removed_without_narrowing_reviewer_authori
                 if valid_kind != "reviewer":
                     return result
                 extra_ids = set(manifest["feedback_ids"]) - {item.feedback_id for item in result.feedback}
+                assert all(identifier.startswith("quality_finding:") for identifier in extra_ids)
                 return replace(result, feedback=(*result.feedback, *(GuardianFeedbackDecision(
                     feedback_id=identifier, verdict="reject", confidence=0.99,
                     rationale="The correction is assigned to the overlapping reviewer item.",

@@ -258,8 +258,12 @@ def _localization_payload(
     profiles: Sequence[LocalizationProfile],
     locale_codes: Sequence[str],
     max_file_bytes: int,
+    max_payload_bytes: int | None = None,
 ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...]]:
+    """Build localization records without retaining an oversized aggregate."""
     result: list[dict[str, Any]] = []
+    payload_bytes = 2  # JSON array brackets, including for a single file.
+    encoder = json.JSONEncoder(ensure_ascii=False)
     normalized_paths: list[str] = []
     locales: list[str] = []
     for raw_path in paths:
@@ -296,15 +300,20 @@ def _localization_payload(
             key: {"source": source_values[key], "target": target_values[key]}
             for key in sorted(set(source_values) & set(target_values))
         }
-        result.append(
-            {
-                "format": profile.localization_format.id,
-                "locale": locale,
-                "path": path,
-                "source_path": normalized_source,
-                "entries": entries,
-            }
-        )
+        record = {
+            "format": profile.localization_format.id,
+            "locale": locale,
+            "path": path,
+            "source_path": normalized_source,
+            "entries": entries,
+        }
+        if max_payload_bytes is not None:
+            payload_bytes += 2 if result else 0  # Default JSON comma and space.
+            for chunk in encoder.iterencode(record):
+                payload_bytes += len(chunk.encode("utf-8"))
+                if payload_bytes > max_payload_bytes:
+                    raise EvidenceError("Localization evidence exceeds its byte bound (size limit).")
+        result.append(record)
         normalized_paths.append(path)
         locales.append(locale)
     if not result:
@@ -421,6 +430,7 @@ def build_evidence_bundle(
         profiles=profiles,
         locale_codes=locale_codes,
         max_file_bytes=max_bytes,
+        max_payload_bytes=max_bytes,
     )
     unknown_locales = sorted(set(feedback_locales) - set(file_locales))
     if unknown_locales:

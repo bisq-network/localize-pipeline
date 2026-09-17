@@ -57,9 +57,8 @@ are private events, never projections of arbitrary public text.
         allowed_path_globs=policy.allowed_path_globs,
         profiles=profiles, locale_codes=locale_codes,
         max_file_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
+        max_payload_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
     )
-    if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_PRIVATE_EVIDENCE_BYTES:
-        raise ValueError("Private quality evidence exceeds its byte bound.")
     legacy_keys = set()
     for event in legacy_events:
         if event.body.startswith(MARKER):
