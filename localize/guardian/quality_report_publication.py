@@ -14,6 +14,7 @@ from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 
+from localize.guardian import quality_reports
 from localize.guardian.github import _parse_pull_request
 from localize.guardian.quality_reports import build_report, deterministic_categories, finding, render_report
 from localize.ignore_keys import is_ignored_key
@@ -37,12 +38,44 @@ def reports_from_changes(pull, changes, *, brands=(), ignored_patterns=()):
             )
     if len(grouped) > MAX_REPORTS:
         raise ValueError(f"Machine report count exceeds {MAX_REPORTS}; split the translation PR before reporting.")
-    reports = tuple(build_report(pull, path=path, locale=locale, findings=items[start:start + 100])
-                 for (path, locale), items in sorted(grouped.items())
-                 for start in range(0, len(items), 100))
-    if len(reports) > MAX_REPORTS:
-        raise ValueError("Machine report chunks exceed the publication bound; split the PR.")
-    return reports
+    reports = []
+
+    def append_chunk(report):
+        if len(reports) >= MAX_REPORTS:
+            raise ValueError("Machine report chunks exceed the publication bound; split the PR.")
+        # Revalidate the complete chunk, including duplicate finding identities.
+        render_report(report)
+        reports.append(report)
+
+    for (path, locale), items in sorted(grouped.items()):
+        chunk = None
+        chunk_bytes = 0
+        for item in items:
+            try:
+                single = build_report(pull, path=path, locale=locale, findings=[item])
+            except ValueError as exc:
+                raise ValueError("A single machine finding cannot fit the report limits.") from exc
+            single_bytes = len(render_report(single).encode("utf-8"))
+            # The canonical JSON array gains one comma plus this encoded object.
+            # Count bytes, including escaped characters, rather than key length.
+            added_bytes = 1 + len(json.dumps(
+                item, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))
+            if chunk is not None and (
+                len(chunk["findings"]) >= quality_reports.MAX_FINDINGS
+                or chunk_bytes + added_bytes > quality_reports.MAX_REPORT_BYTES
+            ):
+                append_chunk(chunk)
+                chunk = None
+            if chunk is None:
+                chunk = single
+                chunk_bytes = single_bytes
+            else:
+                chunk["findings"].append(item)
+                chunk_bytes += added_bytes
+        if chunk is not None:
+            append_chunk(chunk)
+    return tuple(reports)
 
 
 def _run(argv, *, cwd=None, input_text=None):
