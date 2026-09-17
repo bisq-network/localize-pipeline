@@ -906,8 +906,15 @@ class RepositoryPolicy:
     closed_pr_backfill: ClosedPrBackfillPolicy | None = None
     publication_actor: TrustedActor | None = None
 
+    quality_report_actor: TrustedActor | None = None
+
     def __post_init__(self) -> None:
         _validate_repository_name(self.base_repo, field_name="base_repo")
+        if self.quality_report_actor is not None and (
+            not isinstance(self.quality_report_actor, TrustedActor)
+            or self.quality_report_actor.type not in {"User", "Bot"}
+        ):
+            raise ValueError("quality_report_actor must be a User or Bot identity.")
         if (
             isinstance(self.base_repo_id, bool)
             or not isinstance(self.base_repo_id, int)

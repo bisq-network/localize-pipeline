@@ -352,6 +352,15 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                             "type": {"const": "User"},
                         },
                     },
+                    "quality_report_actor": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["login", "id", "type"],
+                        "properties": {
+                            "login": _NON_EMPTY_STRING,
+                            "id": {"type": "integer", "minimum": 1},
+                            "type": {"enum": ["User", "Bot"]},
+                        },
+                    },
                     "allowed_pr_authors": _actor_list_schema(("User", "Bot")),
                     "allowed_head_owners": _actor_list_schema(
                         ("User", "Bot", "Organization")
@@ -1046,6 +1055,10 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
                     )
                 ),
                 source_locale=raw_policy["source_locale"],
+                quality_report_actor=(
+                    TrustedActor(**raw_policy["quality_report_actor"])
+                    if raw_policy.get("quality_report_actor") is not None else None
+                ),
                 trusted_reviewers=actors_for("trusted_reviewers"),
                 trusted_bots=actors_for("trusted_bots"),
                 private_repo_model_opt_in=raw_policy.get(

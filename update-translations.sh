@@ -1084,6 +1084,16 @@ PY
         return 1
     fi
     log "Published translation-quality-gate status on $status_repo: $quality_state"
+    # Strict machine evidence is separate from reviewer authority. Guardian
+    # consumes it only when the operator explicitly pins this producer actor.
+    local quality_pr_number="${PR_URL##*/}"
+    if [[ "${GUARDIAN_QUALITY_REPORT_ENABLED:-false}" == "true" ]] && ! (cd "$app_root" && python3 -m localize.guardian.quality_report_publication \
+        --repository "$UPSTREAM_REPO_NAME" --pull-number "$quality_pr_number" \
+        --expected-head "$commit_sha" --repo-root "$TARGET_PROJECT_ROOT" \
+        --config "$CONFIG_FILE" --input-folder "$ABSOLUTE_INPUT_FOLDER"); then
+        log "Typed quality evidence publication failed; Guardian intake is incomplete." "ERROR"
+        return 1
+    fi
 }
 
 publish_translation_changes() {
