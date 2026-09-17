@@ -2209,6 +2209,25 @@ def test_scheduled_due_uses_local_day_instead_of_utc_day() -> None:
     )
 
 
+def test_responsive_interval_uses_elapsed_time_across_dst_fallback() -> None:
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("Europe/Vienna")
+    checkpoint = SimpleNamespace(
+        checked_at=datetime(2026, 10, 25, 0, 55, tzinfo=UTC),
+        details={"local_date": "2026-10-25", "attempt_count": 1},
+    )
+    state = SimpleNamespace(latest_health=lambda component: checkpoint)
+    assert not runtime._scheduled_poll_is_due(
+        state, now=datetime(2026, 10, 25, 1, 5, tzinfo=UTC).astimezone(zone),
+        schedule=GuardianSchedule(poll_interval_seconds=900),
+    )
+    assert runtime._scheduled_poll_is_due(
+        state, now=datetime(2026, 10, 25, 1, 10, tzinfo=UTC).astimezone(zone),
+        schedule=GuardianSchedule(poll_interval_seconds=900),
+    )
+
+
 def test_scheduled_due_does_not_repeat_across_dst_fallback() -> None:
     now = datetime(2026, 10, 25, 0, 15, tzinfo=timezone(timedelta(hours=1)))
     prior = datetime(2026, 10, 25, 0, 5, tzinfo=timezone(timedelta(hours=2)))

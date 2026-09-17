@@ -1059,9 +1059,39 @@ overlapping polls;
 scheduled lock contention exits successfully while a manual caller receives a
 clear already-running error. This provides catch-up after sleep,
 logout, or a missed wall-clock time without running the full model workflow
-every interval. A failed scheduled attempt is not retried on the next 15-minute
+every interval. In the default daily mode, a failed scheduled attempt is not retried on the next 15-minute
 wake; use an explicit manual `guardian run` after diagnosing it. Manual runs
 always execute and become that local day's latest attempt checkpoint.
+
+For responsive open-PR review, opt in in the private configuration:
+
+```yaml
+schedule:
+  hour: 0
+  minute: 0
+  poll_interval_seconds: 900
+  max_polls_per_day: 96
+```
+
+Each scheduled wake after the configured local start time can then poll GitHub,
+at least 900 seconds apart and at most 96 polls per local day. Failed attempts
+count too; a crash does not lose the checkpoint. Authentication or provider/model
+capacity circuit failures stop subsequent scheduled attempts for that day; diagnose
+the cause before an explicit manual retry. These are **poll** limits, not Codex
+session limits: unchanged completed feedback does not start another model session.
+The shared `limits.max_model_calls_per_day` budget still counts every model retry,
+and the existing per-run timeouts, bounded model retries, and no-fallback
+authentication policy remain unchanged. A run with unfinished feedback can retry
+that work, but completed publications retain their existing idempotency checks.
+
+Responsive scheduled polls attempt the closed-PR backlog only once per local day;
+later polls concentrate on open PRs and their prevention follow-up. This also means
+a failed historical publication waits until the next daily history attempt unless
+the operator explicitly runs `guardian run` without `--scheduled` after repair.
+Manual polls include historical work and count toward the day's poll checkpoint,
+but deliberately bypass scheduling gates. A later successful manual recovery clears
+the responsive scheduler's circuit checkpoint. Omitting `poll_interval_seconds`
+preserves the original once-daily behavior.
 
 `install` stages the files but does not load the LaunchAgent. The generated
 runner is an operator-local artifact beside the external Guardian config, not a

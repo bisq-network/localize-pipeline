@@ -2232,7 +2232,7 @@ class GuardianController:
             ) from exc
         require_live_lease()
 
-    def poll_once(self) -> PollOutcome:
+    def poll_once(self, *, include_history: bool = True) -> PollOutcome:
         """Run one finite poll, never retrying at the orchestration layer."""
 
         observed_at = _as_utc(self.now())
@@ -2500,7 +2500,8 @@ class GuardianController:
                         checked_at=observed_at,
                     )
             if (
-                not lease_lost
+                include_history
+                and not lease_lost
                 and "PollDeadlineExceeded" not in outcome.failures
                 and not outcome.authentication_circuit_open
                 and not outcome.model_circuit_open

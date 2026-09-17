@@ -231,6 +231,10 @@ _CONFIG_SCHEMA: dict[str, Any] = {
             "properties": {
                 "hour": {"type": "integer", "minimum": 0, "maximum": 23},
                 "minute": {"type": "integer", "minimum": 0, "maximum": 59},
+                "poll_interval_seconds": {
+                    "type": ["integer", "null"], "minimum": 900, "maximum": 86400,
+                },
+                "max_polls_per_day": {"type": "integer", "minimum": 1, "maximum": 96},
             },
         },
         "runtime": {
@@ -1299,6 +1303,10 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
         schedule = GuardianSchedule(
             hour=raw_schedule.get("hour", schedule_defaults.hour),
             minute=raw_schedule.get("minute", schedule_defaults.minute),
+            poll_interval_seconds=raw_schedule.get("poll_interval_seconds"),
+            max_polls_per_day=raw_schedule.get(
+                "max_polls_per_day", schedule_defaults.max_polls_per_day,
+            ),
         )
     except ValueError as exc:
         raise GuardianConfigError(f"Invalid guardian configuration at schedule: {exc}") from None
