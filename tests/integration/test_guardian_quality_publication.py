@@ -52,7 +52,7 @@ def test_grouped_publication_roundtrip_dedup_and_truthful_totals():
     assert publication.publish_reports(**kwargs)["already_present"] == 1
     assert len(comments) == 1
     body = comments[0]["body"]
-    assert "Automated translation quality check" in body
+    assert "Localize Pipeline bot — translation quality check" in body
     assert "5 candidate findings" in body
     assert "Locales: it: 3, ru: 2." in body
     assert f"https://github.com/{pull.repository}/commit/{pull.head_sha}" in body

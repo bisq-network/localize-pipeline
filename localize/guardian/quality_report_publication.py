@@ -119,7 +119,7 @@ def publish_reports(*, repository, pull_number, expected_head, reports, request)
         categories.update(item["category"] for item in report["findings"])
     noun = "finding" if counts["finding_count"] == 1 else "findings"
     body = (
-        "Automated translation quality check\n\n"
+        "Localize Pipeline bot — translation quality check\n\n"
         f"At [{expected_head[:7]}](https://github.com/{repository}/commit/{expected_head}), "
         f"the check flagged {counts['finding_count']} candidate {noun} for review. "
         "These are not confirmed defects.\n\n"

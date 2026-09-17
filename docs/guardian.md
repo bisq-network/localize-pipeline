@@ -1136,18 +1136,28 @@ policy changes. If the ChatGPT session expires or is revoked, run
 - Signed commits and the bot-marked status reply were verified on a test PR.
 - No workflow expects the Guardian to merge or resolve a review thread.
 
-### Optional pipeline quality-report intake
+### Optional translation quality checks
+
+GitHub comments are for reviewers, not a machine-data transport. Guardian keeps
+its structured findings in its private audit state. Public updates must explain
+what needs attention or what changed, with useful commit links; they must not
+contain diagnostic JSON or hidden machine payloads.
 
 Set `GUARDIAN_QUALITY_REPORT_ENABLED=true` in the translator environment to
-publish grouped, structured quality comments. In each Guardian repository policy,
+publish one concise, bot-labelled quality summary for a revision with findings.
+This summary does not grant Guardian authority to edit anything. In each
+Guardian repository policy,
 set `quality_report_actor: {login: producer-login, id: 12345, type: User}` using
-the actual producer's numeric GitHub identity. This is separate from the reviewer
-whitelist: ordinary comments by that actor confer no review authority.
+the actual producer's numeric GitHub identity. This existing opt-in enables
+internal deterministic quality checks and retains compatibility with older
+reports. It is separate from the reviewer whitelist: ordinary comments by that
+actor confer no review authority.
 
 The initial scope is unexpected source-identical values and disallowed control
-characters in changed entries. Guardian verifies the report's repository, PR,
-base/head commits, target path, locale and value hashes, then independently
-recomputes the finding with the trusted brand/ignore policy before assessment.
+characters in changed entries. Guardian derives findings from exact base/head
+checkouts using the trusted brand/ignore policy, rather than relying on a public
+comment. Findings are bound to the repository, PR, commits, target path, locale,
+and source/target values and are revalidated before publication.
 An unreproduced finding is recorded as rejected with insufficient evidence and
 excluded from model input and recurrence authority. Other verified findings and
 trusted review feedback in the same poll can still proceed; an invalid-only
@@ -1158,16 +1168,16 @@ semantic, glossary and model-failure narratives do not independently authorize
 edits; those still need trusted review feedback. No arbitrary check-status or
 PR-body text is consumed as authority.
 
-Reports are grouped by file (at most 100 findings per chunk), with internal
-per-key events so edit limits retain unfinished work. Public dispositions are
-consolidated in the existing PR summary. Only a durably recorded Guardian commit
-can carry unresolved evidence forward; an external head change requires a fresh
-report. Already-published corrections may supply historical prevention evidence,
-but cannot authorize another edit. More than 100 report chunks fails explicitly
-instead of dropping findings.
+Internal per-key events let edit limits retain unfinished work. Public
+dispositions are consolidated in the existing PR summary. Only a durably
+recorded Guardian commit can carry unresolved evidence forward; an external head
+change requires fresh evidence. Already-published corrections may supply
+historical prevention evidence, but cannot authorize another edit. Evidence
+limits fail explicitly instead of silently dropping findings.
 
-To backfill an existing PR without model calls, use an exact local head and the
-trusted operator configuration:
+To publish a human-readable check summary for an existing PR without model
+calls, use an exact local head and the trusted operator configuration. Guardian
+does not need this comment to perform its internal checks:
 
 ```bash
 python -m localize.guardian.quality_report_publication \
@@ -1178,5 +1188,8 @@ python -m localize.guardian.quality_report_publication \
 
 The producer rejects modified report target/source files and source differences
 from the current PR base. Other pending translation batches remain untouched.
-It posts missing reports only and prints separate finding/report/publication
-counts; rerunning at the same revision does not duplicate comments.
+It posts only the summary and prints separate internal finding/report counts
+and public comment counts. Rerunning with the same findings at the same revision
+does not duplicate the comment. An unchanged English value is a candidate for
+review, not proof of a mistranslation; product names and shared-language terms
+may correctly remain unchanged.
