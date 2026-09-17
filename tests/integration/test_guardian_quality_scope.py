@@ -7,6 +7,7 @@ import pytest
 
 from localize.guardian.github import ChangedFile
 from localize.guardian.models import GuardianMode, TrustedActor
+from localize.guardian.codex import GuardianFeedbackDecision
 from localize.guardian.quality_reports import parse_report, render_report
 from localize.guardian.state import GuardianState
 from tests.integration.test_guardian_quality_intake import EchoDriver, SOURCE, machine_snapshot
@@ -50,7 +51,21 @@ def test_invalid_machine_only_path_is_removed_without_narrowing_reviewer_authori
             assert set(manifest["files"]) == paths == expected
             assert ("invalid-only-path-context" in (task.evidence_dir / "changes.diff").read_text()) == (valid_kind == "reviewer")
             assert not (task.evidence_dir.parent / "bundle").exists()
-            return super().run(task, **kwargs)
+            observer = kwargs.pop("success_observer", None)
+            def add_private_overlap(result):
+                if valid_kind != "reviewer":
+                    return result
+                extra_ids = set(manifest["feedback_ids"]) - {item.feedback_id for item in result.feedback}
+                assert all(identifier.startswith("quality_finding:") for identifier in extra_ids)
+                return replace(result, feedback=(*result.feedback, *(GuardianFeedbackDecision(
+                    feedback_id=identifier, verdict="reject", confidence=0.99,
+                    rationale="The correction is assigned to the overlapping reviewer item.",
+                    replacements=(),
+                ) for identifier in sorted(extra_ids))))
+            def success(attempt, usage, result):
+                if observer is not None:
+                    observer(attempt, usage, add_private_overlap(result))
+            return add_private_overlap(super().run(task, success_observer=success, **kwargs))
 
     driver = InspectDriver()
     with GuardianState(tmp_path / "state.sqlite3") as state:

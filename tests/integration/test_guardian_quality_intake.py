@@ -293,7 +293,8 @@ def test_grouped_report_partial_thirty_edits_then_remainder(tmp_path, controller
         assert first.deferred_value_edits == 1
         assert not broker.feedback_reports  # Consolidated summary only.
         if not terminal_reply:
-            assert "30 machine finding(s)" in broker.feedback_summary.body
+            assert "30 applied; 1 deferred" in broker.feedback_summary.body
+            assert "31 automated quality findings" in broker.feedback_summary.body
         assert len(driver.calls) == 1
         (head / TARGET_PATH).write_text("".join(f"{key}={'Привет читатель' if index < 30 else 'Hello reader'}\n" for index, key in enumerate(keys)))
         provider.snapshots = (replace(snapshot, pull_request=_pull(head_sha="e" * 40 if external_head else COMMIT_SHA)),)
@@ -302,8 +303,11 @@ def test_grouped_report_partial_thirty_edits_then_remainder(tmp_path, controller
         second = poll()
         assert second.failures == ()
         if external_head:
-            assert not second.applied_commits
-            assert len(driver.calls) == 1
+            # The stale report cannot authorize work, but independent private
+            # evidence from the exact new head can find the remaining echo.
+            assert second.applied_commits == ("d" * 40,)
+            assert len(driver.calls) == 2
+            assert any(item.kind == "quality_finding" for item in state.latest_event_revisions())
             return
         assert second.applied_commits == ("d" * 40,)
         assert second.prepared_value_edits == 1

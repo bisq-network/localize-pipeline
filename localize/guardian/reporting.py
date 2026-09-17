@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping
 
 REASONS = {
@@ -87,7 +88,7 @@ def report_disposition(details: Mapping[str, object]) -> str:
     )
 
 
-def report_body(
+def legacy_report_body(
     details: Mapping[str, object],
     *,
     repository: str,
@@ -95,7 +96,7 @@ def report_body(
     pull_number: int | None = None,
     web_base_url: str = "https://github.com",
 ) -> str:
-    """Render public text without copying any free-form assessment content."""
+    """Reconstruct historical content for read-only ambiguous-write recovery."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Invalid report repository")
     if not re.fullmatch(
@@ -155,6 +156,54 @@ def report_body(
     return body + "\n\nThe review thread remains open for reviewer confirmation."
 
 
+def report_body(
+    details: Mapping[str, object], *, repository: str, feedback_id: str,
+    pull_number: int | None = None, web_base_url: str = "https://github.com",
+) -> str:
+    """Give reviewers the decision and next action, without internal identifiers."""
+    # Preserve one validation boundary for both current and historical schemas.
+    legacy = legacy_report_body(details, repository=repository, feedback_id=feedback_id,
+                                pull_number=pull_number, web_base_url=web_base_url)
+    title = legacy.split("\n", 1)[0].replace(f" (`{feedback_id}`).", "")
+    reason = str(details.get("report_reason", "unspecified"))
+    reasons = {
+        "processing_failure": "Processing did not complete.",
+        "unspecified": "The assessment did not establish a specific reason.",
+        "as_suggested": "The suggested correction was accepted.",
+        "alternative_glossary": "An alternative follows the configured glossary.",
+        "alternative_source_fidelity": "An alternative preserves the current source meaning.",
+        "alternative_other": "An alternative correction needs reviewer confirmation.",
+        "glossary_conflict": "The suggestion conflicts with the configured glossary.",
+        "policy_conflict": "The change is outside the configured edit or validation rules.",
+        "insufficient_evidence": "Evidence is insufficient to authorize a correction.",
+        "already_addressed": "The issue is already addressed in the assessed revision.",
+        "not_applicable": "The suggestion does not apply to the assessed revision.",
+    }
+    action = "Please review"
+    if report_disposition(details) in {"already_addressed", "not_applicable"} and not details.get("decision_required"):
+        action = "No action needed"
+    body = f"{title}\n\n{action}: {reasons[reason]}"
+    if details.get("decision_required"):
+        body += " A maintainer decision is needed before the operator can update the configuration."
+        remaining = details.get("held_value_edits") or details.get("deferred_value_edits") or 0
+        if remaining:
+            noun = "correction needs" if remaining == 1 else "corrections need"
+            body += f" {remaining} remaining {noun} maintainer approval."
+    if details.get("report_outcome") == "failed" and reason != "processing_failure":
+        body += " Guardian could not complete the correction."
+    commit = details.get("commit_sha")
+    if commit:
+        body += f" [Correction]({web_base_url}/{repository}/commit/{commit})."
+    else:
+        body += " No correction was published."
+    if pull_number is not None:
+        kind, identifier = feedback_id.split(":", 1)
+        anchor = {"review_comment": "discussion_r", "issue_comment": "issuecomment-",
+                  "review": "pullrequestreview-"}[kind]
+        body += f" [Source feedback]({web_base_url}/{repository}/pull/{pull_number}#{anchor}{identifier.split(':', 1)[0]})."
+    return body
+
+
 def report_key(
     *, repository_id: int, pull_number: int, feedback_id: str, body: str
 ) -> str:
@@ -174,13 +223,7 @@ def summary_body(
     web_base_url: str = "https://github.com",
 ) -> str:
     """One bounded, repository-bound summary without model-controlled prose."""
-    lines = [
-        "<!-- localize-guardian:feedback-summary:v1 -->",
-        "🤖 **Localize Guardian — feedback status**",
-        "",
-        "Assessment results; not a replacement for CI or translation validation.",
-        "",
-    ]
+    heading = "🤖 **Localize Guardian — feedback status**\n\n"
     allowed = {
         "applied",
         "applied_alternative",
@@ -193,30 +236,43 @@ def summary_body(
     if len(reports) > 100:
         raise ValueError("Feedback summary exceeds its publication bound.")
     if not reports:
-        lines.append(
-            "No current authorized feedback reports are available. Withdrawal of feedback does not approve a glossary change or settle a recorded maintainer decision."
-        )
+        return heading + "No current authorized feedback reports. Their withdrawal does not approve outstanding glossary changes."
+    outcomes = Counter()
+    finding_count = 0
     for report in reports:
         url, disposition = report["url"], report["disposition"]
         prefix = f"{web_base_url}/{repository}/pull/{pull_number}#"
+        commit_prefix = f"{web_base_url}/{repository}/commit/"
+        internal_commit = bool(
+            report.get("internal_finding") is True and isinstance(url, str)
+            and url.startswith(commit_prefix)
+            and re.fullmatch(r"[0-9a-f]{40}", url[len(commit_prefix):])
+        )
         if (
             not isinstance(url, str)
-            or not url.startswith(prefix)
+            or (not internal_commit and (not url.startswith(prefix)
             or not re.fullmatch(
                 r"(?:discussion_r|issuecomment-)[1-9][0-9]*", url[len(prefix) :]
-            )
+            )))
             or disposition not in allowed
         ):
             raise ValueError("Invalid feedback summary entry.")
-        suffix = (
-            " — maintainer decision still required"
-            if report.get("decision_required")
-            else ""
-        )
         count = report.get("finding_count")
         if count is not None:
             if type(count) is not int or not 1 <= count <= 10000:
                 raise ValueError("Invalid machine finding summary count.")
-            suffix = f" — {count} machine finding(s)" + suffix
-        lines.append(f"- [{disposition.replace('_', ' ')}]({url}){suffix}")
-    return "\n".join(lines)
+            finding_count += count
+        outcomes[disposition.replace("_", " ")] += count or 1
+    held = any(report.get("decision_required") for report in reports)
+    no_action = not held and all(report["disposition"] in {"already_addressed", "not_applicable"} for report in reports)
+    lead = "No action needed" if no_action else "Please review"
+    body = heading + lead + ": " + "; ".join(f"{count} {label}" for label, count in sorted(outcomes.items()))
+    if held:
+        body += "; maintainer decision still required"
+    if finding_count:
+        body += f" ({finding_count} automated quality findings)"
+    linked = sorted(reports, key=lambda item: not item.get("decision_required"))[:3]
+    body += ". " + " · ".join(f"[Details {index}]({report['url']})" for index, report in enumerate(linked, 1))
+    if len(reports) > len(linked):
+        body += f"; {len(reports) - len(linked)} more outcomes included in the counts."
+    return body

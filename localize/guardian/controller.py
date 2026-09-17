@@ -50,6 +50,7 @@ from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.diagnostics import record_failure
 from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
+from localize.guardian.private_quality import derive_private_findings, lineage_finding_identity
 from localize.guardian.github import (
     BaseRevisionSnapshot,
     ChangedFile,
@@ -91,6 +92,7 @@ from localize.guardian.prevention_runtime import (
     PreventionSourceAuthorityError,
 )
 from localize.guardian.state import (
+    _MAX_CURRENT_FEEDBACK_PER_PULL,
     EventRevision,
     GuardianState,
     HistoricalPullReference,
@@ -3086,12 +3088,11 @@ class GuardianController:
                         policy.base_repo
                     ),
                 )
-                authorized = authorize_feedback(
+                authorized = self._authorize_open_feedback(
                     policy=policy,
                     snapshot=fresh,
-                    path_locales=scope.path_locales,
-                    changed_locales=tuple(sorted(set(scope.path_locales.values()))),
-                    expected_report_head_sha=self._quality_report_heads(policy, fresh.pull_request.number, source.head_sha),
+                    scope=scope,
+                    evidence_head_sha=source.head_sha,
                 )
             current = self._open_pull_authority_reference(
                 policy=policy,
@@ -3179,6 +3180,13 @@ class GuardianController:
                 changed_locales=tuple(sorted(set(scope.path_locales.values()))),
                 expected_report_head_sha=self._quality_report_heads(policy, final_fresh.pull_request.number, source.head_sha),
             )
+            # The private inputs were just derived from immutable checkouts.
+            # Reuse them only for this second identity/feedback race check; the
+            # base workspace has already been disposed of at this point.
+            final_authorized = replace(final_authorized, events=(
+                *final_authorized.events,
+                *(event for event in authorized.events if event.kind == "quality_finding"),
+            ))
             final_current = self._open_pull_authority_reference(
                 policy=policy,
                 snapshot=final_fresh,
@@ -5695,6 +5703,35 @@ class GuardianController:
         return frozenset((head_sha, *(publication.original_head_sha for publication in
             self._quality_report_publications(policy, pull_number, head_sha))))
 
+    def _authorize_open_feedback(self, *, policy, snapshot, scope, evidence_head_sha=None):
+        """Add locally derived findings without granting comment authors authority."""
+        anchor = evidence_head_sha or snapshot.pull_request.head_sha
+        lineage = self._quality_report_publications(policy, snapshot.pull_request.number, anchor)
+        if lineage:
+            anchor = lineage[-1].original_head_sha
+        authorized = authorize_feedback(
+            policy=policy, snapshot=snapshot, path_locales=scope.path_locales,
+            changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+            expected_report_head_sha=self._quality_report_heads(
+                policy, snapshot.pull_request.number, evidence_head_sha or snapshot.pull_request.head_sha,
+            ),
+        )
+        if policy.quality_report_actor is None:
+            return authorized
+        profiles, locale_codes = _load_base_profiles(
+            scope.config_path, expected_source_locale=policy.source_locale,
+        )
+        anchor_snapshot = replace(snapshot, pull_request=replace(snapshot.pull_request, head_sha=anchor))
+        _base, head_revision = _exact_revisions(policy, anchor_snapshot, github_host=self.github_host)
+        with self.checkout_factory(head_revision) as head_workspace:
+            events = derive_private_findings(
+                policy=policy, pull=snapshot.pull_request, evidence_head_sha=anchor,
+                head_root=head_workspace.path, base_root=scope.source_root,
+                scope=scope, profiles=profiles, locale_codes=locale_codes,
+                legacy_events=authorized.events, web_base_url=f"https://{self.github_host}",
+            )
+        return AuthorizedFeedback(events=(*authorized.events, *events), skipped=authorized.skipped)
+
     def _process_snapshot(
         self,
         *,
@@ -5733,14 +5770,10 @@ class GuardianController:
                 ),
                 base_config_bundle_digest=base_config_bundle_digest,
             )
-            authorized = authorize_feedback(
+            authorized = self._authorize_open_feedback(
                 policy=policy,
                 snapshot=snapshot,
-                path_locales=scope.path_locales,
-                changed_locales=tuple(sorted(set(scope.path_locales.values()))),
-                expected_report_head_sha=self._quality_report_heads(
-                    policy, snapshot.pull_request.number, snapshot.pull_request.head_sha,
-                ),
+                scope=scope,
             )
             open_source = self._open_pull_authority_reference(
                 policy=policy,
@@ -5756,6 +5789,8 @@ class GuardianController:
                     quality_event_ids=frozenset(event.event_id for event in authorized.events),
                 ),
             )
+            if len({(event.kind, event.event_id) for event in (*previous, *current_events)}) > _MAX_CURRENT_FEEDBACK_PER_PULL:
+                raise ValueError("Combined feedback authority exceeds the durable intake bound.")
             publication_actor = policy.publication_actor
             replied_publication = (
                 None
@@ -5771,6 +5806,9 @@ class GuardianController:
             )
             addressed_signatures: set[tuple[str, str, str]] = set()
             translation_applied_signatures: set[tuple[str, str, str]] = set()
+            addressed_quality_identities: set[str] = set()
+            applied_quality_identities: set[str] = set()
+            quality_heads = self._quality_report_heads(policy, snapshot.pull_request.number, snapshot.pull_request.head_sha)
             for publication in self._quality_report_publications(policy, snapshot.pull_request.number, snapshot.pull_request.head_sha):
                 pending_ids = self.state.publication_pending_prevention_revision_ids(publication)
                 deferred_ids = self.state.publication_deferred_revision_ids(publication)
@@ -5782,6 +5820,11 @@ class GuardianController:
                               and (revision_id in pending_ids or self.state.get_run(publication.run_id).mode is GuardianMode.APPLY_OWNED_TRANSLATIONS)
                               else addressed_signatures)
                     target.add((prior_revision.kind, prior_revision.event_id, prior_revision.revision_hash))
+                    if prior_revision.body:
+                        (applied_quality_identities if target is translation_applied_signatures
+                         else addressed_quality_identities).add(lineage_finding_identity(
+                             prior_revision.body, allowed_heads=quality_heads,
+                         ))
             if replied_publication is not None:
                 publication_mode = self.state.get_run(replied_publication.run_id).mode
                 signature_target = (
@@ -5823,6 +5866,16 @@ class GuardianController:
                 if revision.is_new:
                     outcome.feedback_revisions_recorded += 1
                 current[(event.kind, event.event_id)] = (event, revision)
+                if event.kind == "quality_finding" and not event.deleted:
+                    # Retiring a public legacy report changes its transport ID,
+                    # not an exact finding already covered by our own signed
+                    # correction. Preserve pending prevention through migration.
+                    signature = (event.kind, event.event_id, revision.revision_hash)
+                    identity = lineage_finding_identity(event.body, allowed_heads=quality_heads)
+                    if identity in addressed_quality_identities:
+                        addressed_signatures.add(signature)
+                    if identity in applied_quality_identities:
+                        translation_applied_signatures.add(signature)
 
             if (
                 replied_publication is not None
@@ -7221,12 +7274,20 @@ class GuardianController:
                 if ":quality:" in event.event_id:
                     # Machine findings have one consolidated public summary,
                     # never dozens of per-key comments on a maintainer's PR.
-                    machine_key = (event.event_id.split(':', 1)[0], report_disposition(details), bool(details.get("decision_required")))
+                    url = (event.html_url if event.kind == "quality_finding" else
+                           f"{broker.web_base_url}/{policy.base_repo}/pull/{event.pr_number}#issuecomment-{event.event_id.split(':', 1)[0]}")
+                    if event.kind == "quality_finding" and details.get("commit_sha"):
+                        commit_sha = details["commit_sha"]
+                        if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+                            raise ValueError("Invalid quality correction commit.")
+                        url = f"{broker.web_base_url}/{policy.base_repo}/commit/{commit_sha}"
+                    machine_key = (url, report_disposition(details), bool(details.get("decision_required")))
                     if machine_key not in machine_reports:
                         machine_reports[machine_key] = {
-                            "url": f"{broker.web_base_url}/{policy.base_repo}/pull/{event.pr_number}#issuecomment-{machine_key[0]}",
+                            "url": url,
                             "disposition": machine_key[1], "decision_required": machine_key[2],
                             "finding_count": 0,
+                            "internal_finding": event.kind == "quality_finding",
                         }
                         reports.append(machine_reports[machine_key])
                     machine_reports[machine_key]["finding_count"] += 1

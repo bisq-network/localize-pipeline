@@ -61,6 +61,63 @@ def _event(**overrides) -> FeedbackEvent:
     return FeedbackEvent(**values)
 
 
+def test_localization_budget_stops_before_parsing_later_files(tmp_path, monkeypatch):
+    """Aggregate limits stop intake, not merely reject an already-built bundle."""
+    config = _write_project(tmp_path)
+    raw = yaml.safe_load(config.read_text())
+    raw["supported_locales"] += [{"code": "de", "name": "German"}, {"code": "fr", "name": "French"}]
+    config.write_text(yaml.safe_dump(raw))
+    for locale in ("ru", "de", "fr"):
+        (tmp_path / f"l10n/messages_{locale}.properties").write_text("safe=" + "é" * 200 + "\n")
+    (tmp_path / "l10n/messages_en.properties").write_text("safe=" + "é" * 200 + "\n")
+    original = evidence_module.get_localization_adapter
+    parsed = []
+
+    class RecordingAdapter:
+        def parse_file(self, path):
+            parsed.append(Path(path).name)
+            return self.adapter.parse_file(path)
+
+    def adapter_for(profile):
+        proxy = RecordingAdapter()
+        proxy.adapter = original(profile)
+        return proxy
+
+    monkeypatch.setattr(evidence_module, "get_localization_adapter", adapter_for)
+    with pytest.raises(EvidenceError, match="size limit"):
+        build_evidence_bundle(
+            destination=tmp_path / "evidence", repo_root=tmp_path,
+            trusted_pipeline_config_path=config, repository="acme/widgets",
+            pr_number=12, head_sha="a" * 40, base_sha="b" * 40,
+            feedback=(_event(),),
+            changed_paths=tuple(f"l10n/messages_{locale}.properties" for locale in ("ru", "de", "fr")),
+            allowed_path_globs=("l10n/*.properties",), diff_text="", max_bytes=1500,
+        )
+    assert "messages_de.properties" in parsed
+    assert "messages_fr.properties" not in parsed
+    assert not (tmp_path / "evidence").exists()
+
+
+@pytest.mark.parametrize("margin", [-1, 0, 1])
+def test_localization_budget_counts_exact_utf8_json_bytes(tmp_path, margin):
+    """Count both values, JSON escaping and array punctuation at the boundary."""
+    config = _write_project(tmp_path)
+    (tmp_path / "l10n/messages_en.properties").write_text('safe=Quoted "é"\n')
+    kwargs = dict(
+        repo_root=tmp_path, source_root=tmp_path,
+        paths=("l10n/messages_ru.properties",), allowed_path_globs=("l10n/*.properties",),
+        profiles=evidence_module.load_localization_profiles(yaml.safe_load(config.read_text())),
+        locale_codes=("ru",), max_file_bytes=4096,
+    )
+    expected = evidence_module._localization_payload(**kwargs)
+    size = len(json.dumps(expected[0], ensure_ascii=False).encode("utf-8"))
+    if margin < 0:
+        with pytest.raises(EvidenceError, match="size limit"):
+            evidence_module._localization_payload(**kwargs, max_payload_bytes=size + margin)
+    else:
+        assert evidence_module._localization_payload(**kwargs, max_payload_bytes=size + margin) == expected
+
+
 @pytest.mark.parametrize("diff_bytes", [3_500_000, 4 * 1024 * 1024])
 def test_default_evidence_limit_supports_large_polls_but_remains_bounded(
     tmp_path, diff_bytes
