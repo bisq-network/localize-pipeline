@@ -382,7 +382,7 @@ def test_partial_glossary_alternative_explicitly_holds_remaining_edits(
         assert first.applied_commits == (COMMIT_SHA,)
         assert first.deferred_value_edits == 1
         assert any(
-            "1 remaining value edits are human-held" in reply.body
+            "1 remaining correction needs maintainer approval" in reply.body
             for reply in broker.feedback_reports.values()
         )
         provider.snapshots = (_snapshot(pull=_pull(head_sha=COMMIT_SHA)),)

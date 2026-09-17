@@ -1195,15 +1195,16 @@ class PreventionGitHubBroker:
             )
 
     @staticmethod
-    def _marker(evidence_hash: str, candidate_sha: str) -> str:
+    def _marker(evidence_hash: str, candidate_sha: str, *, legacy: bool = False) -> str:
         if not _HASH_RE.fullmatch(evidence_hash) or not _SHA_RE.fullmatch(
             candidate_sha
         ):
             raise ValueError("Prevention marker identity is invalid.")
-        return (
-            "<!-- localize-guardian-prevention:v1 "
-            f"evidence={evidence_hash} candidate={candidate_sha} -->"
-        )
+        if legacy:
+            # Read-only recovery of an exact body persisted by older releases.
+            return ("<!-- localize-guardian-prevention:v1 "
+                    f"evidence={evidence_hash} candidate={candidate_sha} -->")
+        return "## Localize Guardian — automated prevention proposal"
 
     def _validated_html_url(self, value: object, *, number: int) -> str:
         if (
@@ -1631,7 +1632,7 @@ class PreventionGitHubBroker:
         _full_sha(candidate_sha, label="candidate SHA")
         title = _safe_single_line(title, label="title", max_bytes=title_max_bytes)
         body = _safe_body(body)
-        marker = self._marker(evidence_hash, candidate_sha)
+        marker = self._marker(evidence_hash, candidate_sha, legacy="\n\nEvidence fingerprint: " in body)
         draft_body = _safe_body(f"{marker}\n{body}")
         if expected_number is not None:
             expected_number = _positive_int(
@@ -1740,7 +1741,8 @@ class PreventionGitHubBroker:
         _full_sha(candidate_sha, label="candidate SHA")
         title = _safe_single_line(title, label="title", max_bytes=_MAX_TITLE_BYTES)
         body = _safe_body(body)
-        marker = self._marker(evidence_hash, candidate_sha)
+        legacy_body = "\n\nEvidence fingerprint: " in body
+        marker = self._marker(evidence_hash, candidate_sha, legacy=legacy_body)
         draft_body = _safe_body(f"{marker}\n{body}")
         with self._client() as (client, actor):
             self._assert_identities(client)
@@ -1759,6 +1761,10 @@ class PreventionGitHubBroker:
             )
             if existing is not None:
                 return existing
+            if legacy_body:
+                raise PreventionRuntimeError(
+                    "Legacy machine-only draft text cannot be republished; prepare a new human-readable proposal."
+                )
             if self._base_sha(client) != expected_base_sha:
                 raise PreventionRuntimeError(
                     "Prevention target base moved before draft."
@@ -4335,6 +4341,23 @@ class PreventionCoordinator:
                         known_evidence_hashes=known_hashes,
                         **deadline_kwargs,
                     )
+                    # Human provenance comes from attested source identities,
+                    # never from model-supplied URLs or internal feedback IDs.
+                    source_numbers = ((open_source.pr_number,) if open_source is not None
+                                      else tuple(item.pr_number for item in source_pulls))
+                    source_links = "\n".join(
+                        f"- [{source_policy.base_repo} #{number}]"
+                        f"(https://{base.revision.host}/{source_policy.base_repo}/pull/{number})"
+                        for number in source_numbers
+                    )
+                    candidate_url = (
+                        f"https://{base.revision.host}/{prevention.target_repository.full_name}"
+                        f"/commit/{plan.candidate_sha}"
+                    )
+                    plan = replace(plan, body=_safe_body(
+                        f"Source pull requests:\n{source_links}\n\n"
+                        f"[Proposed fix]({candidate_url})\n\n{plan.body}"
+                    ))
                     if plan.patch_hash != patch.patch_hash:
                         raise PreventionPolicyError(
                             "signed prevention bytes differ from the validated patch"

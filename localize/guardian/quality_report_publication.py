@@ -1,8 +1,9 @@
-"""Publish typed, revision-bound quality evidence for an owned translation PR.
+"""Publish a human-readable quality summary for an owned translation PR.
 
 This can also backfill an existing PR: materialize its exact head, supply the
 trusted operator config, and pass its current expected head explicitly. No
-model calls are made and existing comments are never edited.
+model calls are made and existing comments are never edited. Machine evidence
+stays internal; GitHub comments contain no hidden payloads or raw reports.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,7 +28,7 @@ MAX_REPORTS = 100
 
 
 def reports_from_changes(pull, changes, *, brands=(), ignored_patterns=()):
-    """One public report per file; Guardian derives resumable per-key events."""
+    """Build bounded internal reports for validation and summary accounting."""
     grouped = defaultdict(list)
     for change in changes:
         if change.source_value is None or is_ignored_key(change.key, ignored_patterns):
@@ -86,7 +87,16 @@ def _run(argv, *, cwd=None, input_text=None):
 
 
 def publish_reports(*, repository, pull_number, expected_head, reports, request):
-    """Check exact head and numeric producer identity; replay never duplicates."""
+    """Publish at most one owned summary; counters distinguish reports/comments."""
+    reports = tuple(reports)
+    counts = {"finding_count": sum(len(report["findings"]) for report in reports),
+              "report_count": len(reports), "published": 0, "already_present": 0}
+    if not reports:
+        return counts
+    if len(reports) > MAX_REPORTS:
+        raise ValueError("Quality summary exceeds the internal report bound")
+    for report in reports:
+        render_report(report)
     actor = request("GET", "/user")
     if type(actor.get("id")) is not int or actor.get("type") not in {"User", "Bot"}:
         raise ValueError("Unrecognized quality evidence producer")
@@ -97,24 +107,35 @@ def publish_reports(*, repository, pull_number, expected_head, reports, request)
     owned = {item.get("body") for item in existing
              if item.get("user", {}).get("id") == actor["id"]
              and item.get("user", {}).get("type") == actor["type"]}
-    published = 0
+    fresh = _parse_pull_request(repository, request("GET", f"/repos/{repository}/pulls/{pull_number}"))
     for report in reports:
-        fresh = _parse_pull_request(repository, request("GET", f"/repos/{repository}/pulls/{pull_number}"))
         if fresh.state != "open" or fresh.head_sha != expected_head or build_report(
                 fresh, path=report["path"], locale=report["locale"], findings=report["findings"]) != report:
-            raise ValueError("Pull revision changed before machine evidence publication")
-        body = render_report(report)
-        if body in owned:
-            continue
-        created = request("POST", endpoint, {"body": body})
-        if (created.get("body") != body or created.get("user", {}).get("id") != actor["id"]
-                or created.get("user", {}).get("type") != actor["type"]):
-            raise ValueError("Machine evidence publication could not be verified")
-        owned.add(body)
-        published += 1
-    return {"finding_count": sum(len(report["findings"]) for report in reports),
-            "report_count": len(reports), "published": published,
-            "already_present": len(reports) - published}
+            raise ValueError("Pull revision changed before quality summary publication")
+    categories = Counter()
+    for report in reports:
+        categories.update(item["category"] for item in report["findings"])
+    labels = []
+    if categories["source_echo"]:
+        noun = "value" if categories["source_echo"] == 1 else "values"
+        labels.append(f"{categories['source_echo']} source-identical {noun}")
+    if categories["control_character"]:
+        noun = "finding" if categories["control_character"] == 1 else "findings"
+        labels.append(f"{categories['control_character']} control-character {noun}")
+    body = (
+        "🤖 **Localize Pipeline:** Please review " + " and ".join(labels)
+        + f" in [{expected_head[:7]}](https://github.com/{repository}/commit/{expected_head}). "
+        "These are candidates, not confirmed defects; names and shared-language terms may legitimately remain unchanged."
+    )
+    if body in owned:
+        counts["already_present"] = 1
+        return counts
+    created = request("POST", endpoint, {"body": body})
+    if (created.get("body") != body or created.get("user", {}).get("id") != actor["id"]
+            or created.get("user", {}).get("type") != actor["type"]):
+        raise ValueError("Quality summary publication could not be verified")
+    counts["published"] = 1
+    return counts
 
 
 def main(argv=None):

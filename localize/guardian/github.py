@@ -2204,17 +2204,14 @@ class GitHubWriteBroker:
     def _reply_body(
         self,
         *,
-        marker: str,
         head_repository: str,
         commit_sha: str,
     ) -> str:
         short_sha = commit_sha[:12]
         commit_url = f"{self.web_base_url}/{head_repository}/commit/{commit_sha}"
         return (
-            f"{marker}\n"
-            "🤖 **Localize Guardian:** Applied a validated translation-only "
-            f"correction in [`{short_sha}`]({commit_url}). The review thread "
-            "remains open for reviewer confirmation."
+            f"🤖 **Localize Guardian:** Updated translations in [`{short_sha}`]({commit_url}). "
+            "Please review the diff."
         )
 
     def _validated_reply_comment(
@@ -2292,26 +2289,34 @@ class GitHubWriteBroker:
                 f"/repos/{self.policy.repository}/issues/{pull_number}/comments"
             )
             body = self._reply_body(
-                marker=marker,
                 head_repository=pull.head_repository,
                 commit_sha=commit_sha,
+            )
+            commit_url = f"{self.web_base_url}/{pull.head_repository}/commit/{commit_sha}"
+            legacy_body = (
+                marker + "\n🤖 **Localize Guardian:** Applied a validated translation-only "
+                f"correction in [`{commit_sha[:12]}`]({commit_url}). The review thread "
+                "remains open for reviewer confirmation."
             )
             matching: list[ReplyResult] = []
             for raw_comment in http.paginate(comments_url):
                 raw_body = str(raw_comment.get("body") or "")
-                if marker in raw_body:
+                if marker in raw_body or (
+                    raw_body.startswith("🤖 **Localize Guardian:**")
+                    and commit_url in raw_body
+                ):
                     matching.append(
                         self._validated_reply_comment(
                             raw_comment,
                             expected_actor=expected_actor,
-                            expected_body=body,
+                            expected_body=legacy_body if marker in raw_body else body,
                             pull_number=pull_number,
                             created=False,
                         )
                     )
             if len(matching) > 1:
                 raise PolicyViolation(
-                    "Multiple exact Guardian status comments share one marker."
+                    "Multiple exact Guardian status comments describe this correction."
                 )
             if matching:
                 return matching[0]
@@ -2329,7 +2334,6 @@ class GitHubWriteBroker:
                 expected_base_sha=expected_base_sha,
             )
             fresh_body = self._reply_body(
-                marker=marker,
                 head_repository=pull.head_repository,
                 commit_sha=commit_sha,
             )
@@ -2362,20 +2366,43 @@ class GitHubWriteBroker:
         issue comments use a linked PR-level reply because GitHub has no nested
         reply endpoint for those objects.
         """
-        from localize.guardian.reporting import report_body
+        from localize.guardian.reporting import legacy_report_body, report_body, report_key
 
         self._validate_marker_id(report_id, label="report_id")
         body = report_body(details, repository=self.policy.repository, feedback_id=feedback_id,
                            pull_number=pull_number, web_base_url=self.web_base_url)
-        marker = f"<!-- localize-guardian:feedback:{report_id} -->"
-        body = marker + "\n" + body
+        # Older writers included the internal feedback identifier in the title.
+        # Retain exact read-only recovery of those comments, never publish it.
+        title = body.split("\n", 1)[0]
+        historical_text = legacy_report_body(
+            details, repository=self.policy.repository, feedback_id=feedback_id,
+            pull_number=pull_number, web_base_url=self.web_base_url,
+        )
+        old_ids = {report_id}
+        if self.policy.repository_id is not None:
+            old_ids.add(report_key(repository_id=self.policy.repository_id,
+                                   pull_number=pull_number, feedback_id=feedback_id,
+                                   body=historical_text))
+        legacy_markers = tuple(f"<!-- localize-guardian:feedback:{key} -->" for key in sorted(old_ids))
+        legacy_bodies = tuple(marker + "\n" + historical_text for marker in legacy_markers)
+        assessed_link = (
+            f"[Assessed revision]({self.web_base_url}/{self.policy.repository}"
+            f"/commit/{expected_head_sha})"
+        )
+        body += f"\n\n{assessed_link}."
         kind, raw_id = feedback_id.split(":", 1)
+        anchor = {"review_comment": "discussion_r", "issue_comment": "issuecomment-",
+                  "review": "pullrequestreview-"}[kind]
+        source_url = (f"{self.web_base_url}/{self.policy.repository}/pull/{pull_number}"
+                      f"#{anchor}{raw_id.split(':', 1)[0]}")
         # Synthetic nitpick IDs are routed to a PR comment, never an API path.
         review_id = int(raw_id) if kind == "review_comment" and raw_id.isdecimal() else None
         return self._post_explanation(
             pull_number=pull_number, expected_head_sha=expected_head_sha,
             expected_base_sha=expected_base_sha, expected_actor=expected_actor,
-            body=body, marker=marker, before_create=before_create,
+            body=body, marker=title, before_create=before_create,
+            identity_parts=(f"[Source feedback]({source_url})", assessed_link),
+            legacy_markers=legacy_markers, legacy_bodies=legacy_bodies,
             review_id=review_id,
         )
 
@@ -2384,6 +2411,8 @@ class GitHubWriteBroker:
         expected_actor: TrustedActor, body: str, marker: str,
         before_create: Callable[[], None], review_id: int | None = None,
         previous_body: str | Sequence[str] | None = None,
+        identity_parts: Sequence[str] = (), legacy_markers: Sequence[str] = (),
+        legacy_bodies: Sequence[str] = (),
     ) -> ReplyResult:
         """Recover ambiguous writes only from exact actor/content/route matches."""
         self._validate_sha(expected_head_sha, label="expected_head_sha")
@@ -2414,7 +2443,11 @@ class GitHubWriteBroker:
                 and (item["user"].get("id"), item["user"].get("type"))
                 == (expected_actor.id, expected_actor.type)
                 and item.get("in_reply_to_id") == parent_id
-                and marker in str(item.get("body") or "")
+                and (
+                    ((bool(identity_parts) or str(item.get("body") or "").startswith(marker))
+                     and all(part in str(item.get("body") or "") for part in identity_parts))
+                    or any(old in str(item.get("body") or "") for old in legacy_markers)
+                )
             ]
             if len(matches) > 1:
                 raise PolicyViolation("Ambiguous Guardian explanation markers.")
@@ -2432,6 +2465,8 @@ class GitHubWriteBroker:
 
             if matches and matches[0].get("body") == body:
                 return validate(matches[0], body, False)
+            if matches and matches[0].get("body") in legacy_bodies:
+                return validate(matches[0], matches[0]["body"], False)
             if matches:
                 if previous_body is None or parent_id:
                     raise PolicyViolation("Guardian explanation was edited externally.")
@@ -2461,12 +2496,13 @@ class GitHubWriteBroker:
         """Use one managed comment; never weaken PR description recovery checks."""
         from localize.guardian.reporting import summary_body
 
-        marker = "<!-- localize-guardian:feedback-summary:v1 -->"
+        marker = "🤖 **Localize Guardian — feedback status**"
         return self._post_explanation(
             pull_number=pull_number, expected_head_sha=expected_head_sha,
             expected_base_sha=expected_base_sha, expected_actor=expected_actor,
             body=summary_body(reports, repository=self.policy.repository,
                               pull_number=pull_number, web_base_url=self.web_base_url),
             marker=marker, before_create=before_create,
+            legacy_markers=("<!-- localize-guardian:feedback-summary:v1 -->",),
             previous_body=previous_body,
         )

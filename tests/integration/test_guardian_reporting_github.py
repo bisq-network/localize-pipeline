@@ -278,3 +278,138 @@ def test_summary_retries_known_exact_versions_after_ambiguous_patch(boundary, fa
     )
     assert result.body == candidate and result.comment_id == first.comment_id
     assert len(state["comments"]) == 1
+
+
+def commit_arguments():
+    return {**arguments(), "commit_sha": HEAD_SHA, "action_id": "private-action-123",
+            "event_revision_id": "private-event-456"}
+
+
+@pytest.mark.parametrize("kind", ["commit", "report", "summary"])
+def test_public_writes_contain_only_human_readable_content(boundary, kind):
+    broker, state = boundary
+    if kind == "commit":
+        result = broker.post_commit_reply(**commit_arguments())
+    elif kind == "report":
+        result = broker.post_feedback_report(**report_arguments())
+        assert f"/commit/{HEAD_SHA}" in result.body
+        assert "Assessed revision" in result.body
+    else:
+        result = broker.post_feedback_summary(**arguments(), reports=[], previous_body=None)
+    assert result.body.startswith("🤖 **Localize Guardian")
+    for private in ("<!--", "private-action-123", "private-event-456", "f" * 64, "review_comment:12"):
+        assert private not in result.body
+    assert len(state["writes"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["commit", "report"])
+def test_legacy_comments_are_recovered_without_republishing_metadata(boundary, kind):
+    broker, state = boundary
+    if kind == "commit":
+        broker.post_commit_reply(**commit_arguments())
+        marker = "<!-- localize-guardian:v1 action=private-action-123 event=private-event-456 -->"
+        legacy_body = (marker + "\n🤖 **Localize Guardian:** Applied a validated translation-only "
+                       f"correction in [`{HEAD_SHA[:12]}`](https://github.test/translator-bot/app/commit/{HEAD_SHA}). "
+                       "The review thread remains open for reviewer confirmation.")
+        def post():
+            return broker.post_commit_reply(**commit_arguments())
+    else:
+        from localize.guardian.reporting import legacy_report_body
+        broker.post_feedback_report(**report_arguments())
+        legacy_body = ("<!-- localize-guardian:feedback:" + "f" * 64 + " -->\n"
+                       + legacy_report_body(report_arguments()["details"], repository="acme/app",
+                                            feedback_id="review_comment:12", pull_number=1,
+                                            web_base_url=broker.web_base_url))
+        def post():
+            return broker.post_feedback_report(**report_arguments())
+    state["comments"][0]["body"] = legacy_body
+    recovered = post()
+    assert recovered.body == legacy_body and not recovered.created
+    assert len(state["writes"]) == 1
+
+
+@pytest.mark.parametrize("tamper", ["edited", "heading", "duplicate"])
+def test_readable_report_identity_preserves_conflict_guards(boundary, tamper):
+    broker, state = boundary
+    broker.post_feedback_report(**report_arguments())
+    if tamper == "edited":
+        state["comments"][0]["body"] += "\nAn external annotation"
+    elif tamper == "heading":
+        state["comments"][0]["body"] = state["comments"][0]["body"].replace(
+            "🤖 **Localize Guardian — Maintainer decision needed**", "Edited heading")
+    else:
+        state["comments"].append({**state["comments"][0], "id": 101,
+                                  "html_url": "https://github.test/acme/app/pull/1#discussion_r101"})
+    with pytest.raises(PolicyViolation):
+        broker.post_feedback_report(**report_arguments())
+    assert len(state["writes"]) == 1
+
+
+def test_legacy_summary_migrates_only_from_exact_known_body(boundary):
+    broker, state = boundary
+    first = broker.post_feedback_summary(**arguments(), reports=[], previous_body=None)
+    legacy_body = "<!-- localize-guardian:feedback-summary:v1 -->\n" + first.body
+    state["comments"][0]["body"] = legacy_body
+    with pytest.raises(PolicyViolation, match="edited externally"):
+        broker.post_feedback_summary(**arguments(), reports=[], previous_body=first.body)
+    updated = broker.post_feedback_summary(**arguments(), reports=[], previous_body=legacy_body)
+    assert updated.comment_id == first.comment_id and not updated.created
+    assert "<!--" not in updated.body
+    assert len(state["comments"]) == 1
+
+
+def test_legacy_report_key_migration_recovers_existing_comment(boundary):
+    from localize.guardian.reporting import legacy_report_body, report_body, report_key
+    broker, state = boundary
+    kwargs = report_arguments()
+    old_text = legacy_report_body(kwargs["details"], repository="acme/app",
+                                  feedback_id=kwargs["feedback_id"], pull_number=1,
+                                  web_base_url=broker.web_base_url)
+    old_key = report_key(repository_id=broker.policy.repository_id, pull_number=1,
+                         feedback_id=kwargs["feedback_id"], body=old_text)
+    new_text = report_body(kwargs["details"], repository="acme/app",
+                           feedback_id=kwargs["feedback_id"], pull_number=1,
+                           web_base_url=broker.web_base_url)
+    new_key = report_key(repository_id=broker.policy.repository_id, pull_number=1,
+                         feedback_id=kwargs["feedback_id"], body=new_text)
+    assert old_key != new_key
+    state["comments"].append({
+        "id": 100, "user": _user_payload(), "in_reply_to_id": 12,
+        "html_url": "https://github.test/acme/app/pull/1#discussion_r100",
+        "body": f"<!-- localize-guardian:feedback:{old_key} -->\n{old_text}",
+    })
+    recovered = broker.post_feedback_report(**{**kwargs, "report_id": new_key})
+    assert not recovered.created and recovered.comment_id == 100
+    assert state["writes"] == []
+
+
+def test_summary_is_brief_without_hiding_counts_or_hold_decisions(boundary):
+    broker, state = boundary
+    reports = [{"url": f"https://github.test/acme/app/pull/1#discussion_r{100 + index}",
+                "disposition": "applied"} for index in range(100)]
+    reports[-1].update(disposition="needs_human", decision_required=True)
+    result = broker.post_feedback_summary(**arguments(), reports=reports, previous_body=None)
+    assert "Please review: 99 applied; 1 needs human" in result.body
+    assert "maintainer decision still required" in result.body
+    assert "#discussion_r199" in result.body
+    assert result.body.count("[Details ") == 3
+    assert "97 more outcomes included in the counts" in result.body
+    assert len(result.body) < 600
+
+
+def test_summary_for_completed_noops_requests_no_action(boundary):
+    broker, _ = boundary
+    result = broker.post_feedback_summary(**arguments(), previous_body=None, reports=[
+        {"url": "https://github.test/acme/app/pull/1#discussion_r100", "disposition": "already_addressed"},
+    ])
+    assert "No action needed" in result.body and "Please review" not in result.body
+
+
+def test_compact_summary_validates_even_unlinked_outcomes(boundary):
+    broker, state = boundary
+    reports = [{"url": f"https://github.test/acme/app/pull/1#discussion_r{100 + index}",
+                "disposition": "applied"} for index in range(4)]
+    reports[-1]["url"] = "https://attacker.invalid/"
+    with pytest.raises(ValueError, match="Invalid feedback summary entry"):
+        broker.post_feedback_summary(**arguments(), reports=reports, previous_body=None)
+    assert state["writes"] == []
