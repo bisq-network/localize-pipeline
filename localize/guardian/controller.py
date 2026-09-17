@@ -723,6 +723,10 @@ class _PublicationRecoveryBacklog(RuntimeError):
     """Bounded publication recovery must finish before new repository work."""
 
 
+class QualityReportLineageError(ValueError):
+    """One pull's publication lineage cannot provide bounded authority."""
+
+
 def _safe_failure_name(error: BaseException, **context: object) -> str:
     """Return an audit-safe failure identifier without untrusted text."""
 
@@ -2476,20 +2480,39 @@ class GuardianController:
                         policy.base_repo_id,
                         tuple(snapshot.pull_request.number for snapshot in snapshots),
                     )
+                    snapshot_failed = False
                     for snapshot in snapshots:
                         outcome.pull_requests_seen += 1
-                        self._process_snapshot(
-                            policy=policy,
-                            snapshot=snapshot,
-                            observed_at=observed_at,
-                            lease_owner=owner,
-                            outcome=outcome,
-                        )
+                        try:
+                            self._process_snapshot(
+                                policy=policy,
+                                snapshot=snapshot,
+                                observed_at=observed_at,
+                                lease_owner=owner,
+                                outcome=outcome,
+                            )
+                        except QualityReportLineageError as exc:
+                            snapshot_failed = True
+                            failure = _safe_failure_name(
+                                exc, repository=policy.base_repo,
+                                pull_numbers=[snapshot.pull_request.number],
+                            )
+                            outcome.failures.append(failure)
+                            self.state.record_health(
+                                component="guardian-snapshot", status="failed",
+                                message="Guardian rejected this pull's publication lineage.",
+                                details={
+                                    "repository": policy.base_repo,
+                                    "pr_number": snapshot.pull_request.number,
+                                    "failure_type": failure,
+                                }, checked_at=observed_at,
+                            )
                     # Historical writes are safe only after this poll obtained
                     # and processed a complete open-PR view for the same
                     # repository.  Retain the open target scope so closed
                     # evidence cannot race a still-open translation PR.
-                    open_poll_succeeded.add(policy.base_repo)
+                    if not snapshot_failed:
+                        open_poll_succeeded.add(policy.base_repo)
                     open_changed_paths[policy.base_repo] = frozenset(
                         changed.path
                         for snapshot in snapshots
@@ -5662,9 +5685,9 @@ class GuardianController:
             publications.append(publication)
             head_sha = publication.original_head_sha
             if head_sha in heads:
-                raise ValueError("Guardian publication lineage repeats a head")
+                raise QualityReportLineageError("Guardian publication lineage repeats a head")
             heads.add(head_sha)
-        raise ValueError("Guardian publication lineage exceeds its bound")
+        raise QualityReportLineageError("Guardian publication lineage exceeds its bound")
 
     def _quality_report_heads(self, policy, pull_number, head_sha):
         return frozenset((head_sha, *(publication.original_head_sha for publication in
