@@ -1,4 +1,4 @@
-"""Public report chunks respect both wire bytes and finding-count limits."""
+"""Internal report chunks stay bounded without becoming public payloads."""
 
 import pytest
 
@@ -75,8 +75,10 @@ def test_size_chunked_publication_replay_preserves_truthful_accounting():
     kwargs = dict(repository=pull.repository, pull_number=pull.number, expected_head=pull.head_sha, request=request)
     first = publication.publish_reports(reports=reports, **kwargs)
     assert first == {"finding_count": 80, "report_count": len(reports),
-                     "published": len(reports), "already_present": 0}
+                     "published": 1, "already_present": 0}
     second = publication.publish_reports(reports=publication.reports_from_changes(pull, changes), **kwargs)
     assert second == {"finding_count": 80, "report_count": len(reports),
-                      "published": 0, "already_present": len(reports)}
-    assert len(comments) == len(reports)
+                      "published": 0, "already_present": 1}
+    assert len(comments) == 1
+    assert "80 candidate findings" in comments[0]["body"]
+    assert len(comments[0]["body"].encode("utf-8")) < 2000
