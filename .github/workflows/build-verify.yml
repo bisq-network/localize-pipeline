@@ -86,6 +86,10 @@ jobs:
       # - name: Set up QEMU
       #   uses: docker/setup-qemu-action@v3
 
+      - name: Exercise restrictive production checkout permissions
+        if: ${{ matrix.python-version == '3.11' }}
+        run: chmod -R go-rwx localize
+
       - name: Build Docker Image
         if: ${{ matrix.python-version == '3.11' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
