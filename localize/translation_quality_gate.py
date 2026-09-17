@@ -67,9 +67,13 @@ class QualityGateConfig:
     retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(
         default_factory=dict
     )
+    source_identical_allowlist: Dict[str, Tuple[str, ...]] = field(
+        default_factory=dict
+    )
     ignore_key_patterns: List[Pattern[str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize gate policy, including reviewed source-value exemptions."""
         return {
             "source_identical_min_block_count": self.source_identical_min_block_count,
             "source_identical_max_count": self.source_identical_max_count,
@@ -79,6 +83,7 @@ class QualityGateConfig:
             "block_on_semantic_qa_warnings": self.block_on_semantic_qa_warnings,
             "semantic_qa_audit_scope": self.semantic_qa_audit_scope,
             "retained_source_word_allowlist": self.retained_source_word_allowlist,
+            "source_identical_allowlist": self.source_identical_allowlist,
             "ignore_key_patterns": [
                 pattern.pattern for pattern in self.ignore_key_patterns
             ],
@@ -112,9 +117,13 @@ _ENUM_LIKE_KEY = re.compile(r"^[A-Z0-9_.$-]+$")
 
 
 def is_expected_source_identical(
-    key: str, value: str, brand_glossary: Iterable[str]
+    key: str,
+    value: str,
+    brand_glossary: Iterable[str],
+    locale_code: str = "",
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> bool:
-    """Return true for values that are commonly and legitimately untranslated."""
+    """Recognize shared values and exact locale/global exemptions, ignoring case."""
     normalized = normalize_value(value)
     if not normalized:
         return True
@@ -122,6 +131,15 @@ def is_expected_source_identical(
         return True
     glossary = {term.strip().casefold() for term in brand_glossary if str(term).strip()}
     if normalized.casefold() in glossary:
+        return True
+    allowlist = normalize_retained_source_word_allowlist(
+        source_identical_allowlist or {}
+    )
+    allowed_values = {
+        normalize_value(term).casefold()
+        for term in (*allowlist.get("*", ()), *allowlist.get(locale_code, ()))
+    }
+    if normalized.casefold() in allowed_values:
         return True
     if not any(character.isalpha() for character in normalized):
         return True
@@ -138,6 +156,7 @@ def analyze_source_identical_changes(
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
     ignore_key_patterns: Sequence[Pattern[str] | str] = (),
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
     changes = iter_translation_changes_from_diff(
@@ -154,6 +173,7 @@ def analyze_source_identical_changes(
         brand_glossary=brand_glossary,
         examples_limit=examples_limit,
         ignore_key_patterns=_ensure_ignore_key_patterns(ignore_key_patterns),
+        source_identical_allowlist=source_identical_allowlist,
     )
 
 
@@ -178,7 +198,9 @@ def _analyze_source_identical_translation_changes(
     brand_glossary: Iterable[str],
     examples_limit: int,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
+    """Classify changes without exempting unrelated locales or partial phrases."""
     stats = SourceIdenticalStats()
 
     for change in _filter_ignored_changes(changes, ignore_key_patterns):
@@ -205,7 +227,13 @@ def _analyze_source_identical_translation_changes(
             continue
 
         stats.source_identical_count += 1
-        if is_expected_source_identical(change.key, source_value, brand_glossary):
+        if is_expected_source_identical(
+            change.key,
+            source_value,
+            brand_glossary,
+            change.locale_code,
+            source_identical_allowlist,
+        ):
             stats.expected_source_identical_count += 1
             continue
 
@@ -290,6 +318,7 @@ def analyze_source_identical_changes_for_profiles(
     localization_profiles: Sequence[LocalizationProfile],
     examples_limit: int = 10,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
     """Analyze suspicious source-identical changes across configured profiles."""
     return _analyze_source_identical_translation_changes(
@@ -305,6 +334,7 @@ def analyze_source_identical_changes_for_profiles(
         brand_glossary=brand_glossary,
         examples_limit=examples_limit,
         ignore_key_patterns=ignore_key_patterns,
+        source_identical_allowlist=source_identical_allowlist,
     )
 
 
@@ -405,6 +435,7 @@ def analyze_all_translation_entries_for_profiles(
 def load_quality_gate_config(
     config_path: str,
 ) -> Tuple[QualityGateConfig, List[str], List[str], List[SemanticRule]]:
+    """Load gate thresholds, locale-scoped exemptions and semantic rules."""
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
 
@@ -447,6 +478,9 @@ def load_quality_gate_config(
             semantic_qa_audit_scope=semantic_qa_audit_scope,
             retained_source_word_allowlist=normalize_retained_source_word_allowlist(
                 quality_gate.get("retained_source_word_allowlist", {})
+            ),
+            source_identical_allowlist=normalize_retained_source_word_allowlist(
+                quality_gate.get("source_identical_allowlist", {})
             ),
             ignore_key_patterns=compile_ignore_key_patterns(
                 raw_config.get("ignore_key_patterns", [])
@@ -1029,6 +1063,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Check staged translations using configured policy and write review reports."""
     args = _parse_args(argv)
     config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(
         args.config
@@ -1043,6 +1078,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         brand_glossary=brand_glossary,
         localization_profiles=localization_profiles,
         ignore_key_patterns=config.ignore_key_patterns,
+        source_identical_allowlist=config.source_identical_allowlist,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
