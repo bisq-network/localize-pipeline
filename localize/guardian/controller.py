@@ -50,7 +50,7 @@ from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.diagnostics import record_failure
 from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
-from localize.guardian.private_quality import derive_private_findings
+from localize.guardian.private_quality import derive_private_findings, lineage_finding_identity
 from localize.guardian.github import (
     BaseRevisionSnapshot,
     ChangedFile,
@@ -92,6 +92,7 @@ from localize.guardian.prevention_runtime import (
     PreventionSourceAuthorityError,
 )
 from localize.guardian.state import (
+    _MAX_CURRENT_FEEDBACK_PER_PULL,
     EventRevision,
     GuardianState,
     HistoricalPullReference,
@@ -5788,6 +5789,8 @@ class GuardianController:
                     quality_event_ids=frozenset(event.event_id for event in authorized.events),
                 ),
             )
+            if len({(event.kind, event.event_id) for event in (*previous, *current_events)}) > _MAX_CURRENT_FEEDBACK_PER_PULL:
+                raise ValueError("Combined feedback authority exceeds the durable intake bound.")
             publication_actor = policy.publication_actor
             replied_publication = (
                 None
@@ -5803,8 +5806,9 @@ class GuardianController:
             )
             addressed_signatures: set[tuple[str, str, str]] = set()
             translation_applied_signatures: set[tuple[str, str, str]] = set()
-            addressed_quality_bodies: set[str] = set()
-            applied_quality_bodies: set[str] = set()
+            addressed_quality_identities: set[str] = set()
+            applied_quality_identities: set[str] = set()
+            quality_heads = self._quality_report_heads(policy, snapshot.pull_request.number, snapshot.pull_request.head_sha)
             for publication in self._quality_report_publications(policy, snapshot.pull_request.number, snapshot.pull_request.head_sha):
                 pending_ids = self.state.publication_pending_prevention_revision_ids(publication)
                 deferred_ids = self.state.publication_deferred_revision_ids(publication)
@@ -5817,8 +5821,10 @@ class GuardianController:
                               else addressed_signatures)
                     target.add((prior_revision.kind, prior_revision.event_id, prior_revision.revision_hash))
                     if prior_revision.body:
-                        (applied_quality_bodies if target is translation_applied_signatures
-                         else addressed_quality_bodies).add(prior_revision.body)
+                        (applied_quality_identities if target is translation_applied_signatures
+                         else addressed_quality_identities).add(lineage_finding_identity(
+                             prior_revision.body, allowed_heads=quality_heads,
+                         ))
             if replied_publication is not None:
                 publication_mode = self.state.get_run(replied_publication.run_id).mode
                 signature_target = (
@@ -5860,14 +5866,15 @@ class GuardianController:
                 if revision.is_new:
                     outcome.feedback_revisions_recorded += 1
                 current[(event.kind, event.event_id)] = (event, revision)
-                if event.kind == "quality_finding":
+                if event.kind == "quality_finding" and not event.deleted:
                     # Retiring a public legacy report changes its transport ID,
                     # not an exact finding already covered by our own signed
                     # correction. Preserve pending prevention through migration.
                     signature = (event.kind, event.event_id, revision.revision_hash)
-                    if event.body in addressed_quality_bodies:
+                    identity = lineage_finding_identity(event.body, allowed_heads=quality_heads)
+                    if identity in addressed_quality_identities:
                         addressed_signatures.add(signature)
-                    if event.body in applied_quality_bodies:
+                    if identity in applied_quality_identities:
                         translation_applied_signatures.add(signature)
 
             if (

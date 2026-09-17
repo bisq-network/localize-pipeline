@@ -23,6 +23,20 @@ MAX_PRIVATE_EVIDENCE_BYTES = 4 * 1024 * 1024
 MAX_PRIVATE_FINDINGS = 10_000
 
 
+def lineage_finding_identity(body, *, allowed_heads):
+    """Match exact evidence across our recorded heads, not arbitrary ancestry.
+
+The same defect can be reported between two Guardian corrections. Only its
+head label may differ; base, repository identities, key and value digests must
+remain identical before a prior correction can suppress another edit.
+    """
+    report = parse_report(body)
+    if report["head_sha"] not in allowed_heads:
+        raise ValueError("Private finding is outside the durable publication lineage.")
+    del report["head_sha"]
+    return value_digest(json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
 def derive_private_findings(*, policy, pull, evidence_head_sha, head_root,
                             base_root, scope, profiles, locale_codes,
                             legacy_events=(), web_base_url="https://github.com"):
