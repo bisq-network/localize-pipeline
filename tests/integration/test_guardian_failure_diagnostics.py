@@ -21,6 +21,83 @@ from tests.unit.test_guardian_controller import (
 controller_runtime = runtime
 
 
+@pytest.mark.parametrize(
+    "base_code,patched_code,base_outcome,patched_outcome",
+    [
+        (0, 0, "passed", "passed"),
+        (1, 1, "failed", "failed"),
+        (2, 2, "error", "error"),
+        (5, 0, "error", "passed"),
+        ("timeout", 0, "timed_out", "passed"),
+        (1, "timeout", "failed", "timed_out"),
+        ("oserror", 0, "error", "passed"),
+        (-9, 0, "error", "passed"),
+    ],
+)
+def test_failed_regression_proof_retains_only_outcomes_and_exit_codes(
+    tmp_path, monkeypatch, base_code, patched_code, base_outcome, patched_outcome,
+):
+    from localize.guardian import prevention_runtime
+    from localize.guardian.diagnostics import failure_audit
+    from localize.guardian.prevention import PreventionPolicyError
+    from tests.unit.test_guardian_prevention_runtime import (
+        BASE_SHA, CANDIDATE_SHA, _prevention_policy,
+    )
+
+    base, patched = tmp_path / "base", tmp_path / "patched"
+    base.mkdir()
+    patched.mkdir()
+    codes = iter((base_code, patched_code))
+    raw = "secret-token /Users/operator/private-key https://private.example/"
+
+    def process(argv, **kwargs):
+        assert kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+        code = next(codes)
+        if code == "timeout":
+            raise subprocess.TimeoutExpired(argv, 10, output=raw, stderr=raw)
+        if code == "oserror":
+            raise OSError(raw)
+        return subprocess.CompletedProcess(argv, code, raw, raw)
+
+    monkeypatch.setattr(prevention_runtime, "run_bounded_process", process)
+    monkeypatch.setattr(prevention_runtime.SandboxedTestRunner, "_prove_confinement",
+                        lambda *args, **kwargs: None)
+    with GuardianState(tmp_path / "state.sqlite3") as state, failure_audit(state):
+        with pytest.raises(PreventionPolicyError) as failure:
+            prevention_runtime.SandboxedTestRunner(timeout_seconds=10).run_pair(
+                base_workspace=base, candidate_workspace=patched, policy=_prevention_policy(),
+                base_sha=BASE_SHA, candidate_sha=CANDIDATE_SHA, test_overlay_hash="c" * 64,
+            )
+        assert _safe_failure_name(failure.value) == "PreventionPolicyError"
+        details = state.latest_health("guardian-failure").details
+        assert details["stage"] == "regression-proof"
+        assert details["reason"] == "red_green_mismatch"
+        assert details["base_outcome"] == base_outcome
+        assert details["patched_outcome"] == patched_outcome
+        assert details["base_exit_code"] == {"timeout": 124, "oserror": 125}.get(base_code, base_code)
+        assert details["patched_exit_code"] == {"timeout": 124, "oserror": 125}.get(patched_code, patched_code)
+        assert "every configured focused argv must fail by assertion" in str(failure.value)
+        serialized = json.dumps(details)
+        for forbidden in ("secret-token", "/Users/", "https://", str(tmp_path), "pytest", "argv"):
+            assert forbidden not in serialized
+
+
+def test_regression_diagnostics_reject_unclassified_text_and_unbounded_codes(tmp_path):
+    from localize.guardian.diagnostics import failure_audit, regression_proof_failure
+
+    raw = "secret-token /Users/operator/private-key https://private.example/"
+    error = regression_proof_failure(
+        RuntimeError(raw), base_outcome=raw, patched_outcome={"raw": raw},
+        base_code=True, patched_code=10 ** 100,
+    )
+    with GuardianState(tmp_path / "state.sqlite3") as state, failure_audit(state):
+        assert _safe_failure_name(error) == "RuntimeError"
+        details = state.latest_health("guardian-failure").details
+        assert details["reason"] == "red_green_mismatch"
+        assert not {"base_outcome", "patched_outcome", "base_exit_code", "patched_exit_code"} & details.keys()
+        assert raw not in json.dumps(details)
+
+
 def test_prevention_signing_failure_survives_coordinator_catch(tmp_path, monkeypatch):
     from localize.guardian.diagnostics import failure_audit, git_failure
     from localize.guardian.models import GuardianMode

@@ -552,6 +552,11 @@ remain `unclassified` with code locations; raw stderr, exception prose, command
 arguments, credentials and absolute paths are never stored in these records or
 copied into public replies. A later failure does not replace the last-success
 timestamp. Desktop notifications depend on the operator's scheduler wrapper.
+Rejected prevention regression proofs record `red_green_mismatch` with the
+base and patched outcomes (`passed`, `failed`, `error`, or `timed_out`) and
+bounded numeric exit codes. This distinguishes an already-green baseline from
+a failing candidate or test-runner error without retaining test output. The
+requirement that tests fail on the base and pass on the candidate is unchanged.
 
 Two bounded, redacted operator worklists expose durable recovery state under
 the same exclusive poll lock:
