@@ -449,6 +449,8 @@ def build_evidence_bundle(
         ],
         "glossary": {locale: glossary.get(locale, {}) for locale in sorted(set(file_locales))},
     }
+    if "ignore_key_patterns" in config:
+        validation_rules["ignore_key_patterns"] = list(config["ignore_key_patterns"] or ())
 
     manifest = {
         "schema_version": 1,

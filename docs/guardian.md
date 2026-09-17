@@ -552,6 +552,11 @@ remain `unclassified` with code locations; raw stderr, exception prose, command
 arguments, credentials and absolute paths are never stored in these records or
 copied into public replies. A later failure does not replace the last-success
 timestamp. Desktop notifications depend on the operator's scheduler wrapper.
+Rejected prevention regression proofs record `red_green_mismatch` with the
+base and patched outcomes (`passed`, `failed`, `error`, or `timed_out`) and
+bounded numeric exit codes. This distinguishes an already-green baseline from
+a failing candidate or test-runner error without retaining test output. The
+requirement that tests fail on the base and pass on the candidate is unchanged.
 
 Two bounded, redacted operator worklists expose durable recovery state under
 the same exclusive poll lock:
@@ -1130,3 +1135,44 @@ policy changes. If the ChatGPT session expires or is revoked, run
   reviewed the USD reservations and provider billing.
 - Signed commits and the bot-marked status reply were verified on a test PR.
 - No workflow expects the Guardian to merge or resolve a review thread.
+
+### Optional pipeline quality-report intake
+
+Set `GUARDIAN_QUALITY_REPORT_ENABLED=true` in the translator environment to
+publish grouped, structured quality comments. In each Guardian repository policy,
+set `quality_report_actor: {login: producer-login, id: 12345, type: User}` using
+the actual producer's numeric GitHub identity. This is separate from the reviewer
+whitelist: ordinary comments by that actor confer no review authority.
+
+The initial scope is unexpected source-identical values and disallowed control
+characters in changed entries. Guardian verifies the report's repository, PR,
+base/head commits, target path, locale and value hashes, then independently
+recomputes the finding with the trusted brand/ignore policy before assessment.
+Source-echo flags do not prove shared-language wording is wrong; the assessment
+must still distinguish a defect from legitimate identical wording. Placeholder,
+semantic, glossary and model-failure narratives do not independently authorize
+edits; those still need trusted review feedback. No arbitrary check-status or
+PR-body text is consumed as authority.
+
+Reports are grouped by file (at most 100 findings per chunk), with internal
+per-key events so edit limits retain unfinished work. Public dispositions are
+consolidated in the existing PR summary. Only a durably recorded Guardian commit
+can carry unresolved evidence forward; an external head change requires a fresh
+report. Already-published corrections may supply historical prevention evidence,
+but cannot authorize another edit. More than 100 report chunks fails explicitly
+instead of dropping findings.
+
+To backfill an existing PR without model calls, use an exact local head and the
+trusted operator configuration:
+
+```bash
+python -m localize.guardian.quality_report_publication \
+  --repository owner/project --pull-number 123 --expected-head FULL_HEAD_SHA \
+  --repo-root /path/to/checkout --input-folder /path/to/checkout/l10n \
+  --config /path/to/trusted/config.yaml
+```
+
+The producer rejects modified report target/source files and source differences
+from the current PR base. Other pending translation batches remain untouched.
+It posts missing reports only and prints separate finding/report/publication
+counts; rerunning at the same revision does not duplicate comments.

@@ -213,5 +213,10 @@ def summary_body(
             if report.get("decision_required")
             else ""
         )
+        count = report.get("finding_count")
+        if count is not None:
+            if type(count) is not int or not 1 <= count <= 10000:
+                raise ValueError("Invalid machine finding summary count.")
+            suffix = f" — {count} machine finding(s)" + suffix
         lines.append(f"- [{disposition.replace('_', ' ')}]({url}){suffix}")
     return "\n".join(lines)

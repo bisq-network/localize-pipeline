@@ -21,6 +21,22 @@ class AdapterFailure:
     http_status: int | None = None
 
 
+@dataclass(frozen=True)
+class RegressionProofFailure:
+    base_outcome: str
+    patched_outcome: str
+    base_exit_code: int
+    patched_exit_code: int
+
+
+def regression_proof_failure(error, *, base_outcome, patched_outcome, base_code, patched_code):
+    """Retain classifications before rejected proof results are discarded."""
+    error.guardian_failure = RegressionProofFailure(
+        base_outcome, patched_outcome, base_code, patched_code,
+    )
+    return error
+
+
 _GIT_STAGES = {
     "commit": "sign",
     "verify-commit": "verify-signature",
@@ -140,7 +156,16 @@ def record_failure(error, **context):
         "locations": locations[-8:],
     }
     adapter = getattr(error, "guardian_failure", None)
-    if isinstance(adapter, AdapterFailure):
+    if isinstance(adapter, RegressionProofFailure):
+        details.update(stage="regression-proof", operation="focused-tests", reason="red_green_mismatch")
+        for phase in ("base", "patched"):
+            outcome = getattr(adapter, f"{phase}_outcome")
+            if type(outcome) is str and outcome in {"passed", "failed", "error", "timed_out"}:
+                details[f"{phase}_outcome"] = outcome
+            code = getattr(adapter, f"{phase}_exit_code")
+            if type(code) is int and -255 <= code <= 255:
+                details[f"{phase}_exit_code"] = code
+    elif isinstance(adapter, AdapterFailure):
         details.update(
             stage=adapter.stage, operation=adapter.operation, reason=adapter.reason
         )

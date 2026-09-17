@@ -1034,7 +1034,9 @@ class CodexDriver:
                         prompt = task.prompt + (
                             "\nThe previous result failed trusted-task validation. "
                             "Re-read the evidence and use only its exact keys, "
-                            "authorized paths and feedback IDs. If evidence is "
+                            "authorized paths and feedback IDs. Follow the glossary "
+                            "and brand requirements in validation-rules.json, including "
+                            "required term occurrence counts. If evidence is "
                             "insufficient, return needs_human without replacements."
                         )
                         continue

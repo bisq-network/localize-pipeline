@@ -12,6 +12,7 @@ from localize.guardian.github import (
     PullRequestFeedbackSnapshot,
 )
 from localize.guardian.models import FeedbackEvent, RepositoryPolicy
+from localize.guardian.quality_reports import MARKER, parse_report, render_report, report_matches_pull, value_digest
 
 
 _FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -147,6 +148,7 @@ def _authorize_feedback_for_state(
     path_locales: Mapping[str, str],
     changed_locales: Sequence[str],
     required_pull_state: str,
+    expected_report_head_sha: str | frozenset[str] | None = None,
 ) -> AuthorizedFeedback:
     _authorize_pull(policy, snapshot, required_state=required_pull_state)
     locale_scope = set(changed_locales)
@@ -178,6 +180,37 @@ def _authorize_feedback_for_state(
             continue
         if revision.author_id is None:
             skipped.append(_skip(revision, "untrusted_actor"))
+            continue
+
+        if revision.body.startswith(MARKER):
+            actor = policy.quality_report_actor
+            if (required_pull_state != "open" or actor is None
+                    or (revision.author_id, revision.author_type) != (actor.id, actor.type)
+                    or revision.kind.value != "issue_comment"):
+                skipped.append(_skip(revision, "untrusted_quality_report"))
+                continue
+            try:
+                report = parse_report(revision.body)
+            except (TypeError, ValueError, RecursionError):
+                skipped.append(_skip(revision, "malformed_quality_report"))
+                continue
+            if (not report_matches_pull(report, pull, expected_head_sha=expected_report_head_sha)
+                    or path_locales.get(report["path"]) != report["locale"]
+                    or report["locale"] not in locale_scope
+                    or report["path"] not in {item.path for item in snapshot.changed_files}):
+                skipped.append(_skip(revision, "stale_or_out_of_scope_quality_report"))
+                continue
+            for key in sorted({item["key"] for item in report["findings"]}):
+                key_report = {**report, "findings": [item for item in report["findings"] if item["key"] == key]}
+                suffix = value_digest(report["path"] + "\x00" + key)
+                events.append(FeedbackEvent(
+                    repository=policy.base_repo, pr_number=pull.number,
+                    kind=revision.kind.value, event_id=f"{revision.source_id}:quality:{suffix}",
+                    author=revision.author_login, author_id=revision.author_id,
+                    author_type=revision.author_type, body=render_report(key_report),
+                    head_sha=pull.head_sha, base_sha=pull.base_sha, locale=report["locale"],
+                    updated_at=revision.updated_at, path=report["path"], html_url=revision.html_url,
+                ))
             continue
 
         actor_locales = _actor_locales(
@@ -232,6 +265,7 @@ def authorize_feedback(
     snapshot: PullRequestFeedbackSnapshot,
     path_locales: Mapping[str, str],
     changed_locales: Sequence[str],
+    expected_report_head_sha: str | frozenset[str] | None = None,
 ) -> AuthorizedFeedback:
     """Bind visible GitHub feedback to a trusted actor and target locale.
 
@@ -245,6 +279,7 @@ def authorize_feedback(
         path_locales=path_locales,
         changed_locales=changed_locales,
         required_pull_state="open",
+        expected_report_head_sha=expected_report_head_sha,
     )
 
 

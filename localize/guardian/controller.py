@@ -25,6 +25,7 @@ from uuid import uuid4
 import yaml
 
 from localize.formats import get_localization_adapter
+from localize.translation_validator import find_glossary_mismatches
 from localize.guardian.authorization import (
     AuthorizedFeedback,
     IntakePolicyError,
@@ -76,6 +77,9 @@ from localize.guardian.models import (
     RecurrenceCandidate,
     RepositoryPolicy,
     pipeline_config_bundle_digest,
+)
+from localize.guardian.quality_reports import (
+    MARKER as QUALITY_REPORT_MARKER, parse_report, verify_report_values,
 )
 from localize.guardian.path_globs import matches_any_path_glob
 from localize.guardian.policy import PatchPolicyError, PatchResult, apply_replacements
@@ -1693,6 +1697,9 @@ def _stored_feedback(
 ) -> tuple[FeedbackRevision, ...]:
     previous: list[FeedbackRevision] = []
     for revision in revisions:
+        if ":quality:" in revision.event_id:
+            # These are internal per-key projections, not GitHub object IDs.
+            continue
         try:
             kind = FeedbackKind(revision.kind)
         except ValueError:
@@ -1726,12 +1733,26 @@ def _trusted_tombstones(
     policy: RepositoryPolicy,
     snapshot: PullRequestFeedbackSnapshot,
     previous: Sequence[EventRevision],
+    quality_event_ids: frozenset[str] | None = None,
 ) -> tuple[FeedbackEvent, ...]:
     previous_by_object = {
         (revision.kind, revision.event_id): revision for revision in previous
     }
     pull = snapshot.pull_request
     events: list[FeedbackEvent] = []
+    if quality_event_ids is not None and policy.quality_report_actor is not None:
+        actor = policy.quality_report_actor
+        for prior in previous:
+            if (":quality:" in prior.event_id and prior.event_id not in quality_event_ids
+                    and not prior.deleted and (prior.author_id, prior.author_type) == (actor.id, actor.type)):
+                events.append(FeedbackEvent(
+                    repository=policy.base_repo, pr_number=pull.number,
+                    kind=prior.kind, event_id=prior.event_id, author=prior.author,
+                    author_id=prior.author_id, author_type=prior.author_type, body="",
+                    head_sha=pull.head_sha, base_sha=pull.base_sha, locale=prior.locale,
+                    path=prior.path, updated_at=prior.updated_at, html_url=prior.html_url,
+                    deleted=True,
+                ))
     for revision in snapshot.feedback:
         if not revision.deleted:
             continue
@@ -1866,6 +1887,14 @@ def _replacement_target_locales(
     authorized: dict[str, dict[str, str]] = {}
     for event in events:
         targets: dict[str, str] = {}
+        if event.body.startswith(QUALITY_REPORT_MARKER):
+            actor = policy.quality_report_actor
+            if actor is not None and (event.author_id, event.author_type) == (actor.id, actor.type):
+                report = parse_report(event.body)
+                if path_locales.get(report["path"]) == report["locale"]:
+                    targets[report["path"]] = report["locale"]
+            authorized[event.feedback_id] = targets
+            continue
         if event.author_id is not None:
             for path, locale in path_locales.items():
                 actors = (
@@ -3037,6 +3066,7 @@ class GuardianController:
                     snapshot=fresh,
                     path_locales=scope.path_locales,
                     changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+                    expected_report_head_sha=self._quality_report_heads(policy, fresh.pull_request.number, source.head_sha),
                 )
             current = self._open_pull_authority_reference(
                 policy=policy,
@@ -3122,6 +3152,7 @@ class GuardianController:
                 snapshot=final_fresh,
                 path_locales=scope.path_locales,
                 changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+                expected_report_head_sha=self._quality_report_heads(policy, final_fresh.pull_request.number, source.head_sha),
             )
             final_current = self._open_pull_authority_reference(
                 policy=policy,
@@ -5612,6 +5643,33 @@ class GuardianController:
                 occurred_at=observed_at,
             )
 
+    def _quality_report_publications(self, policy, pull_number, head_sha):
+        """Follow only durable Guardian publications, never arbitrary ancestry."""
+        heads = {head_sha}
+        publications = []
+        actor = policy.publication_actor
+        if actor is None or policy.quality_report_actor is None:
+            return ()
+        for _ in range(100):
+            publication = self.state.replied_publication_for_head(
+                repository=policy.base_repo, repository_id=policy.base_repo_id,
+                pr_number=pull_number, head_sha=head_sha,
+                publication_actor_id=actor.id, publication_actor_type=actor.type,
+                include_terminal_corrections=True,
+            )
+            if publication is None:
+                return tuple(publications)
+            publications.append(publication)
+            head_sha = publication.original_head_sha
+            if head_sha in heads:
+                raise ValueError("Guardian publication lineage repeats a head")
+            heads.add(head_sha)
+        raise ValueError("Guardian publication lineage exceeds its bound")
+
+    def _quality_report_heads(self, policy, pull_number, head_sha):
+        return frozenset((head_sha, *(publication.original_head_sha for publication in
+            self._quality_report_publications(policy, pull_number, head_sha))))
+
     def _process_snapshot(
         self,
         *,
@@ -5655,6 +5713,9 @@ class GuardianController:
                 snapshot=snapshot,
                 path_locales=scope.path_locales,
                 changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+                expected_report_head_sha=self._quality_report_heads(
+                    policy, snapshot.pull_request.number, snapshot.pull_request.head_sha,
+                ),
             )
             open_source = self._open_pull_authority_reference(
                 policy=policy,
@@ -5667,6 +5728,7 @@ class GuardianController:
                     policy=policy,
                     snapshot=snapshot,
                     previous=previous,
+                    quality_event_ids=frozenset(event.event_id for event in authorized.events),
                 ),
             )
             publication_actor = policy.publication_actor
@@ -5684,6 +5746,17 @@ class GuardianController:
             )
             addressed_signatures: set[tuple[str, str, str]] = set()
             translation_applied_signatures: set[tuple[str, str, str]] = set()
+            for publication in self._quality_report_publications(policy, snapshot.pull_request.number, snapshot.pull_request.head_sha):
+                pending_ids = self.state.publication_pending_prevention_revision_ids(publication)
+                deferred_ids = self.state.publication_deferred_revision_ids(publication)
+                for revision_id in publication.event_revision_ids:
+                    prior_revision = self.state.get_event_revision(revision_id)
+                    if prior_revision is None or ":quality:" not in prior_revision.event_id or revision_id in deferred_ids:
+                        continue
+                    target = (translation_applied_signatures if self.config.mode is GuardianMode.PROPOSE_PREVENTION
+                              and (revision_id in pending_ids or self.state.get_run(publication.run_id).mode is GuardianMode.APPLY_OWNED_TRANSLATIONS)
+                              else addressed_signatures)
+                    target.add((prior_revision.kind, prior_revision.event_id, prior_revision.revision_hash))
             if replied_publication is not None:
                 publication_mode = self.state.get_run(replied_publication.run_id).mode
                 signature_target = (
@@ -5951,7 +6024,22 @@ class GuardianController:
         feedback_events: Sequence[FeedbackEvent],
         target_locales_by_feedback: Mapping[str, Mapping[str, str]],
         prompt: str = _ASSESSMENT_PROMPT,
+        machine_prevention_only: frozenset[str] = frozenset(),
     ) -> CodexResult:
+        machine_keys = {}
+        machine_events = [event for event in feedback_events if event.body.startswith(QUALITY_REPORT_MARKER)]
+        if machine_events:
+            values = _localization_values(bundle)
+            rules = json.loads((bundle.root / "validation-rules.json").read_text(encoding="utf-8"))
+            for event in machine_events:
+                machine_keys[event.feedback_id] = verify_report_values(
+                    parse_report(event.body), values,
+                    brands=rules.get("brand_technical_glossary", ()),
+                    ignored_patterns=rules.get("ignore_key_patterns", ()),
+                    prevention_only=event.feedback_id in machine_prevention_only,
+                )
+            if machine_prevention_only:
+                prompt += "\nThe following machine findings were already corrected by a durably recorded Guardian publication. Assess historical recurrence only and return no replacements for these IDs: " + ", ".join(sorted(machine_prevention_only))
         model = self.codex_driver.model
         reasoning_effort = self.config.runtime.codex_reasoning_effort
         cache_key = _assessment_cache_key(
@@ -5970,16 +6058,39 @@ class GuardianController:
             reasoning_effort=reasoning_effort,
         )
         source_values = _source_values(bundle)
+        validation_rules = json.loads(
+            (bundle.root / "validation-rules.json").read_text(encoding="utf-8")
+        )
 
         def validate_result(result: CodexResult) -> None:
+            for decision in result.feedback:
+                allowed = machine_keys.get(decision.feedback_id)
+                if allowed is not None and any(
+                    (replacement.path, replacement.key) not in allowed
+                    for replacement in decision.replacements
+                ):
+                    raise CodexOutputError("Machine-report replacement escaped its exact verified keys.")
             # This is cache admission, independent of the later action converter.
             # Both open and historical work must match the trusted task exactly.
-            to_guardian_assessments(
+            assessments = to_guardian_assessments(
                 result,
                 feedback_events=feedback_events,
                 source_values=source_values,
                 target_locales_by_feedback=target_locales_by_feedback,
             )
+            if validation_rules["translation_glossary_enforcement"] == "exact":
+                for assessment in assessments:
+                    for proposal in assessment.replacements:
+                        glossary = dict(validation_rules["glossary"].get(proposal.locale, {}))
+                        glossary.update({term: term for term in validation_rules["brand_technical_glossary"]})
+                        if find_glossary_mismatches(
+                            source_values[(proposal.path, proposal.key)],
+                            proposal.proposed_value,
+                            glossary,
+                        ):
+                            raise CodexOutputError(
+                                "Replacement violates trusted glossary or brand requirements."
+                            )
 
         if cached is not None:
             try:
@@ -6232,6 +6343,11 @@ class GuardianController:
                         feedback_events=events,
                         target_locales_by_feedback=_replacement_target_locales(
                             policy, events, scope.path_locales,
+                        ),
+                        machine_prevention_only=frozenset(
+                            event.feedback_id for event in events
+                            if event.feedback_id in translation_suppressed_feedback_ids
+                            and event.body.startswith(QUALITY_REPORT_MARKER)
                         ),
                     )
                 except _ModelCredentialUnavailable:
@@ -6966,6 +7082,7 @@ class GuardianController:
         head = published_head or snapshot.pull_request.head_sha
         broker = self.write_broker_factory(policy)
         reports = []
+        machine_reports = {}
         posted = 0
         revision_ids = tuple(
             revision.revision_id for event, revision in current if not event.deleted
@@ -7017,6 +7134,19 @@ class GuardianController:
                 if details.get("report_policy_digest") != policy_digest:
                     # Observation results and changed policies are reassessed
                     # before they can authorize public status in a write mode.
+                    continue
+                if ":quality:" in event.event_id:
+                    # Machine findings have one consolidated public summary,
+                    # never dozens of per-key comments on a maintainer's PR.
+                    machine_key = (event.event_id.split(':', 1)[0], report_disposition(details), bool(details.get("decision_required")))
+                    if machine_key not in machine_reports:
+                        machine_reports[machine_key] = {
+                            "url": f"{broker.web_base_url}/{policy.base_repo}/pull/{event.pr_number}#issuecomment-{machine_key[0]}",
+                            "disposition": machine_key[1], "decision_required": machine_key[2],
+                            "finding_count": 0,
+                        }
+                        reports.append(machine_reports[machine_key])
+                    machine_reports[machine_key]["finding_count"] += 1
                     continue
                 body = report_body(
                     details,

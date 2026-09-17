@@ -11243,6 +11243,7 @@ class GuardianState:
         head_sha: str,
         publication_actor_id: int,
         publication_actor_type: str,
+        include_terminal_corrections: bool = False,
     ) -> PublicationRecord | None:
         """Return an actor-bound replied publication for the exact current head.
 
@@ -11260,6 +11261,17 @@ class GuardianState:
         ) or publication_actor_type not in {"User", "Bot"}:
             raise ValueError("publication_actor_type must be User or Bot.")
         _validate_repository_id_filter(repository_id)
+        terminal_clause = """
+            (p.phase = 'replied' OR (
+                ? = 1 AND p.phase = 'published' AND EXISTS (
+                    SELECT 1 FROM publication_reply_terminal_events AS terminal
+                    JOIN runs AS run ON run.run_id = p.run_id
+                    WHERE terminal.publication_key = p.publication_key
+                      AND terminal.reason = 'trusted_feedback_changed'
+                      AND run.status = 'completed'
+                )
+            ))
+        """
 
         if repository_id is None:
             repository_where = "p.repository = ?"
@@ -11269,11 +11281,11 @@ class GuardianState:
             # route, so no mutable-name filter can exclude it safely. Check all
             # exact head/actor matches before trusting the immutable-ID lookup.
             ambiguous_legacy = self._connection.execute(
-                """
+                f"""
                 SELECT 1 FROM publication_events AS p
                 WHERE p.repository_id IS NULL
                   AND p.pr_number = ? AND p.commit_sha = ?
-                  AND p.phase = 'replied'
+                  AND {terminal_clause}
                   AND p.publication_actor_id = ?
                   AND p.publication_actor_type = ?
                 LIMIT 1
@@ -11281,6 +11293,7 @@ class GuardianState:
                 (
                     pr_number,
                     head_sha,
+                    int(include_terminal_corrections),
                     publication_actor_id,
                     publication_actor_type,
                 ),
@@ -11296,7 +11309,7 @@ class GuardianState:
             f"""
             SELECT p.* FROM publication_events AS p
             WHERE {repository_where} AND p.pr_number = ? AND p.commit_sha = ?
-              AND p.phase = 'replied'
+              AND {terminal_clause}
               AND p.publication_actor_id = ?
               AND p.publication_actor_type = ?
             ORDER BY p.publication_event_id DESC
@@ -11306,6 +11319,7 @@ class GuardianState:
                 *repository_parameters,
                 pr_number,
                 head_sha,
+                int(include_terminal_corrections),
                 publication_actor_id,
                 publication_actor_type,
             ),
