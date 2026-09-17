@@ -278,3 +278,77 @@ def test_summary_retries_known_exact_versions_after_ambiguous_patch(boundary, fa
     )
     assert result.body == candidate and result.comment_id == first.comment_id
     assert len(state["comments"]) == 1
+
+
+def commit_arguments():
+    return {**arguments(), "commit_sha": HEAD_SHA, "action_id": "private-action-123",
+            "event_revision_id": "private-event-456"}
+
+
+@pytest.mark.parametrize("kind", ["commit", "report", "summary"])
+def test_public_writes_contain_only_human_readable_content(boundary, kind):
+    broker, state = boundary
+    if kind == "commit":
+        result = broker.post_commit_reply(**commit_arguments())
+    elif kind == "report":
+        result = broker.post_feedback_report(**report_arguments())
+        assert f"/commit/{HEAD_SHA}" in result.body
+        assert "Assessed revision" in result.body
+    else:
+        result = broker.post_feedback_summary(**arguments(), reports=[], previous_body=None)
+    assert result.body.startswith("🤖 **Localize Guardian")
+    for private in ("<!--", "private-action-123", "private-event-456", "f" * 64, "review_comment:12"):
+        assert private not in result.body
+    assert len(state["writes"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["commit", "report"])
+def test_legacy_comments_are_recovered_without_republishing_metadata(boundary, kind):
+    broker, state = boundary
+    if kind == "commit":
+        first = broker.post_commit_reply(**commit_arguments())
+        marker = "<!-- localize-guardian:v1 action=private-action-123 event=private-event-456 -->"
+        legacy_body = (marker + "\n🤖 **Localize Guardian:** Applied a validated translation-only "
+                       f"correction in [`{HEAD_SHA[:12]}`](https://github.test/translator-bot/app/commit/{HEAD_SHA}). "
+                       "The review thread remains open for reviewer confirmation.")
+        def post():
+            return broker.post_commit_reply(**commit_arguments())
+    else:
+        first = broker.post_feedback_report(**report_arguments())
+        old_text = first.body.split("\n\n[Assessed revision]", 1)[0]
+        title, rest = old_text.split("\n", 1)
+        legacy_body = ("<!-- localize-guardian:feedback:" + "f" * 64 + " -->\n"
+                       + title.removesuffix(".") + " (`review_comment:12`).\n" + rest)
+        def post():
+            return broker.post_feedback_report(**report_arguments())
+    state["comments"][0]["body"] = legacy_body
+    recovered = post()
+    assert recovered.body == legacy_body and not recovered.created
+    assert len(state["writes"]) == 1
+
+
+@pytest.mark.parametrize("tamper", ["edited", "duplicate"])
+def test_readable_report_identity_preserves_conflict_guards(boundary, tamper):
+    broker, state = boundary
+    broker.post_feedback_report(**report_arguments())
+    if tamper == "edited":
+        state["comments"][0]["body"] += "\nAn external annotation"
+    else:
+        state["comments"].append({**state["comments"][0], "id": 101,
+                                  "html_url": "https://github.test/acme/app/pull/1#discussion_r101"})
+    with pytest.raises(PolicyViolation):
+        broker.post_feedback_report(**report_arguments())
+    assert len(state["writes"]) == 1
+
+
+def test_legacy_summary_migrates_only_from_exact_known_body(boundary):
+    broker, state = boundary
+    first = broker.post_feedback_summary(**arguments(), reports=[], previous_body=None)
+    legacy_body = "<!-- localize-guardian:feedback-summary:v1 -->\n" + first.body
+    state["comments"][0]["body"] = legacy_body
+    with pytest.raises(PolicyViolation, match="edited externally"):
+        broker.post_feedback_summary(**arguments(), reports=[], previous_body=first.body)
+    updated = broker.post_feedback_summary(**arguments(), reports=[], previous_body=legacy_body)
+    assert updated.comment_id == first.comment_id and not updated.created
+    assert "<!--" not in updated.body
+    assert len(state["comments"]) == 1

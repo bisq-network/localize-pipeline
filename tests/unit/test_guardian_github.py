@@ -3327,7 +3327,7 @@ def test_writer_posts_one_concise_bot_labelled_commit_reply_without_resolving_th
     assert "Localize Guardian" in body
     assert f"https://github.test/translator-bot/app/commit/{NEW_SHA}" in body
     assert NEW_SHA[:12] in body
-    assert "remains open for reviewer confirmation" in body
+    assert "Please review the diff." in body
     assert "fixed everything" not in body.lower()
     assert len(body) < 600
 
