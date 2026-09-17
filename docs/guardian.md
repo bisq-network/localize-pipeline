@@ -1143,6 +1143,10 @@ its structured findings in its private audit state. Public updates must explain
 what needs attention or what changed, with useful commit links; they must not
 contain diagnostic JSON or hidden machine payloads.
 
+Keep bot comments action-first and usually one or two sentences: ask for the
+specific review or decision needed, or say that no action is needed. Routine
+internal progress belongs in private logs, not another PR comment.
+
 Set `GUARDIAN_QUALITY_REPORT_ENABLED=true` in the translator environment to
 publish one concise, bot-labelled quality summary for a revision with findings.
 This summary does not grant Guardian authority to edit anything. In each
