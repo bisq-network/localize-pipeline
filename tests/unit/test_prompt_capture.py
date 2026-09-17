@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -17,6 +18,48 @@ def test_capture_tokens_are_deterministic_without_changing_production_tokens():
 
     assert captured_first == "Amount __PH_0001__ and __PH_0002__"
     assert captured_second == captured_first
+
+
+def test_capture_context_restores_after_nested_exception():
+    """Nested failures must restore the caller's placeholder mode."""
+    with capture_placeholder_tokens():
+        with pytest.raises(RuntimeError, match="capture failed"):
+            with capture_placeholder_tokens():
+                raise RuntimeError("capture failed")
+        assert protect_placeholders("Amount {0}")[0] == "Amount __PH_0001__"
+
+    first, _ = protect_placeholders("Amount {0}")
+    second, _ = protect_placeholders("Amount {0}")
+    assert first != second
+    assert "__PH_0001__" not in first
+
+
+@pytest.mark.asyncio
+async def test_capture_context_does_not_leak_to_another_task():
+    """A concurrent normal task retains UUID-backed tokens during capture."""
+    capture_ready = asyncio.Event()
+    production_done = asyncio.Event()
+
+    async def capture():
+        with capture_placeholder_tokens():
+            capture_ready.set()
+            await production_done.wait()
+            return protect_placeholders("Amount {0}")[0]
+
+    async def production():
+        await capture_ready.wait()
+        try:
+            return (
+                protect_placeholders("Amount {0}")[0],
+                protect_placeholders("Amount {0}")[0],
+            )
+        finally:
+            production_done.set()
+
+    captured, (first, second) = await asyncio.gather(capture(), production())
+    assert captured == "Amount __PH_0001__"
+    assert first != second
+    assert first != captured
 
 
 @pytest.mark.asyncio
