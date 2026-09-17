@@ -21,6 +21,7 @@ SNAPSHOT_FILE = FIXTURE_ROOT / "prompt-requests.json"
 
 @pytest.mark.asyncio
 async def test_bisq_draft_and_review_prompt_snapshot(monkeypatch):
+    """Pin actual draft and review requests without live inference."""
     _, source_translations = parse_properties_file(str(SOURCE_FILE))
     _, target_translations = parse_properties_file(str(TARGET_FILE))
     keys = list(source_translations)

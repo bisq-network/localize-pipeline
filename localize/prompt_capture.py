@@ -14,6 +14,7 @@ from localize.model_provider import ModelProviderCapabilities
 
 
 def _json_safe(value: Any) -> Any:
+    """Copy supported payload values into JSON-compatible containers."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, Mapping):
@@ -35,6 +36,7 @@ class PromptCaptureProvider:
     client = None
 
     def __init__(self, *, stage: str, responses: Iterable[str]) -> None:
+        """Bind a draft or review capture to its ordered scripted responses."""
         normalized_stage = str(stage).strip()
         if normalized_stage not in {"draft", "review"}:
             raise ValueError("Prompt capture stage must be 'draft' or 'review'.")
@@ -50,6 +52,7 @@ class PromptCaptureProvider:
         completion_token_limit: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
+        """Record a request and consume one response without network access."""
         if not self._responses:
             raise RuntimeError(f"No scripted {self.stage} capture response remains.")
         payload: Dict[str, Any] = {
@@ -99,6 +102,7 @@ class PromptCaptureProvider:
         return destination
 
     def count_tokens(self, text: str, model_name: str) -> int:
+        """Return a deterministic word-count approximation for offline tests."""
         del model_name
         return len(str(text).split())
 
@@ -112,6 +116,7 @@ class PromptCaptureProvider:
         avg_prompt_tokens_per_string: int = 220,
         avg_completion_tokens_per_string: int = 40,
     ) -> CostEstimate:
+        """Delegate cost arithmetic without contacting a model provider."""
         return estimate_run_cost(
             num_keys=num_keys,
             locale_codes=locale_codes,
@@ -122,9 +127,11 @@ class PromptCaptureProvider:
         )
 
     def format_estimate(self, estimate: CostEstimate) -> str:
+        """Format an offline estimate through the normal reporting helper."""
         return format_estimate(estimate)
 
     def record_response(self, model: str, response: Any) -> None:
+        """Ignore scripted responses because they incur no billable usage."""
         del model, response
 
     def write_usage_summary(
@@ -134,6 +141,7 @@ class PromptCaptureProvider:
         merge_existing: bool = False,
         stage_name: Optional[str] = None,
     ) -> None:
+        """Write a zero-call usage report for this offline provider."""
         del merge_existing, stage_name
         Path(path).write_text(
             '{"calls":[],"models":{},"totals":{"calls":0}}\n',
@@ -141,13 +149,16 @@ class PromptCaptureProvider:
         )
 
     def format_usage_summary(self) -> str:
+        """Explain that capture requests do not represent model API calls."""
         return "Prompt capture made no model API calls."
 
     def is_retryable_error(self, exc: Exception) -> bool:
+        """Keep fixture and serialization errors non-retryable."""
         del exc
         return False
 
     def capabilities_for_model(self, model: str) -> ModelProviderCapabilities:
+        """Accept the request options exercised by draft and review tests."""
         del model
         return ModelProviderCapabilities(
             provider_key="capture",

@@ -12,6 +12,7 @@ from localize.prompt_capture import PromptCaptureProvider
 
 
 def test_capture_tokens_are_deterministic_without_changing_production_tokens():
+    """Snapshots are stable while normal calls retain unique tokens."""
     production_first, _ = protect_placeholders("Amount {0}")
     production_second, _ = protect_placeholders("Amount {0}")
     assert production_first != production_second
@@ -61,12 +62,14 @@ async def test_capture_context_does_not_leak_to_another_task():
     production_done = asyncio.Event()
 
     async def capture():
+        """Hold capture mode active while the normal task runs."""
         with capture_placeholder_tokens():
             capture_ready.set()
             await production_done.wait()
             return protect_placeholders("Amount {0}")[0]
 
     async def production():
+        """Protect placeholders outside the other task's capture context."""
         await capture_ready.wait()
         try:
             return (
@@ -84,6 +87,7 @@ async def test_capture_context_does_not_leak_to_another_task():
 
 @pytest.mark.asyncio
 async def test_capture_provider_writes_stage_specific_canonical_payloads(tmp_path):
+    """Keep draft and review records separate and serialization repeatable."""
     draft = PromptCaptureProvider(stage="draft", responses=["Hallo"])
     review = PromptCaptureProvider(stage="review", responses=["{}"])
 

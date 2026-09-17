@@ -141,6 +141,7 @@ def protect_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
     deterministic_index = 0
 
     def replace_placeholder(match: Match[str]) -> str:
+        """Allocate a protected token using the active context's policy."""
         nonlocal deterministic_index
         full_match = match.group(0)
         if _CAPTURE_PLACEHOLDER_TOKENS.get():
