@@ -80,5 +80,5 @@ def test_size_chunked_publication_replay_preserves_truthful_accounting():
     assert second == {"finding_count": 80, "report_count": len(reports),
                       "published": 0, "already_present": 1}
     assert len(comments) == 1
-    assert "80 candidate findings" in comments[0]["body"]
+    assert "80 source-identical values" in comments[0]["body"]
     assert len(comments[0]["body"].encode("utf-8")) < 2000

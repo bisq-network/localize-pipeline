@@ -52,9 +52,9 @@ def test_grouped_publication_roundtrip_dedup_and_truthful_totals():
     assert publication.publish_reports(**kwargs)["already_present"] == 1
     assert len(comments) == 1
     body = comments[0]["body"]
-    assert "Localize Pipeline bot — translation quality check" in body
-    assert "5 candidate findings" in body
-    assert "Locales: it: 3, ru: 2." in body
+    assert "🤖 **Localize Pipeline:** Please review" in body
+    assert "5 source-identical values" in body
+    assert len(body) < 500
     assert f"https://github.com/{pull.repository}/commit/{pull.head_sha}" in body
     assert "not confirmed defects" in body
     assert "legitimately remain unchanged" in body
@@ -110,7 +110,7 @@ def test_real_git_producer_uses_repo_paths_and_ignores_other_pending_batches(tmp
     else:
         assert publication.main(args) == 0
         assert len(comments) == 1
-        assert "1 candidate finding" in comments[0]
+        assert "1 source-identical value" in comments[0]
         with pytest.raises(ValueError, match="Not a bounded machine report"):
             parse_report(comments[0])
         assert json.loads(capsys.readouterr().out)["finding_count"] == 1
@@ -184,8 +184,8 @@ def test_summary_does_not_expose_keys_and_only_deduplicates_owned_comments():
                   expected_head=pull.head_sha, reports=reports, request=request)
     assert publication.publish_reports(**kwargs)["published"] == 1
     body = comments[0]["body"]
-    assert "Source-identical values: 1." in body
-    assert "Values with control characters: 1." in body
+    assert "1 source-identical value" in body
+    assert "1 control-character finding" in body
     assert "<" not in body and "sensitive-key" not in body
     comments[0]["user"]["id"] = 9
     assert publication.publish_reports(**kwargs)["published"] == 1

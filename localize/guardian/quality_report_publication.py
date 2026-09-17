@@ -112,26 +112,21 @@ def publish_reports(*, repository, pull_number, expected_head, reports, request)
         if fresh.state != "open" or fresh.head_sha != expected_head or build_report(
                 fresh, path=report["path"], locale=report["locale"], findings=report["findings"]) != report:
             raise ValueError("Pull revision changed before quality summary publication")
-    locale_counts = Counter()
     categories = Counter()
     for report in reports:
-        locale_counts[report["locale"]] += len(report["findings"])
         categories.update(item["category"] for item in report["findings"])
-    noun = "finding" if counts["finding_count"] == 1 else "findings"
-    body = (
-        "Localize Pipeline bot — translation quality check\n\n"
-        f"At [{expected_head[:7]}](https://github.com/{repository}/commit/{expected_head}), "
-        f"the check flagged {counts['finding_count']} candidate {noun} for review. "
-        "These are not confirmed defects.\n\n"
-        "Locales: " + ", ".join(f"{locale}: {count}" for locale, count in sorted(locale_counts.items())) + ".\n\n"
-    )
+    labels = []
     if categories["source_echo"]:
-        body += (f"- Source-identical values: {categories['source_echo']}. Check whether translation is needed; "
-                 "product names and shared-language terms may legitimately remain unchanged.\n")
+        noun = "value" if categories["source_echo"] == 1 else "values"
+        labels.append(f"{categories['source_echo']} source-identical {noun}")
     if categories["control_character"]:
-        body += (f"- Values with control characters: {categories['control_character']}. "
-                 "Check whether those characters belong in the displayed text.\n")
-    body += "\nThis check does not change translations or approve the PR."
+        noun = "finding" if categories["control_character"] == 1 else "findings"
+        labels.append(f"{categories['control_character']} control-character {noun}")
+    body = (
+        "🤖 **Localize Pipeline:** Please review " + " and ".join(labels)
+        + f" in [{expected_head[:7]}](https://github.com/{repository}/commit/{expected_head}). "
+        "These are candidates, not confirmed defects; names and shared-language terms may legitimately remain unchanged."
+    )
     if body in owned:
         counts["already_present"] = 1
         return counts

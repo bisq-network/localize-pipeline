@@ -293,7 +293,8 @@ def test_grouped_report_partial_thirty_edits_then_remainder(tmp_path, controller
         assert first.deferred_value_edits == 1
         assert not broker.feedback_reports  # Consolidated summary only.
         if not terminal_reply:
-            assert "30 automated quality finding(s)" in broker.feedback_summary.body
+            assert "30 applied; 1 deferred" in broker.feedback_summary.body
+            assert "31 automated quality findings" in broker.feedback_summary.body
         assert len(driver.calls) == 1
         (head / TARGET_PATH).write_text("".join(f"{key}={'Привет читатель' if index < 30 else 'Hello reader'}\n" for index, key in enumerate(keys)))
         provider.snapshots = (replace(snapshot, pull_request=_pull(head_sha="e" * 40 if external_head else COMMIT_SHA)),)

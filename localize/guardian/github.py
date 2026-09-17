@@ -2366,19 +2366,25 @@ class GitHubWriteBroker:
         issue comments use a linked PR-level reply because GitHub has no nested
         reply endpoint for those objects.
         """
-        from localize.guardian.reporting import report_body
+        from localize.guardian.reporting import legacy_report_body, report_body, report_key
 
         self._validate_marker_id(report_id, label="report_id")
         body = report_body(details, repository=self.policy.repository, feedback_id=feedback_id,
                            pull_number=pull_number, web_base_url=self.web_base_url)
-        legacy_marker = f"<!-- localize-guardian:feedback:{report_id} -->"
         # Older writers included the internal feedback identifier in the title.
         # Retain exact read-only recovery of those comments, never publish it.
-        title, remainder = body.split("\n", 1)
-        title = title.replace(f" (`{feedback_id}`).", ".")
-        body = title + "\n" + remainder
-        legacy_title = title.removesuffix(".") + f" (`{feedback_id}`)."
-        legacy_body = legacy_marker + "\n" + legacy_title + "\n" + remainder
+        title = body.split("\n", 1)[0]
+        historical_text = legacy_report_body(
+            details, repository=self.policy.repository, feedback_id=feedback_id,
+            pull_number=pull_number, web_base_url=self.web_base_url,
+        )
+        old_ids = {report_id}
+        if self.policy.repository_id is not None:
+            old_ids.add(report_key(repository_id=self.policy.repository_id,
+                                   pull_number=pull_number, feedback_id=feedback_id,
+                                   body=historical_text))
+        legacy_markers = tuple(f"<!-- localize-guardian:feedback:{key} -->" for key in sorted(old_ids))
+        legacy_bodies = tuple(marker + "\n" + historical_text for marker in legacy_markers)
         assessed_link = (
             f"[Assessed revision]({self.web_base_url}/{self.policy.repository}"
             f"/commit/{expected_head_sha})"
@@ -2395,8 +2401,8 @@ class GitHubWriteBroker:
             pull_number=pull_number, expected_head_sha=expected_head_sha,
             expected_base_sha=expected_base_sha, expected_actor=expected_actor,
             body=body, marker=title, before_create=before_create,
-            identity_parts=(source_url, assessed_link),
-            legacy_marker=legacy_marker, legacy_body=legacy_body,
+            identity_parts=(f"[Source feedback]({source_url})", assessed_link),
+            legacy_markers=legacy_markers, legacy_bodies=legacy_bodies,
             review_id=review_id,
         )
 
@@ -2405,8 +2411,8 @@ class GitHubWriteBroker:
         expected_actor: TrustedActor, body: str, marker: str,
         before_create: Callable[[], None], review_id: int | None = None,
         previous_body: str | Sequence[str] | None = None,
-        identity_parts: Sequence[str] = (), legacy_marker: str | None = None,
-        legacy_body: str | None = None,
+        identity_parts: Sequence[str] = (), legacy_markers: Sequence[str] = (),
+        legacy_bodies: Sequence[str] = (),
     ) -> ReplyResult:
         """Recover ambiguous writes only from exact actor/content/route matches."""
         self._validate_sha(expected_head_sha, label="expected_head_sha")
@@ -2438,9 +2444,9 @@ class GitHubWriteBroker:
                 == (expected_actor.id, expected_actor.type)
                 and item.get("in_reply_to_id") == parent_id
                 and (
-                    (str(item.get("body") or "").startswith(marker)
+                    ((bool(identity_parts) or str(item.get("body") or "").startswith(marker))
                      and all(part in str(item.get("body") or "") for part in identity_parts))
-                    or (legacy_marker is not None and legacy_marker in str(item.get("body") or ""))
+                    or any(old in str(item.get("body") or "") for old in legacy_markers)
                 )
             ]
             if len(matches) > 1:
@@ -2459,8 +2465,8 @@ class GitHubWriteBroker:
 
             if matches and matches[0].get("body") == body:
                 return validate(matches[0], body, False)
-            if matches and legacy_body is not None and matches[0].get("body") == legacy_body:
-                return validate(matches[0], legacy_body, False)
+            if matches and matches[0].get("body") in legacy_bodies:
+                return validate(matches[0], matches[0]["body"], False)
             if matches:
                 if previous_body is None or parent_id:
                     raise PolicyViolation("Guardian explanation was edited externally.")
@@ -2497,6 +2503,6 @@ class GitHubWriteBroker:
             body=summary_body(reports, repository=self.policy.repository,
                               pull_number=pull_number, web_base_url=self.web_base_url),
             marker=marker, before_create=before_create,
-            legacy_marker="<!-- localize-guardian:feedback-summary:v1 -->",
+            legacy_markers=("<!-- localize-guardian:feedback-summary:v1 -->",),
             previous_body=previous_body,
         )
