@@ -61,6 +61,7 @@ def test_private_finding_repairs_without_any_public_report(tmp_path, controller_
         assert len(driver.calls) == 1
         assert "source_sha256" not in broker.feedback_summary.body
         assert "/commit/" in broker.feedback_summary.body
+        assert f"/commit/{COMMIT_SHA}" in broker.feedback_summary.body
         provider.snapshots = (replace(provider.snapshots[0], pull_request=replace(
             provider.snapshots[0].pull_request, head_sha=COMMIT_SHA,
         )),)

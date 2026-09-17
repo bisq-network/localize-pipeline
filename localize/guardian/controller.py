@@ -7274,11 +7274,17 @@ class GuardianController:
                 if ":quality:" in event.event_id:
                     # Machine findings have one consolidated public summary,
                     # never dozens of per-key comments on a maintainer's PR.
-                    machine_key = (event.event_id.split(':', 1)[0], report_disposition(details), bool(details.get("decision_required")))
+                    url = (event.html_url if event.kind == "quality_finding" else
+                           f"{broker.web_base_url}/{policy.base_repo}/pull/{event.pr_number}#issuecomment-{event.event_id.split(':', 1)[0]}")
+                    if event.kind == "quality_finding" and details.get("commit_sha"):
+                        commit_sha = details["commit_sha"]
+                        if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+                            raise ValueError("Invalid quality correction commit.")
+                        url = f"{broker.web_base_url}/{policy.base_repo}/commit/{commit_sha}"
+                    machine_key = (url, report_disposition(details), bool(details.get("decision_required")))
                     if machine_key not in machine_reports:
                         machine_reports[machine_key] = {
-                            "url": (event.html_url if event.kind == "quality_finding" else
-                                    f"{broker.web_base_url}/{policy.base_repo}/pull/{event.pr_number}#issuecomment-{machine_key[0]}"),
+                            "url": url,
                             "disposition": machine_key[1], "decision_required": machine_key[2],
                             "finding_count": 0,
                             "internal_finding": event.kind == "quality_finding",
