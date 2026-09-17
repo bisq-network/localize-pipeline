@@ -3,7 +3,11 @@ import json
 
 import pytest
 
-from localize.placeholder_rules import capture_placeholder_tokens, protect_placeholders
+from localize.placeholder_rules import (
+    capture_placeholder_tokens,
+    protect_placeholders,
+    restore_placeholders,
+)
 from localize.prompt_capture import PromptCaptureProvider
 
 
@@ -32,6 +36,22 @@ def test_capture_context_restores_after_nested_exception():
     second, _ = protect_placeholders("Amount {0}")
     assert first != second
     assert "__PH_0001__" not in first
+
+
+def test_capture_tokens_preserve_literal_token_text():
+    """Avoid aliasing literals while retaining the reserved-token rejection."""
+    source = "__PH_0001__ {0} __PH_0002__ {1} __PH_0004__ {0}"
+    with capture_placeholder_tokens():
+        protected, mapping = protect_placeholders(source)
+        repeated, repeated_mapping = protect_placeholders(source)
+    assert list(mapping) == ["__PH_0003__", "__PH_0005__", "__PH_0006__"]
+    assert protected == (
+        "__PH_0001__ __PH_0003__ __PH_0002__ __PH_0005__ __PH_0004__ __PH_0006__"
+    )
+    assert repeated == protected
+    assert repeated_mapping == mapping
+    with pytest.raises(ValueError, match="Unresolved placeholder"):
+        restore_placeholders(protected, mapping)
 
 
 @pytest.mark.asyncio

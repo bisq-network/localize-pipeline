@@ -144,8 +144,11 @@ def protect_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
         nonlocal deterministic_index
         full_match = match.group(0)
         if _CAPTURE_PLACEHOLDER_TOKENS.get():
-            deterministic_index += 1
-            placeholder_token = f"__PH_{deterministic_index:04d}__"
+            while True:
+                deterministic_index += 1
+                placeholder_token = f"__PH_{deterministic_index:04d}__"
+                if placeholder_token not in text:
+                    break
         else:
             placeholder_token = f"__PH_{uuid.uuid4().hex}__"
         placeholder_mapping[placeholder_token] = full_match
