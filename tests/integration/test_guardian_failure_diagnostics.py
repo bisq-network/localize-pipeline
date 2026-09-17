@@ -62,6 +62,13 @@ def test_prevention_signing_failure_survives_coordinator_catch(tmp_path, monkeyp
     [
         ("commit", "error: gpg failed to sign the data", "sign", "signing_failed"),
         ("push", "remote: Permission denied", "push", "permission_denied"),
+        (
+            "push",
+            "refusing to allow an OAuth App to create or update workflow "
+            "`.github/workflows/build.yml` without `workflow` scope",
+            "push",
+            "workflow_scope_required",
+        ),
         ("ls-remote", "fatal: Could not resolve host", "remote-read", "dns_failed"),
     ],
 )

@@ -1126,6 +1126,12 @@ def test_parses_operator_pipeline_config_and_daily_schedule(tmp_path: Path) -> N
         "schedule: {hour: 1.5, minute: 0}",
         "schedule: {hour: 1.0, minute: 0}",
         "schedule: {hour: 0, minute: 0, timezone: UTC}",
+        "schedule: {poll_interval_seconds: 899}",
+        "schedule: {poll_interval_seconds: 86401}",
+        "schedule: {poll_interval_seconds: true}",
+        "schedule: {max_polls_per_day: 0}",
+        "schedule: {max_polls_per_day: 97}",
+        "schedule: {max_polls_per_day: true}",
     ],
 )
 def test_rejects_invalid_daily_schedule(

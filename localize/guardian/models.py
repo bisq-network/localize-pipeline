@@ -427,10 +427,12 @@ class GuardianLimits:
 
 @dataclass(frozen=True)
 class GuardianSchedule:
-    """Once-daily local wall-clock schedule used by scheduled invocations."""
+    """Daily schedule with optional bounded same-day feedback polling."""
 
     hour: int = 0
     minute: int = 0
+    poll_interval_seconds: int | None = None
+    max_polls_per_day: int = 96
 
     def __post_init__(self) -> None:
         if isinstance(self.hour, bool) or not isinstance(self.hour, int):
@@ -441,6 +443,18 @@ class GuardianSchedule:
             raise ValueError("Schedule hour must be between 0 and 23.")
         if not 0 <= self.minute <= 59:
             raise ValueError("Schedule minute must be between 0 and 59.")
+        if self.poll_interval_seconds is not None and (
+            isinstance(self.poll_interval_seconds, bool)
+            or not isinstance(self.poll_interval_seconds, int)
+            or not 900 <= self.poll_interval_seconds <= 86400
+        ):
+            raise ValueError("Schedule poll interval must be between 900 and 86400 seconds.")
+        if (
+            isinstance(self.max_polls_per_day, bool)
+            or not isinstance(self.max_polls_per_day, int)
+            or not 1 <= self.max_polls_per_day <= 96
+        ):
+            raise ValueError("Schedule poll count must be between 1 and 96.")
 
 
 @dataclass(frozen=True)
