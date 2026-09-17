@@ -73,6 +73,7 @@ class QualityGateConfig:
     ignore_key_patterns: List[Pattern[str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize gate policy, including reviewed source-value exemptions."""
         return {
             "source_identical_min_block_count": self.source_identical_min_block_count,
             "source_identical_max_count": self.source_identical_max_count,
@@ -122,7 +123,7 @@ def is_expected_source_identical(
     locale_code: str = "",
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> bool:
-    """Return true for values that are commonly and legitimately untranslated."""
+    """Recognize shared values and exact locale/global exemptions, ignoring case."""
     normalized = normalize_value(value)
     if not normalized:
         return True
@@ -199,6 +200,7 @@ def _analyze_source_identical_translation_changes(
     ignore_key_patterns: Sequence[Pattern[str]] = (),
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
+    """Classify changes without exempting unrelated locales or partial phrases."""
     stats = SourceIdenticalStats()
 
     for change in _filter_ignored_changes(changes, ignore_key_patterns):
@@ -433,6 +435,7 @@ def analyze_all_translation_entries_for_profiles(
 def load_quality_gate_config(
     config_path: str,
 ) -> Tuple[QualityGateConfig, List[str], List[str], List[SemanticRule]]:
+    """Load gate thresholds, locale-scoped exemptions and semantic rules."""
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
 
@@ -1060,6 +1063,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Check staged translations using configured policy and write review reports."""
     args = _parse_args(argv)
     config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(
         args.config

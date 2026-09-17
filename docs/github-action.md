@@ -162,6 +162,29 @@ localization_formats:
 The action, quality gate, semantic reviewer, and PR publisher all read the same
 profile list.
 
+## Reviewed source-identical values
+
+Some complete UI values legitimately match English in a particular locale.
+After human review, the quality gate can exempt those exact values:
+
+```yaml
+quality_gate:
+  source_identical_allowlist:
+    cs: ["Internet"]
+```
+
+Matching ignores surrounding whitespace and case, but not words within a phrase:
+`Internet` does not exempt `Internet connection`. Locale codes must match the
+configured codes exactly; `"*"` applies to every locale and should be used sparingly.
+The default is empty. Prefer locale-specific values, not broad exceptions.
+
+This affects only the quality gate's source-identical classification. Unlisted
+values still face the existing thresholds and overwrite checks; placeholder,
+encoding and other validation failures still block publication. It does not
+change per-key translation validation, repair existing translations, or fix the
+source-overwrite defect addressed separately in #177. Do not add exemptions merely
+to make a failing run green.
+
 ## Local Or Self-Hosted Models
 
 Use `api-base-url` for any OpenAI-compatible endpoint:

@@ -80,6 +80,7 @@ def test_source_identical_gate_ignores_glossary_tokens_and_enum_keys(tmp_path):
 
 
 def test_source_identical_gate_blocks_new_non_brand_values_and_honors_locale_allowlist(tmp_path):
+    """A reviewed shared term must not exempt other untranslated values."""
     repo_root = tmp_path
     input_folder = repo_root / "resources"
     _write_properties(
