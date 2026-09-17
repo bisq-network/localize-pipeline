@@ -3069,6 +3069,37 @@ async def process_translation_queue(
             if validation_summary is not None:
                 validation_summary[translation_file] = per_key_summary
 
+            # A rejected candidate is not permission to replace localized text
+            # with English. Without a valid current-source baseline, withhold
+            # the file rather than publish stale text or a source fallback.
+            blocked_regressions = sorted(
+                key for key in failed_keys
+                if original_target_translations.get(key, "").strip()
+                and normalize_value(original_target_translations[key])
+                != normalize_value(source_translations.get(key, ""))
+                and normalize_value(valid_translations.get(key, ""))
+                == normalize_value(source_translations.get(key, ""))
+                and not is_ignored_key(key, IGNORE_KEY_PATTERNS)
+            )
+            if blocked_regressions:
+                per_key_summary["blocked_source_regression_keys"] = blocked_regressions
+                skipped_files[translation_file] = [
+                    "Rejected translation would overwrite existing localized values "
+                    "with source text; file withheld for retry."
+                ]
+                # Preserve old evidence, including its absence. Do not stamp a
+                # potentially stale target as matching the new source merely
+                # because publication was blocked. Retry every selected key in
+                # this withheld file, including otherwise successful candidates.
+                retry_entries = dict(file_ledger_entries)
+                for key in keys_to_translate:
+                    retry_entries[key] = {**retry_entries.get(key, {}), "status": "failed"}
+                key_ledger[translation_file] = retry_entries
+                save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
+                logger.error("Withholding '%s': source fallback would replace %d localized value(s).",
+                             translation_file, len(blocked_regressions))
+                continue
+
             # Apply validated translations (valid translations + reverted source for failed keys)
             for line in draft_lines:
                 if line['type'] == 'entry':

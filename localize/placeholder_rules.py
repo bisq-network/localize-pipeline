@@ -10,7 +10,8 @@ from contextvars import ContextVar
 from typing import Dict, Iterator, Match, Tuple
 
 
-_HTML_TAG = r"</?[A-Za-z][^<>\n]*>"
+# React-i18next Trans components use numeric tags as well as named HTML tags.
+_HTML_TAG = r"(?:</?[A-Za-z][^<>\n]*>|</[0-9]+>|<[0-9]+(?:[ \t]*/)?>)"
 _PLACEHOLDER_TAG = r"<\{[A-Za-z0-9_][^{}\n]*\}[^<>\n]*>"
 _I18NEXT_TOKEN = r"\{\{[^{}\n]+\}\}"
 _BRACE_TOKEN = r"\{[A-Za-z0-9_][^{}\n]*\}"

@@ -74,6 +74,8 @@
         "verdict",
         "confidence",
         "rationale",
+        "report_reason",
+        "decision_required",
         "replacements"
       ],
       "properties": {
@@ -100,6 +102,11 @@
           "minLength": 1,
           "maxLength": 10000
         },
+        "report_reason": {
+          "type": "string",
+          "enum": ["unspecified", "as_suggested", "alternative_glossary", "alternative_source_fidelity", "alternative_other", "glossary_conflict", "policy_conflict", "insufficient_evidence", "already_addressed", "not_applicable"]
+        },
+        "decision_required": {"type": "boolean"},
         "replacements": {
           "type": "array",
           "items": {

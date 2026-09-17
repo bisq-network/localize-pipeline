@@ -17,6 +17,7 @@ from itertools import islice
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import tempfile
 from typing import ContextManager, Protocol
@@ -25,6 +26,7 @@ from uuid import uuid4
 import yaml
 
 from localize.formats import get_localization_adapter
+from localize.translation_validator import find_glossary_mismatches
 from localize.guardian.authorization import (
     AuthorizedFeedback,
     IntakePolicyError,
@@ -34,15 +36,19 @@ from localize.guardian.authorization import (
 from localize.guardian.codex import (
     CodexAuthenticationError,
     CodexCapacityError,
+    CodexOutputError,
     CodexResult,
     CodexTask,
     CodexUsage,
     RESULT_SCHEMA_PATH,
+    REPLACEMENT_UNIQUENESS_GUIDANCE,
     parse_cached_codex_result,
     serialize_codex_result,
     to_guardian_assessments,
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import record_failure
+from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
 from localize.guardian.github import (
     BaseRevisionSnapshot,
@@ -74,12 +80,14 @@ from localize.guardian.models import (
     RepositoryPolicy,
     pipeline_config_bundle_digest,
 )
+from localize.guardian.quality_reports import (
+    MARKER as QUALITY_REPORT_MARKER, parse_report, verify_report_values,
+)
 from localize.guardian.path_globs import matches_any_path_glob
 from localize.guardian.policy import PatchPolicyError, PatchResult, apply_replacements
 from localize.guardian.prevention_runtime import (
     PreventionBatchOutcome,
     PreventionLeaseLostError,
-    PreventionRuntimeError,
     PreventionSourceAuthorityError,
 )
 from localize.guardian.state import (
@@ -124,7 +132,7 @@ _SUPPORTED_CHANGED_FILE_STATUSES = frozenset({"added", "modified"})
 _ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
     "Assess every manifest feedback ID exactly once and write only the "
-    "schema-conforming result."
+    "schema-conforming result. " + REPLACEMENT_UNIQUENESS_GUIDANCE
 )
 _HISTORICAL_ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
@@ -137,7 +145,7 @@ _HISTORICAL_ASSESSMENT_PROMPT = (
     "the exact current source shown there; the controller binds source_value "
     "from that trusted evidence rather than accepting it from model output. "
     "Assess every manifest feedback ID exactly once and write only the "
-    "schema-conforming result."
+    "schema-conforming result. " + REPLACEMENT_UNIQUENESS_GUIDANCE
 )
 _REMEDIATION_FAIRNESS_COMPONENT = "guardian-remediation-fairness"
 _MAX_REMEDIATION_CHANGED_PATHS = 100
@@ -717,9 +725,14 @@ class _PublicationRecoveryBacklog(RuntimeError):
     """Bounded publication recovery must finish before new repository work."""
 
 
-def _safe_failure_name(error: BaseException) -> str:
+class QualityReportLineageError(ValueError):
+    """One pull's publication lineage cannot provide bounded authority."""
+
+
+def _safe_failure_name(error: BaseException, **context: object) -> str:
     """Return an audit-safe failure identifier without untrusted text."""
 
+    record_failure(error, **context)
     return type(error).__name__
 
 
@@ -1690,6 +1703,9 @@ def _stored_feedback(
 ) -> tuple[FeedbackRevision, ...]:
     previous: list[FeedbackRevision] = []
     for revision in revisions:
+        if ":quality:" in revision.event_id:
+            # These are internal per-key projections, not GitHub object IDs.
+            continue
         try:
             kind = FeedbackKind(revision.kind)
         except ValueError:
@@ -1723,12 +1739,26 @@ def _trusted_tombstones(
     policy: RepositoryPolicy,
     snapshot: PullRequestFeedbackSnapshot,
     previous: Sequence[EventRevision],
+    quality_event_ids: frozenset[str] | None = None,
 ) -> tuple[FeedbackEvent, ...]:
     previous_by_object = {
         (revision.kind, revision.event_id): revision for revision in previous
     }
     pull = snapshot.pull_request
     events: list[FeedbackEvent] = []
+    if quality_event_ids is not None and policy.quality_report_actor is not None:
+        actor = policy.quality_report_actor
+        for prior in previous:
+            if (":quality:" in prior.event_id and prior.event_id not in quality_event_ids
+                    and not prior.deleted and (prior.author_id, prior.author_type) == (actor.id, actor.type)):
+                events.append(FeedbackEvent(
+                    repository=policy.base_repo, pr_number=pull.number,
+                    kind=prior.kind, event_id=prior.event_id, author=prior.author,
+                    author_id=prior.author_id, author_type=prior.author_type, body="",
+                    head_sha=pull.head_sha, base_sha=pull.base_sha, locale=prior.locale,
+                    path=prior.path, updated_at=prior.updated_at, html_url=prior.html_url,
+                    deleted=True,
+                ))
     for revision in snapshot.feedback:
         if not revision.deleted:
             continue
@@ -1863,6 +1893,14 @@ def _replacement_target_locales(
     authorized: dict[str, dict[str, str]] = {}
     for event in events:
         targets: dict[str, str] = {}
+        if event.body.startswith(QUALITY_REPORT_MARKER):
+            actor = policy.quality_report_actor
+            if actor is not None and (event.author_id, event.author_type) == (actor.id, actor.type):
+                report = parse_report(event.body)
+                if path_locales.get(report["path"]) == report["locale"]:
+                    targets[report["path"]] = report["locale"]
+            authorized[event.feedback_id] = targets
+            continue
         if event.author_id is not None:
             for path, locale in path_locales.items():
                 actors = (
@@ -2229,7 +2267,7 @@ class GuardianController:
             ) from exc
         require_live_lease()
 
-    def poll_once(self) -> PollOutcome:
+    def poll_once(self, *, include_history: bool = True) -> PollOutcome:
         """Run one finite poll, never retrying at the orchestration layer."""
 
         observed_at = _as_utc(self.now())
@@ -2440,20 +2478,43 @@ class GuardianController:
                         raise _PublicationRecoveryBacklog(
                             "Publication recovery remains after the bounded workset."
                         )
+                    self.state.supersede_inactive_feedback_report_pulls(
+                        policy.base_repo_id,
+                        tuple(snapshot.pull_request.number for snapshot in snapshots),
+                    )
+                    snapshot_failed = False
                     for snapshot in snapshots:
                         outcome.pull_requests_seen += 1
-                        self._process_snapshot(
-                            policy=policy,
-                            snapshot=snapshot,
-                            observed_at=observed_at,
-                            lease_owner=owner,
-                            outcome=outcome,
-                        )
+                        try:
+                            self._process_snapshot(
+                                policy=policy,
+                                snapshot=snapshot,
+                                observed_at=observed_at,
+                                lease_owner=owner,
+                                outcome=outcome,
+                            )
+                        except QualityReportLineageError as exc:
+                            snapshot_failed = True
+                            failure = _safe_failure_name(
+                                exc, repository=policy.base_repo,
+                                pull_numbers=[snapshot.pull_request.number],
+                            )
+                            outcome.failures.append(failure)
+                            self.state.record_health(
+                                component="guardian-snapshot", status="failed",
+                                message="Guardian rejected this pull's publication lineage.",
+                                details={
+                                    "repository": policy.base_repo,
+                                    "pr_number": snapshot.pull_request.number,
+                                    "failure_type": failure,
+                                }, checked_at=observed_at,
+                            )
                     # Historical writes are safe only after this poll obtained
                     # and processed a complete open-PR view for the same
                     # repository.  Retain the open target scope so closed
                     # evidence cannot race a still-open translation PR.
-                    open_poll_succeeded.add(policy.base_repo)
+                    if not snapshot_failed:
+                        open_poll_succeeded.add(policy.base_repo)
                     open_changed_paths[policy.base_repo] = frozenset(
                         changed.path
                         for snapshot in snapshots
@@ -2493,7 +2554,8 @@ class GuardianController:
                         checked_at=observed_at,
                     )
             if (
-                not lease_lost
+                include_history
+                and not lease_lost
                 and "PollDeadlineExceeded" not in outcome.failures
                 and not outcome.authentication_circuit_open
                 and not outcome.model_circuit_open
@@ -2936,13 +2998,17 @@ class GuardianController:
         event_revision_ids: Sequence[int],
         require_live_lease: Callable[[], None],
         expected_current_head_sha: str | None = None,
+        allow_empty_feedback: bool = False,
     ) -> None:
         """Rehydrate and reauthorize one complete open source before mutation."""
 
         try:
             if source.repository_id != policy.base_repo_id:
                 raise ValueError
-            if expected_current_head_sha in {None, source.head_sha}:
+            if allow_empty_feedback and not event_revision_ids:
+                if expected_current_head_sha not in {None, source.head_sha}:
+                    raise ValueError("Empty reporting source cannot attest a publication.")
+            elif expected_current_head_sha in {None, source.head_sha}:
                 self.state.validate_prevention_source_attestation(
                     source_repository=source.repository,
                     open_source=source,
@@ -3025,6 +3091,7 @@ class GuardianController:
                     snapshot=fresh,
                     path_locales=scope.path_locales,
                     changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+                    expected_report_head_sha=self._quality_report_heads(policy, fresh.pull_request.number, source.head_sha),
                 )
             current = self._open_pull_authority_reference(
                 policy=policy,
@@ -3032,6 +3099,8 @@ class GuardianController:
                 authorized=authorized,
                 authority_repository=source.repository,
             )
+            if allow_empty_feedback and not event_revision_ids and authorized.events:
+                raise ValueError("Withdrawn summary source acquired new feedback.")
         except (
             _LeaseLost,
             PreventionLeaseLostError,
@@ -3108,6 +3177,7 @@ class GuardianController:
                 snapshot=final_fresh,
                 path_locales=scope.path_locales,
                 changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+                expected_report_head_sha=self._quality_report_heads(policy, final_fresh.pull_request.number, source.head_sha),
             )
             final_current = self._open_pull_authority_reference(
                 policy=policy,
@@ -4413,6 +4483,10 @@ class GuardianController:
                         snapshot=snapshot,
                         run_id=run_id,
                         prompt=_HISTORICAL_ASSESSMENT_PROMPT,
+                        feedback_events=events,
+                        target_locales_by_feedback=_replacement_target_locales(
+                            policy, events, current_scope.path_locales,
+                        ),
                     )
                     self._require_live_lease(lease_owner)
                     assessments = self.assessment_converter(
@@ -5261,10 +5335,16 @@ class GuardianController:
         except PollDeadlineExceeded:
             raise
         except RemediationSourceAuthorityError as exc:
-            outcome.remediation_failures.append(_safe_failure_name(exc))
+            outcome.remediation_failures.append(_safe_failure_name(
+                exc, repository=policy.base_repo, run_id=participating[0].run_id,
+                pull_numbers=[item.snapshot.pull_request.number for item in participating],
+            ))
             return
         except Exception as exc:
-            outcome.remediation_failures.append(_safe_failure_name(exc))
+            outcome.remediation_failures.append(_safe_failure_name(
+                exc, repository=policy.base_repo, run_id=participating[0].run_id,
+                pull_numbers=[item.snapshot.pull_request.number for item in participating],
+            ))
             if not recovery_attempt and active_exact_batch_exists():
                 retry_immediately.update(
                     item.snapshot.pull_request.pull_id for item in participating
@@ -5588,6 +5668,33 @@ class GuardianController:
                 occurred_at=observed_at,
             )
 
+    def _quality_report_publications(self, policy, pull_number, head_sha):
+        """Follow only durable Guardian publications, never arbitrary ancestry."""
+        heads = {head_sha}
+        publications = []
+        actor = policy.publication_actor
+        if actor is None or policy.quality_report_actor is None:
+            return ()
+        for _ in range(100):
+            publication = self.state.replied_publication_for_head(
+                repository=policy.base_repo, repository_id=policy.base_repo_id,
+                pr_number=pull_number, head_sha=head_sha,
+                publication_actor_id=actor.id, publication_actor_type=actor.type,
+                include_terminal_corrections=True,
+            )
+            if publication is None:
+                return tuple(publications)
+            publications.append(publication)
+            head_sha = publication.original_head_sha
+            if head_sha in heads:
+                raise QualityReportLineageError("Guardian publication lineage repeats a head")
+            heads.add(head_sha)
+        raise QualityReportLineageError("Guardian publication lineage exceeds its bound")
+
+    def _quality_report_heads(self, policy, pull_number, head_sha):
+        return frozenset((head_sha, *(publication.original_head_sha for publication in
+            self._quality_report_publications(policy, pull_number, head_sha))))
+
     def _process_snapshot(
         self,
         *,
@@ -5631,6 +5738,9 @@ class GuardianController:
                 snapshot=snapshot,
                 path_locales=scope.path_locales,
                 changed_locales=tuple(sorted(set(scope.path_locales.values()))),
+                expected_report_head_sha=self._quality_report_heads(
+                    policy, snapshot.pull_request.number, snapshot.pull_request.head_sha,
+                ),
             )
             open_source = self._open_pull_authority_reference(
                 policy=policy,
@@ -5643,6 +5753,7 @@ class GuardianController:
                     policy=policy,
                     snapshot=snapshot,
                     previous=previous,
+                    quality_event_ids=frozenset(event.event_id for event in authorized.events),
                 ),
             )
             publication_actor = policy.publication_actor
@@ -5660,6 +5771,17 @@ class GuardianController:
             )
             addressed_signatures: set[tuple[str, str, str]] = set()
             translation_applied_signatures: set[tuple[str, str, str]] = set()
+            for publication in self._quality_report_publications(policy, snapshot.pull_request.number, snapshot.pull_request.head_sha):
+                pending_ids = self.state.publication_pending_prevention_revision_ids(publication)
+                deferred_ids = self.state.publication_deferred_revision_ids(publication)
+                for revision_id in publication.event_revision_ids:
+                    prior_revision = self.state.get_event_revision(revision_id)
+                    if prior_revision is None or ":quality:" not in prior_revision.event_id or revision_id in deferred_ids:
+                        continue
+                    target = (translation_applied_signatures if self.config.mode is GuardianMode.PROPOSE_PREVENTION
+                              and (revision_id in pending_ids or self.state.get_run(publication.run_id).mode is GuardianMode.APPLY_OWNED_TRANSLATIONS)
+                              else addressed_signatures)
+                    target.add((prior_revision.kind, prior_revision.event_id, prior_revision.revision_hash))
             if replied_publication is not None:
                 publication_mode = self.state.get_run(replied_publication.run_id).mode
                 signature_target = (
@@ -5671,12 +5793,21 @@ class GuardianController:
                 deferred_revisions = self.state.publication_deferred_revision_ids(
                     replied_publication
                 )
+                pending_prevention = self.state.publication_pending_prevention_revision_ids(
+                    replied_publication
+                )
                 for revision_id in replied_publication.event_revision_ids:
                     if revision_id in deferred_revisions:
                         continue
                     prior_revision = self.state.get_event_revision(revision_id)
                     if prior_revision is not None:
-                        signature_target.add(
+                        target = (
+                            translation_applied_signatures
+                            if self.config.mode is GuardianMode.PROPOSE_PREVENTION
+                            and revision_id in pending_prevention
+                            else signature_target
+                        )
+                        target.add(
                             (
                                 prior_revision.kind,
                                 prior_revision.event_id,
@@ -5748,6 +5879,11 @@ class GuardianController:
                 in {pending_revision.revision_id for pending_revision in pending}
             )
             if not superseded and not current_pending:
+                self._flush_feedback_reports(
+                    policy=policy, snapshot=snapshot, current=tuple(current.values()),
+                    open_source=open_source, lease_owner=lease_owner,
+                    policy_digest=_patch_policy_digest(self.config, policy, scope),
+                )
                 return
 
             locale_label = ",".join(
@@ -5839,10 +5975,19 @@ class GuardianController:
                     finished_at=observed_at,
                 )
                 outcome.runs_completed += 1
+                self._flush_feedback_reports(
+                    policy=policy, snapshot=snapshot, current=tuple(current.values()),
+                    open_source=open_source, lease_owner=lease_owner,
+                    policy_digest=_patch_policy_digest(self.config, policy, scope),
+                )
                 return
 
             try:
                 with self.checkout_factory(head_revision) as head_workspace:
+                    # Status replies can trigger immediate reviewer-bot updates.
+                    # Assess/publish actionable work before draining old reports,
+                    # or those updates can starve repairs on every fresh poll.
+                    publications_before = len(outcome.applied_commits)
                     self._assess_and_act(
                         policy=policy,
                         snapshot=snapshot,
@@ -5861,6 +6006,13 @@ class GuardianController:
                         ),
                         lease_owner=lease_owner,
                         outcome=outcome,
+                    )
+                    self._flush_feedback_reports(
+                        policy=policy, snapshot=snapshot, current=tuple(current.values()),
+                        open_source=open_source, lease_owner=lease_owner,
+                        policy_digest=_patch_policy_digest(self.config, policy, scope),
+                        published_head=(outcome.applied_commits[-1]
+                                        if len(outcome.applied_commits) > publications_before else None),
                     )
             except (_LeaseLost, PreventionLeaseLostError):
                 raise
@@ -5894,8 +6046,25 @@ class GuardianController:
         policy: RepositoryPolicy,
         snapshot: PullRequestFeedbackSnapshot,
         run_id: str,
+        feedback_events: Sequence[FeedbackEvent],
+        target_locales_by_feedback: Mapping[str, Mapping[str, str]],
         prompt: str = _ASSESSMENT_PROMPT,
+        machine_prevention_only: frozenset[str] = frozenset(),
     ) -> CodexResult:
+        machine_keys = {}
+        machine_events = [event for event in feedback_events if event.body.startswith(QUALITY_REPORT_MARKER)]
+        if machine_events:
+            values = _localization_values(bundle)
+            rules = json.loads((bundle.root / "validation-rules.json").read_text(encoding="utf-8"))
+            for event in machine_events:
+                machine_keys[event.feedback_id] = verify_report_values(
+                    parse_report(event.body), values,
+                    brands=rules.get("brand_technical_glossary", ()),
+                    ignored_patterns=rules.get("ignore_key_patterns", ()),
+                    prevention_only=event.feedback_id in machine_prevention_only,
+                )
+            if machine_prevention_only:
+                prompt += "\nThe following machine findings were already corrected by a durably recorded Guardian publication. Assess historical recurrence only and return no replacements for these IDs: " + ", ".join(sorted(machine_prevention_only))
         model = self.codex_driver.model
         reasoning_effort = self.config.runtime.codex_reasoning_effort
         cache_key = _assessment_cache_key(
@@ -5913,8 +6082,52 @@ class GuardianController:
             model=model,
             reasoning_effort=reasoning_effort,
         )
+        source_values = _source_values(bundle)
+        validation_rules = json.loads(
+            (bundle.root / "validation-rules.json").read_text(encoding="utf-8")
+        )
+
+        def validate_result(result: CodexResult) -> None:
+            for decision in result.feedback:
+                allowed = machine_keys.get(decision.feedback_id)
+                if allowed is not None and any(
+                    (replacement.path, replacement.key) not in allowed
+                    for replacement in decision.replacements
+                ):
+                    raise CodexOutputError("Machine-report replacement escaped its exact verified keys.")
+            # This is cache admission, independent of the later action converter.
+            # Both open and historical work must match the trusted task exactly.
+            assessments = to_guardian_assessments(
+                result,
+                feedback_events=feedback_events,
+                source_values=source_values,
+                target_locales_by_feedback=target_locales_by_feedback,
+            )
+            if validation_rules["translation_glossary_enforcement"] == "exact":
+                for assessment in assessments:
+                    for proposal in assessment.replacements:
+                        glossary = dict(validation_rules["glossary"].get(proposal.locale, {}))
+                        glossary.update({term: term for term in validation_rules["brand_technical_glossary"]})
+                        if find_glossary_mismatches(
+                            source_values[(proposal.path, proposal.key)],
+                            proposal.proposed_value,
+                            glossary,
+                        ):
+                            raise CodexOutputError(
+                                "Replacement violates trusted glossary or brand requirements."
+                            )
+
         if cached is not None:
-            return parse_cached_codex_result(cached)
+            try:
+                result = parse_cached_codex_result(cached)
+                validate_result(result)
+            except CodexOutputError:
+                self.state.invalidate_assessment_result(
+                    cache_key=cache_key, result_json=cached,
+                    invalidated_at=_as_utc(self.now()),
+                )
+            else:
+                return result
 
         api_key = None
         if self.config.runtime.codex_auth_mode is CodexAuthMode.API_KEY:
@@ -6022,12 +6235,15 @@ class GuardianController:
             usage: CodexUsage | None,
             result: CodexResult,
         ) -> None:
+            # Reject before popping reservations or writing the durable cache;
+            # the driver accounts this response and may use its remaining retry.
+            validate_result(result)
+            serialized_result = serialize_codex_result(result)
             call_id = attempt_calls.pop(attempt, None)
             if call_id is None:
                 raise RuntimeError(
                     "Codex success has no matching model call reservation."
                 )
-            serialized_result = serialize_codex_result(result)
             created_at = _as_utc(self.now())
             if not api_billed:
                 self.state.cache_assessment_result(
@@ -6099,6 +6315,10 @@ class GuardianController:
         outcome: _PollAccumulator,
     ) -> None:
         """Assess trusted feedback and apply only policy-validated replacements."""
+        report_context = {
+            "report_config_digest": scope.config_bundle_digest or "unbound",
+            "report_policy_digest": _patch_policy_digest(self.config, policy, scope),
+        }
         events = tuple(event for event, _revision in actionable)
         revisions = tuple(revision for _event, revision in actionable)
         event_locales = {event.locale for event in events}
@@ -6122,8 +6342,7 @@ class GuardianController:
                     evidence_kwargs["trusted_config_bundle_digest"] = (
                         scope.config_bundle_digest
                     )
-                bundle = self.evidence_builder(
-                    destination=Path(temporary_directory) / "bundle",
+                bundle_arguments = dict(
                     repo_root=head_workspace.path,
                     trusted_pipeline_config_path=scope.config_path,
                     repository=policy.base_repo,
@@ -6139,18 +6358,87 @@ class GuardianController:
                     expected_source_locale=policy.source_locale,
                     **evidence_kwargs,
                 )
+                bundle = self.evidence_builder(
+                    destination=Path(temporary_directory) / "bundle", **bundle_arguments,
+                )
+                machine_events = [event for event in events if event.body.startswith(QUALITY_REPORT_MARKER)]
+                invalid_machine_ids = set()
+                if machine_events:
+                    values = _localization_values(bundle)
+                    rules = json.loads((bundle.root / "validation-rules.json").read_text(encoding="utf-8"))
+                    for event in machine_events:
+                        try:
+                            verify_report_values(
+                                parse_report(event.body), values,
+                                brands=rules.get("brand_technical_glossary", ()),
+                                ignored_patterns=rules.get("ignore_key_patterns", ()),
+                                prevention_only=event.feedback_id in translation_suppressed_feedback_ids,
+                            )
+                        except ValueError:
+                            invalid_machine_ids.add(event.feedback_id)
+                if invalid_machine_ids:
+                    self._require_live_lease(lease_owner)
+                    rejected = tuple(item for item in actionable if item[0].feedback_id in invalid_machine_ids)
+                    self._complete_actions(
+                        run_id=run_id, actionable=rejected,
+                        assessments=tuple(GuardianAssessment(
+                            feedback_id=event.feedback_id, verdict="reject", confidence=1.0,
+                            rationale="Machine finding does not reproduce in exact trusted evidence.",
+                            report_reason="insufficient_evidence",
+                        ) for event, _revision in rejected),
+                        changed_keys=(), commit_sha=None, translation_suppressed_feedback_ids=frozenset(),
+                        observed_at=observed_at,
+                        report_context={**report_context, "machine_report_reason": "finding_not_reproduced"},
+                    )
+                    actionable = tuple(item for item in actionable if item[0].feedback_id not in invalid_machine_ids)
+                    events = tuple(event for event, _revision in actionable)
+                    revisions = tuple(revision for _event, revision in actionable)
+                    if not actionable:
+                        self.state.finish_run(
+                            run_id, status="completed", summary="Machine findings rejected after deterministic verification.",
+                            finished_at=observed_at,
+                        )
+                        outcome.runs_completed += 1
+                        return
+                    authorized_paths = {
+                        path
+                        for targets in _replacement_target_locales(
+                            policy, events, scope.path_locales,
+                        ).values()
+                        for path in targets
+                    }
+                    changed_paths = tuple(path for path in changed_paths if path in authorized_paths)
+                    bundle_arguments.update(
+                        feedback=events, changed_paths=changed_paths,
+                        diff_text=_diff_text(changed_paths, scope.changed_files),
+                    )
+                    bundle = self.evidence_builder(
+                        destination=Path(temporary_directory) / "verified-bundle", **bundle_arguments,
+                    )
+                    # The model receives only the rebuilt, verified event set.
+                    shutil.rmtree(Path(temporary_directory) / "bundle")
                 try:
                     result = self._assessment_result(
                         bundle=bundle,
                         policy=policy,
                         snapshot=snapshot,
                         run_id=run_id,
+                        feedback_events=events,
+                        target_locales_by_feedback=_replacement_target_locales(
+                            policy, events, scope.path_locales,
+                        ),
+                        machine_prevention_only=frozenset(
+                            event.feedback_id for event in events
+                            if event.feedback_id in translation_suppressed_feedback_ids
+                            and event.body.startswith(QUALITY_REPORT_MARKER)
+                        ),
                     )
                 except _ModelCredentialUnavailable:
                     self._fail_actions(
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="model_credential_unavailable",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6175,6 +6463,7 @@ class GuardianController:
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="daily_budget_unavailable",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6190,6 +6479,7 @@ class GuardianController:
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="daily_model_call_limit_unavailable",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6205,6 +6495,7 @@ class GuardianController:
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="codex_authentication_failed",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6227,6 +6518,7 @@ class GuardianController:
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="codex_capacity_unavailable",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6254,6 +6546,40 @@ class GuardianController:
                         policy, events, scope.path_locales
                     ),
                 )
+
+                # A later model pass must not silently overrule an outstanding
+                # decision just because unrelated files or review text moved.
+                config_digest = scope.config_bundle_digest or "unbound"
+                held_assessments = []
+                for assessment, event in (
+                    (item, next(e for e in events if e.feedback_id == item.feedback_id))
+                    for item in assessments
+                ):
+                    held = self.state.held_feedback_decision(
+                        repository=policy.base_repo,
+                        pr_number=event.pr_number,
+                        kind=event.kind,
+                        event_id=event.event_id,
+                        config_digest=config_digest,
+                    )
+                    if held:
+                        reason = held_report_reason(str(
+                            held.get("report_reason", "insufficient_evidence")
+                        ))
+                        assessment = replace(
+                            assessment,
+                            verdict="needs_human",
+                            replacements=(),
+                            report_reason=reason,
+                            decision_required=True,
+                            held_value_edits=int(
+                                held.get("held_value_edits")
+                                or held.get("deferred_value_edits")
+                                or 0
+                            ),
+                        )
+                    held_assessments.append(assessment)
+                assessments = tuple(held_assessments)
 
             recurrence_candidates = tuple(
                 candidate
@@ -6299,6 +6625,7 @@ class GuardianController:
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="prevention_codex_authentication_failed",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6326,6 +6653,7 @@ class GuardianController:
                         run_id=run_id,
                         revisions=revisions,
                         outcome_name="prevention_codex_capacity_unavailable",
+                        report_context=report_context,
                         observed_at=observed_at,
                     )
                     self.state.finish_run(
@@ -6353,12 +6681,10 @@ class GuardianController:
                     outcome=outcome,
                 )
                 if prevention_outcome.failures or prevention_outcome.deferred:
-                    # Leave the feedback revisions retryable. Successful drafts
-                    # are durably deduplicated, so a later run can continue the
-                    # remaining bounded candidates without duplicating them.
-                    raise PreventionRuntimeError(
-                        "Prevention candidates remain incomplete."
-                    )
+                    # Persist independent prevention work in the same atomic
+                    # completion plan as the translation publication. A retry
+                    # may continue prevention but must not repeat signed edits.
+                    report_context = {**report_context, "prevention_pending": True}
 
             replacements = _eligible_replacements(
                 assessments,
@@ -6415,6 +6741,7 @@ class GuardianController:
                     lease_owner=lease_owner,
                     observed_at=observed_at,
                     deferred_edits=deferred_edits,
+                    report_context=report_context,
                 )
                 outcome.applied_commits.append(commit_sha)
 
@@ -6430,6 +6757,7 @@ class GuardianController:
                     ),
                     observed_at=observed_at,
                     deferred_edits=deferred_edits,
+                    report_context=report_context,
                 )
                 self.state.finish_run(
                     run_id,
@@ -6452,6 +6780,9 @@ class GuardianController:
                     status="skipped",
                     details={
                         "outcome": "deterministic_policy_rejection",
+                        **report_context,
+                        "report_reason": "policy_conflict",
+                        "decision_required": False,
                         "reason": str(exc)[:512],
                         "policy_digest": _patch_policy_digest(
                             self.config, policy, scope
@@ -6470,14 +6801,23 @@ class GuardianController:
             raise
         except Exception as exc:
             if self.state.has_pending_publication_for_run(run_id):
+                record_failure(exc, repository=policy.base_repo, run_id=run_id,
+                               pull_numbers=[snapshot.pull_request.number])
                 # A prepared or published cursor owns truthful recovery. Do not
                 # append failure rows ahead of recovery's atomic local finalizer.
                 outcome.runs_failed += 1
                 raise exc
+            record_failure(exc, repository=policy.base_repo, run_id=run_id,
+                           pull_numbers=[snapshot.pull_request.number])
+            if self.state.get_run(run_id).status != "running":
+                # Reporting has its own durable retry path. Do not relabel a
+                # completed correction or try to finish its run a second time.
+                raise
             self._fail_actions(
                 run_id=run_id,
                 revisions=revisions,
                 outcome_name="orchestration_failure",
+                report_context=report_context,
                 observed_at=observed_at,
             )
             self.state.finish_run(
@@ -6532,6 +6872,7 @@ class GuardianController:
         lease_owner: str,
         observed_at: datetime | None = None,
         deferred_edits: Mapping[str, int] | None = None,
+        report_context: Mapping[str, object] | None = None,
     ) -> str:
         """Publish signed edits and separately account for the authorized status reply."""
         if (
@@ -6601,6 +6942,7 @@ class GuardianController:
         )
         completion_actions = self._completion_action_details(
             actionable=actionable,
+            report_context=report_context,
             assessments=assessments,
             changed_keys=patch_result.changed_keys,
             commit_sha=commit.commit_sha,
@@ -6800,6 +7142,218 @@ class GuardianController:
         )
         return publication.commit_sha
 
+    def _flush_feedback_reports(
+        self,
+        *,
+        policy: RepositoryPolicy,
+        snapshot: PullRequestFeedbackSnapshot,
+        current: Sequence[tuple[FeedbackEvent, EventRevision]],
+        open_source: OpenPullAuthorityReference,
+        lease_owner: str,
+        policy_digest: str,
+        published_head: str | None = None,
+    ) -> None:
+        """Drain completed-action reporting independently from correction retries."""
+        if self.config.mode not in {
+            GuardianMode.APPLY_OWNED_TRANSLATIONS,
+            GuardianMode.PROPOSE_PREVENTION,
+        }:
+            return
+        assert self.write_broker_factory is not None
+        actor = policy.publication_actor
+        assert actor is not None
+        head = published_head or snapshot.pull_request.head_sha
+        broker = self.write_broker_factory(policy)
+        reports = []
+        machine_reports = {}
+        posted = 0
+        revision_ids = tuple(
+            revision.revision_id for event, revision in current if not event.deleted
+        )
+        self.state.supersede_unavailable_feedback_reports(
+            policy.base_repo_id,
+            snapshot.pull_request.number,
+            tuple(
+                event.feedback_id for event, _revision in current if not event.deleted
+            ),
+        )
+
+        def revalidate() -> None:
+            self._require_exact_open_source_authority(
+                policy=policy,
+                source=open_source,
+                event_revision_ids=revision_ids,
+                require_live_lease=lambda: self._require_live_lease(lease_owner),
+                expected_current_head_sha=head,
+                allow_empty_feedback=not revision_ids,
+            )
+
+        try:
+            for event, revision in current:
+                if event.deleted:
+                    continue
+                details = self.state.latest_feedback_report(
+                    revision.revision_id,
+                    repository_id=policy.base_repo_id,
+                    actor_id=actor.id,
+                    actor_type=actor.type,
+                )
+                if details is None or details.get("report_outcome") == "failed":
+                    held = self.state.held_feedback_report_for_revision(
+                        revision.revision_id,
+                        policy_digest,
+                    )
+                    if held is not None:
+                        details = {
+                            **held,
+                            **(
+                                {"report_outcome": "failed"}
+                                if details is not None
+                                else {}
+                            ),
+                        }
+                if details is None:
+                    continue
+                if details.get("report_policy_digest") != policy_digest:
+                    # Observation results and changed policies are reassessed
+                    # before they can authorize public status in a write mode.
+                    continue
+                if ":quality:" in event.event_id:
+                    # Machine findings have one consolidated public summary,
+                    # never dozens of per-key comments on a maintainer's PR.
+                    machine_key = (event.event_id.split(':', 1)[0], report_disposition(details), bool(details.get("decision_required")))
+                    if machine_key not in machine_reports:
+                        machine_reports[machine_key] = {
+                            "url": f"{broker.web_base_url}/{policy.base_repo}/pull/{event.pr_number}#issuecomment-{machine_key[0]}",
+                            "disposition": machine_key[1], "decision_required": machine_key[2],
+                            "finding_count": 0,
+                        }
+                        reports.append(machine_reports[machine_key])
+                    machine_reports[machine_key]["finding_count"] += 1
+                    continue
+                body = report_body(
+                    details,
+                    repository=policy.base_repo,
+                    feedback_id=event.feedback_id,
+                    pull_number=event.pr_number,
+                    web_base_url=broker.web_base_url,
+                )
+                key = report_key(
+                    repository_id=policy.base_repo_id,
+                    pull_number=event.pr_number,
+                    feedback_id=event.feedback_id,
+                    body=body,
+                )
+                payload = {
+                    "body": body,
+                    "repository_id": policy.base_repo_id,
+                    "pr_number": event.pr_number,
+                    "feedback_id": event.feedback_id,
+                }
+                self.state.queue_feedback_report(key, payload)
+                delivery = self.state.feedback_report_delivery(key)
+                assert delivery is not None
+                if delivery["status"] == "posted":
+                    result = json.loads(delivery["result_json"])
+                else:
+                    if posted >= 100:
+                        break
+                    self._require_live_lease(lease_owner)
+                    response = broker.post_feedback_report(
+                        pull_number=event.pr_number,
+                        expected_head_sha=head,
+                        expected_base_sha=snapshot.pull_request.base_sha,
+                        expected_actor=actor,
+                        report_id=key,
+                        feedback_id=event.feedback_id,
+                        details=details,
+                        before_create=revalidate,
+                    )
+                    result = {"url": response.html_url, "body": response.body}
+                    self._require_live_lease(lease_owner)
+                    self.state.finish_feedback_report(key, result=result)
+                    posted += 1
+                reports.append(
+                    {
+                        "url": result["url"],
+                        "disposition": report_disposition(details),
+                        "decision_required": bool(details.get("decision_required")),
+                    }
+                )
+            if reports or self.state.feedback_summary_bodies(
+                policy.base_repo_id, snapshot.pull_request.number
+            ):
+                reports = sorted(
+                    reports,
+                    key=lambda item: (not item["decision_required"], item["url"]),
+                )[:100]
+                body = summary_body(
+                    reports,
+                    repository=policy.base_repo,
+                    pull_number=snapshot.pull_request.number,
+                    web_base_url=broker.web_base_url,
+                )
+                key = report_key(
+                    repository_id=policy.base_repo_id,
+                    pull_number=snapshot.pull_request.number,
+                    feedback_id="summary",
+                    body=body,
+                )
+                previous = self.state.feedback_summary_bodies(
+                    policy.base_repo_id, snapshot.pull_request.number
+                )
+                self.state.queue_feedback_report(
+                    key,
+                    {
+                        "summary": True,
+                        "body": body,
+                        "repository_id": policy.base_repo_id,
+                        "pr_number": snapshot.pull_request.number,
+                    },
+                )
+                # A summary can legitimately return to an older body. Its
+                # historic acknowledgement does not establish current content.
+                response = broker.post_feedback_summary(
+                    pull_number=snapshot.pull_request.number,
+                    expected_head_sha=head,
+                    expected_base_sha=snapshot.pull_request.base_sha,
+                    expected_actor=actor,
+                    reports=reports,
+                    previous_body=previous,
+                    before_create=revalidate,
+                )
+                self._require_live_lease(lease_owner)
+                self.state.finish_feedback_report(
+                    key, result={"url": response.html_url, "body": response.body}
+                )
+            self.state.record_health(
+                component="feedback-reporting",
+                status="ok",
+                message="Feedback explanations reconciled; decisions remain separate from corrections.",
+                details={
+                    "reports_posted": posted,
+                    "decisions_required": sum(
+                        bool(item["decision_required"]) for item in reports
+                    ),
+                },
+                checked_at=_as_utc(self.now()),
+            )
+        except _PublishedFeedbackChanged:
+            self.state.record_health(
+                component="feedback-reporting",
+                status="pending",
+                message="Changed feedback deferred publication; fresh assessment is required.",
+                checked_at=_as_utc(self.now()),
+            )
+        except Exception:
+            self.state.record_health(
+                component="feedback-reporting",
+                status="failed",
+                message="Feedback explanation remains pending; no correction will be repeated solely to retry reporting.",
+                checked_at=_as_utc(self.now()),
+            )
+            raise
+
     def _fail_actions(
         self,
         *,
@@ -6807,6 +7361,7 @@ class GuardianController:
         revisions: Sequence[EventRevision],
         outcome_name: str,
         observed_at: datetime,
+        report_context: Mapping[str, object] | None = None,
     ) -> None:
         for revision in revisions:
             self.state.record_action(
@@ -6814,7 +7369,19 @@ class GuardianController:
                 event_revision_id=revision.revision_id,
                 action=self.config.mode.value,
                 status="failed",
-                details={"outcome": outcome_name},
+                details={
+                    "outcome": outcome_name,
+                    **(
+                        {
+                            **report_context,
+                            "report_outcome": "failed",
+                            "report_reason": "processing_failure",
+                            "decision_required": False,
+                        }
+                        if report_context is not None
+                        else {}
+                    ),
+                },
                 occurred_at=observed_at,
             )
 
@@ -6829,9 +7396,11 @@ class GuardianController:
         translation_suppressed_feedback_ids: frozenset[str],
         observed_at: datetime,
         deferred_edits: Mapping[str, int] | None = None,
+        report_context: Mapping[str, object] | None = None,
     ) -> None:
         for revision_id, status, details in self._completion_action_details(
             actionable=actionable,
+            report_context=report_context,
             assessments=assessments,
             changed_keys=changed_keys,
             commit_sha=commit_sha,
@@ -6856,6 +7425,7 @@ class GuardianController:
         commit_sha: str | None,
         translation_suppressed_feedback_ids: frozenset[str],
         deferred_edits: Mapping[str, int] | None = None,
+        report_context: Mapping[str, object] | None = None,
     ) -> tuple[tuple[int, str, Mapping[str, object]], ...]:
         """Build exact action rows for normal and atomic publication completion."""
 
@@ -6881,7 +7451,7 @@ class GuardianController:
             completion_actions.append(
                 (
                     revision.revision_id,
-                    "skipped" if remaining else "completed",
+                    "skipped" if remaining or (report_context or {}).get("prevention_pending") else "completed",
                     {
                         "outcome": (
                             "translation_batch_deferred"
@@ -6894,6 +7464,10 @@ class GuardianController:
                             if self.config.mode is GuardianMode.OBSERVE and eligible
                             else "prevention_assessed_after_translation"
                             if event.feedback_id in translation_suppressed_feedback_ids
+                            else "needs_human"
+                            if assessment.verdict == "needs_human"
+                            else assessment.report_reason
+                            if assessment.report_reason in {"already_addressed", "not_applicable"}
                             else "no_eligible_change"
                         ),
                         "verdict": assessment.verdict,
@@ -6902,6 +7476,15 @@ class GuardianController:
                         "commit_sha": commit_sha if applied_keys else None,
                         "recurrence_candidates": len(assessment.recurrence_candidates),
                         **({"deferred_value_edits": remaining} if remaining else {}),
+                        **({
+                            **report_context,
+                            "report_reason": ("insufficient_evidence"
+                                              if assessment.verdict == "apply" and assessment.confidence < self.config.limits.min_apply_confidence
+                                              else assessment.report_reason),
+                            "decision_required": (assessment.decision_required or assessment.verdict == "needs_human"
+                                                  or assessment.report_reason in {"glossary_conflict", "alternative_glossary"}),
+                            "held_value_edits": assessment.held_value_edits,
+                        } if report_context is not None else {}),
                     },
                 )
             )

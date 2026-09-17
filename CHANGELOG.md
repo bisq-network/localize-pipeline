@@ -7,6 +7,45 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+## [0.1.21] - 2026-09-15
+
+### Fixed
+
+- Protect numeric React-i18next component tags during translation and review,
+  and check their exact token counts alongside other placeholders. Reject
+  missing, changed, or duplicated numeric placeholders, including malformed
+  replacements for valid source tags. This does not repair existing translations
+  or validate component nesting.
+- Apply retained-source-word checks and language allowlists consistently to
+  regional locale codes such as `en-GB` and `pt_BR`.
+- Validate restored translations against the current source and keep selected
+  source-identical failures retryable in the key ledger.
+- Clarify prompt guidance for incomplete connective labels and count-neutral
+  interpolated text.
+
+### Changed
+
+- Explain Guardian feedback with deterministic bot replies and a managed summary,
+  retaining maintainer decisions across reassessment and report-delivery retries.
+- Batch eligible Guardian corrections within the existing per-run edit limit,
+  retaining deferred feedback for later polls and reporting partial progress
+  separately from whole-poll success.
+- Create Guardian correction and prevention PRs ready for review. Recovery
+  supports legacy drafts and bounded appended review-bot release notes while
+  preserving the original publication authority checks.
+- Include glossary rules and recurrence assessment in Guardian feedback review,
+  improve structured-output compatibility, and align signing identity with the
+  authenticated publication actor.
+- Preserve blob bytes and pin read-only PR-base snapshots in Guardian workspaces;
+  tighten publication recovery and keep private operator commands out of PRs.
+- The package version and default bootstrap action ref are now `v0.1.21`.
+
+### Migration
+
+- Guardian uses state schema 12. Back up its idle database before upgrading;
+  do not run an older Guardian against a schema-12 database. Guardian remains
+  optional and operator-managed.
+
 ## [0.1.20] - 2026-09-05
 
 ### Added

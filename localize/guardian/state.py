@@ -31,7 +31,7 @@ from localize.guardian.prevention import TestCommandResult, TestOutcome
 _UTC = timezone.utc
 # Version 11 prevents older runtimes from mistaking skipped partial batches for
 # resolved feedback. The ledger shape is unchanged; its resolution semantics are not.
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _SUPPORTED_SCHEMA_VERSIONS = frozenset(range(_SCHEMA_VERSION + 1))
 _TERMINAL_ACTION_STATUSES = frozenset({"completed", "skipped"})
 _ACTION_STATUSES = _TERMINAL_ACTION_STATUSES | {"failed", "pending"}
@@ -1789,6 +1789,13 @@ class GuardianState:
                 FOREIGN KEY (run_id) REFERENCES runs(run_id),
                 FOREIGN KEY (event_revision_id)
                     REFERENCES event_revisions(revision_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS feedback_report_deliveries (
+                report_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                result_json TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'posted', 'superseded'))
             );
 
             CREATE TABLE IF NOT EXISTS costs (
@@ -5763,6 +5770,11 @@ class GuardianState:
                 OR json_extract(a.details_json, '$.policy_digest') IS ?
             )"""
             parameters.append(policy_digest)
+            policy_filter += """ AND (
+                json_extract(a.details_json, '$.decision_required') IS NOT 1
+                OR json_extract(a.details_json, '$.report_policy_digest') IS ?
+            )"""
+            parameters.append(policy_digest)
         filters = [
             f"""NOT EXISTS (
                 SELECT 1 FROM actions AS a
@@ -5771,6 +5783,7 @@ class GuardianState:
                   AND a.status IN ({terminal_placeholders})
                   AND json_extract(a.details_json, '$.outcome')
                       IS NOT 'translation_batch_deferred'
+                  AND json_extract(a.details_json, '$.prevention_pending') IS NOT 1
                   {mode_filter}
                   {policy_filter}
             )"""
@@ -8859,6 +8872,233 @@ class GuardianState:
             )
         return int(cursor.lastrowid)
 
+    def latest_feedback_report(
+        self,
+        revision_id: int,
+        *,
+        repository_id: int | None = None,
+        actor_id: int | None = None,
+        actor_type: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        """The completed action itself is the durable reporting outbox intent.
+
+        Publication completion plans persist these details before a push, and
+        atomically recover them alongside the correction result after a crash.
+        """
+        row = self._connection.execute(
+            """SELECT details_json FROM actions WHERE event_revision_id = ?
+               AND json_extract(details_json, '$.report_reason') IS NOT NULL
+               ORDER BY action_id DESC LIMIT 1""",
+            (revision_id,),
+        ).fetchone()
+        if row is None and repository_id is not None and actor_id is not None:
+            # An acknowledged owned push creates a new head-bound revision.
+            # Replay only across that exact signed publication, with unchanged
+            # feedback content/base and immutable repository/writer identity.
+            row = self._connection.execute(
+                """SELECT a.details_json FROM event_revisions current
+                   JOIN event_revisions prior ON prior.repository = current.repository
+                     AND prior.pr_number = current.pr_number AND prior.kind = current.kind
+                     AND prior.event_id = current.event_id AND prior.revision_hash = current.revision_hash
+                   JOIN actions a ON a.event_revision_id = prior.revision_id
+                   JOIN publication_events p ON p.run_id = a.run_id
+                     AND p.original_head_sha = prior.head_sha AND p.base_sha = current.base_sha
+                     AND p.commit_sha = current.head_sha
+                   WHERE current.revision_id = ? AND p.repository_id = ?
+                     AND p.publication_actor_id = ? AND p.publication_actor_type = ?
+                     AND p.phase IN ('published', 'replied')
+                     AND json_extract(a.details_json, '$.report_reason') IS NOT NULL
+                   ORDER BY a.action_id DESC LIMIT 1""",
+                (revision_id, repository_id, actor_id, actor_type),
+            ).fetchone()
+        return json.loads(row["details_json"]) if row else None
+
+    def held_feedback_decision(
+        self,
+        *,
+        repository: str,
+        pr_number: int,
+        kind: str,
+        event_id: str,
+        config_digest: str,
+    ) -> Mapping[str, Any] | None:
+        """Head movement or bot replies cannot release a configuration decision."""
+        row = self._connection.execute(
+            """SELECT a.details_json FROM actions a
+               JOIN event_revisions e ON e.revision_id = a.event_revision_id
+               WHERE e.repository = ? AND e.pr_number = ? AND e.kind = ? AND e.event_id = ?
+               AND json_extract(a.details_json, '$.decision_required') = 1
+               AND json_extract(a.details_json, '$.report_config_digest') = ?
+               ORDER BY a.action_id DESC LIMIT 1""",
+            (repository, pr_number, kind, event_id, config_digest),
+        ).fetchone()
+        return json.loads(row["details_json"]) if row else None
+
+    def held_feedback_report_for_revision(
+        self,
+        revision_id: int,
+        policy_digest: str,
+    ) -> Mapping[str, Any] | None:
+        """Keep an unresolved decision visible without replaying an old correction."""
+        row = self._connection.execute(
+            """SELECT a.details_json FROM event_revisions current
+               JOIN event_revisions prior ON prior.repository = current.repository
+                 AND prior.pr_number = current.pr_number AND prior.kind = current.kind
+                 AND prior.event_id = current.event_id
+               JOIN actions a ON a.event_revision_id = prior.revision_id
+               WHERE current.revision_id = ?
+                 AND json_extract(a.details_json, '$.decision_required') = 1
+                 AND json_extract(a.details_json, '$.report_reason') IS NOT NULL
+                 AND json_extract(a.details_json, '$.report_policy_digest') = ?
+               ORDER BY a.action_id DESC LIMIT 1""",
+            (revision_id, policy_digest),
+        ).fetchone()
+        if row is None:
+            return None
+        details = json.loads(row["details_json"])
+        from localize.guardian.reporting import held_report_reason
+
+        details.update(
+            outcome="needs_human", verdict="needs_human", commit_sha=None,
+            report_reason=held_report_reason(details["report_reason"]),
+            decision_required=True,
+        )
+        details.pop("report_outcome", None)
+        return details
+
+    def feedback_report_delivery(self, report_key: str) -> Mapping[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT * FROM feedback_report_deliveries WHERE report_key = ?",
+            (report_key,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def feedback_summary_bodies(
+        self, repository_id: int, pr_number: int
+    ) -> tuple[str, ...]:
+        """Known exact summary versions, including ambiguous publication attempts."""
+        rows = self._connection.execute(
+            """SELECT payload_json FROM feedback_report_deliveries
+               WHERE json_extract(payload_json, '$.summary') = 1
+               AND json_extract(payload_json, '$.repository_id') = ?
+               AND json_extract(payload_json, '$.pr_number') = ?
+               ORDER BY rowid DESC LIMIT 100""",
+            (repository_id, pr_number),
+        ).fetchall()
+        return tuple(json.loads(row["payload_json"])["body"] for row in rows)
+
+    def feedback_reporting_counts(self) -> tuple[int, int]:
+        """Count delivery acknowledgements and latest recorded human decisions."""
+        pending = self._connection.execute(
+            "SELECT COUNT(*) FROM feedback_report_deliveries WHERE status = 'pending'"
+        ).fetchone()[0]
+        decisions = self._connection.execute(
+            """WITH latest AS (
+                SELECT a.details_json, ROW_NUMBER() OVER (
+                    PARTITION BY e.repository, e.pr_number, e.kind, e.event_id
+                    ORDER BY a.action_id DESC) AS position
+                FROM actions a JOIN event_revisions e ON e.revision_id = a.event_revision_id
+                WHERE json_extract(a.details_json, '$.report_reason') IS NOT NULL
+                  AND COALESCE(json_extract(a.details_json, '$.report_outcome'), '') != 'failed'
+            ) SELECT COUNT(*) FROM latest WHERE position = 1
+              AND json_extract(details_json, '$.decision_required') = 1"""
+        ).fetchone()[0]
+        return int(pending), int(decisions)
+
+    def supersede_inactive_feedback_report_pulls(
+        self,
+        repository_id: int,
+        open_pr_numbers: Sequence[int],
+    ) -> None:
+        """Retire delivery retries outside a complete authorized open-PR view.
+
+        This is not a delivery acknowledgement or a policy decision. If a pull
+        becomes eligible again, exact-source reconciliation can resume.
+        """
+        with self._connection:
+            self._connection.execute(
+                """UPDATE feedback_report_deliveries SET status = 'superseded'
+                   WHERE status = 'pending'
+                   AND json_extract(payload_json, '$.repository_id') = ?
+                   AND json_extract(payload_json, '$.pr_number') NOT IN
+                       (SELECT value FROM json_each(?))""",
+                (repository_id, json.dumps(tuple(open_pr_numbers))),
+            )
+
+    def supersede_unavailable_feedback_reports(
+        self, repository_id: int, pr_number: int, live_ids: Sequence[str]
+    ) -> None:
+        """Retire pending messages only after fresh intake withdrew their source."""
+        with self._connection:
+            self._connection.execute(
+                """UPDATE feedback_report_deliveries SET status = 'superseded'
+                   WHERE status = 'pending'
+                   AND json_extract(payload_json, '$.repository_id') = ?
+                   AND json_extract(payload_json, '$.pr_number') = ?
+                   AND json_extract(payload_json, '$.feedback_id') IS NOT NULL
+                   AND json_extract(payload_json, '$.feedback_id') NOT IN (SELECT value FROM json_each(?))""",
+                (repository_id, pr_number, json.dumps(tuple(live_ids))),
+            )
+
+    def queue_feedback_report(
+        self, report_key: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Preserve exact bytes for retry after an ambiguous GitHub response."""
+        encoded = _canonical_json(payload)
+        with self._connection:
+            if payload.get("feedback_id"):
+                self._connection.execute(
+                    """UPDATE feedback_report_deliveries SET status = 'superseded'
+                       WHERE status = 'pending' AND report_key != ?
+                       AND json_extract(payload_json, '$.repository_id') = ?
+                       AND json_extract(payload_json, '$.pr_number') = ?
+                       AND json_extract(payload_json, '$.feedback_id') = ?""",
+                    (
+                        report_key,
+                        payload["repository_id"],
+                        payload["pr_number"],
+                        payload["feedback_id"],
+                    ),
+                )
+            self._connection.execute(
+                "INSERT OR IGNORE INTO feedback_report_deliveries (report_key, payload_json, status) VALUES (?, ?, 'pending')",
+                (report_key, encoded),
+            )
+            row = self.feedback_report_delivery(report_key)
+            if row is None or row["payload_json"] != encoded:
+                raise ValueError(
+                    "Feedback report identity conflicts with its durable payload."
+                )
+
+    def finish_feedback_report(
+        self,
+        report_key: str,
+        *,
+        result: Mapping[str, Any] | None = None,
+        superseded: bool = False,
+    ) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE feedback_report_deliveries SET status = ?, result_json = ? WHERE report_key = ?",
+                (
+                    "superseded" if superseded else "posted",
+                    _canonical_json(result),
+                    report_key,
+                ),
+            )
+            row = self.feedback_report_delivery(report_key)
+            if row and not superseded:
+                payload = json.loads(row["payload_json"])
+                if payload.get("summary"):
+                    self._connection.execute(
+                        """UPDATE feedback_report_deliveries SET status = 'superseded'
+                           WHERE status = 'pending' AND report_key != ?
+                           AND json_extract(payload_json, '$.summary') = 1
+                           AND json_extract(payload_json, '$.repository_id') = ?
+                           AND json_extract(payload_json, '$.pr_number') = ?""",
+                        (report_key, payload["repository_id"], payload["pr_number"]),
+                    )
+
     def record_cost(
         self,
         *,
@@ -9157,6 +9397,41 @@ class GuardianState:
             raise RuntimeError("assessment cache identity collision")
         return str(row["result_json"])
 
+    def invalidate_assessment_result(
+        self,
+        *,
+        cache_key: str,
+        result_json: str,
+        invalidated_at: datetime | None = None,
+    ) -> None:
+        """Evict only the rejected bytes, retaining billing and an atomic audit."""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
+            raise ValueError("assessment cache key must be a SHA-256 digest")
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM assessment_results WHERE cache_key = ? AND result_json = ?",
+                (cache_key, result_json),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Rejected assessment changed before invalidation.")
+            self._connection.execute(
+                """
+                INSERT INTO health (
+                    component, status, message, details_json, checked_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "guardian-assessment-cache", "warning",
+                    "Invalid cached assessment evicted; bounded reassessment required.",
+                    _canonical_json({
+                        "cache_key": cache_key,
+                        "reason": "invalid_cached_assessment",
+                    }),
+                    _serialize_datetime(invalidated_at or _now()),
+                ),
+            )
+
     def cache_assessment_and_settle_budget(
         self,
         *,
@@ -9443,6 +9718,7 @@ class GuardianState:
                   AND json_extract(a.details_json, '$.outcome')
                       IS NOT 'translation_batch_deferred'
                   AND r.mode IN ({placeholders})
+                  AND json_extract(a.details_json, '$.prevention_pending') IS NOT 1
             )
             """,
             resolution_modes,
@@ -10137,6 +10413,22 @@ class GuardianState:
         return frozenset(
             revision_id for revision_id, _status, details in plan
             if loads_bounded_json(details).get("outcome") == "translation_batch_deferred"
+        )
+
+    def publication_pending_prevention_revision_ids(
+        self, publication: PublicationRecord,
+    ) -> frozenset[int]:
+        """Identify completed translations whose prevention work remains pending."""
+        exists = self._connection.execute(
+            "SELECT 1 FROM publication_completion_plan_items "
+            "WHERE publication_key = ? LIMIT 1", (publication.publication_key,),
+        ).fetchone()
+        if exists is None:
+            return frozenset()
+        plan = self._publication_completion_plan_in_transaction(publication)
+        return frozenset(
+            revision_id for revision_id, _status, details in plan
+            if loads_bounded_json(details).get("prevention_pending") is True
         )
 
     def _record_publication_completion_plan_in_transaction(
@@ -10951,6 +11243,7 @@ class GuardianState:
         head_sha: str,
         publication_actor_id: int,
         publication_actor_type: str,
+        include_terminal_corrections: bool = False,
     ) -> PublicationRecord | None:
         """Return an actor-bound replied publication for the exact current head.
 
@@ -10968,6 +11261,17 @@ class GuardianState:
         ) or publication_actor_type not in {"User", "Bot"}:
             raise ValueError("publication_actor_type must be User or Bot.")
         _validate_repository_id_filter(repository_id)
+        terminal_clause = """
+            (p.phase = 'replied' OR (
+                ? = 1 AND p.phase = 'published' AND EXISTS (
+                    SELECT 1 FROM publication_reply_terminal_events AS terminal
+                    JOIN runs AS run ON run.run_id = p.run_id
+                    WHERE terminal.publication_key = p.publication_key
+                      AND terminal.reason = 'trusted_feedback_changed'
+                      AND run.status = 'completed'
+                )
+            ))
+        """
 
         if repository_id is None:
             repository_where = "p.repository = ?"
@@ -10977,11 +11281,11 @@ class GuardianState:
             # route, so no mutable-name filter can exclude it safely. Check all
             # exact head/actor matches before trusting the immutable-ID lookup.
             ambiguous_legacy = self._connection.execute(
-                """
+                f"""
                 SELECT 1 FROM publication_events AS p
                 WHERE p.repository_id IS NULL
                   AND p.pr_number = ? AND p.commit_sha = ?
-                  AND p.phase = 'replied'
+                  AND {terminal_clause}
                   AND p.publication_actor_id = ?
                   AND p.publication_actor_type = ?
                 LIMIT 1
@@ -10989,6 +11293,7 @@ class GuardianState:
                 (
                     pr_number,
                     head_sha,
+                    int(include_terminal_corrections),
                     publication_actor_id,
                     publication_actor_type,
                 ),
@@ -11004,7 +11309,7 @@ class GuardianState:
             f"""
             SELECT p.* FROM publication_events AS p
             WHERE {repository_where} AND p.pr_number = ? AND p.commit_sha = ?
-              AND p.phase = 'replied'
+              AND {terminal_clause}
               AND p.publication_actor_id = ?
               AND p.publication_actor_type = ?
             ORDER BY p.publication_event_id DESC
@@ -11014,6 +11319,7 @@ class GuardianState:
                 *repository_parameters,
                 pr_number,
                 head_sha,
+                int(include_terminal_corrections),
                 publication_actor_id,
                 publication_actor_type,
             ),

@@ -23,6 +23,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from localize.guardian.deadline import PollDeadline, deadline_httpx_timeout
+from localize.guardian.diagnostics import http_failure
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
@@ -736,14 +737,20 @@ class _GitHubHTTP:
         is_rate_limited = bool(retry_after) or (
             rate_limit_remaining == "0" and bool(rate_limit_reset)
         )
+        create_pr = method == "POST" and response.request.url.path.endswith("/pulls")
         if response.status_code == 403 and is_rate_limited:
-            raise GitHubAPIError(f"GitHub API {method} request was rate limited")
+            raise http_failure(GitHubAPIError(f"GitHub API {method} request was rate limited"),
+                               method=method, status=response.status_code,
+                               create_pr=create_pr, reason="rate_limited")
         if response.status_code in {401, 403}:
-            raise GitHubAuthenticationError(
-                f"GitHub API {method} authentication failed"
+            raise http_failure(GitHubAuthenticationError(
+                f"GitHub API {method} authentication failed"),
+                method=method, status=response.status_code,
+                create_pr=create_pr, reason="authentication_failed",
             )
-        raise GitHubAPIError(
-            f"GitHub API {method} request failed with status {response.status_code}"
+        raise http_failure(GitHubAPIError(
+            f"GitHub API {method} request failed with status {response.status_code}"),
+            method=method, status=response.status_code, create_pr=create_pr,
         )
 
     def _bounded_json(self, response: httpx.Response, *, label: str) -> Any:
@@ -2343,3 +2350,123 @@ class GitHubWriteBroker:
                 pull_number=pull_number,
                 created=True,
             )
+
+    def post_feedback_report(
+        self, *, pull_number: int, expected_head_sha: str, expected_base_sha: str,
+        expected_actor: TrustedActor, report_id: str, feedback_id: str,
+        details: Mapping[str, Any], before_create: Callable[[], None],
+    ) -> ReplyResult:
+        """Explain a disposition at its review thread, never resolving it.
+
+        Only deterministic templates cross this boundary. Review summaries and
+        issue comments use a linked PR-level reply because GitHub has no nested
+        reply endpoint for those objects.
+        """
+        from localize.guardian.reporting import report_body
+
+        self._validate_marker_id(report_id, label="report_id")
+        body = report_body(details, repository=self.policy.repository, feedback_id=feedback_id,
+                           pull_number=pull_number, web_base_url=self.web_base_url)
+        marker = f"<!-- localize-guardian:feedback:{report_id} -->"
+        body = marker + "\n" + body
+        kind, raw_id = feedback_id.split(":", 1)
+        # Synthetic nitpick IDs are routed to a PR comment, never an API path.
+        review_id = int(raw_id) if kind == "review_comment" and raw_id.isdecimal() else None
+        return self._post_explanation(
+            pull_number=pull_number, expected_head_sha=expected_head_sha,
+            expected_base_sha=expected_base_sha, expected_actor=expected_actor,
+            body=body, marker=marker, before_create=before_create,
+            review_id=review_id,
+        )
+
+    def _post_explanation(
+        self, *, pull_number: int, expected_head_sha: str, expected_base_sha: str,
+        expected_actor: TrustedActor, body: str, marker: str,
+        before_create: Callable[[], None], review_id: int | None = None,
+        previous_body: str | Sequence[str] | None = None,
+    ) -> ReplyResult:
+        """Recover ambiguous writes only from exact actor/content/route matches."""
+        self._validate_sha(expected_head_sha, label="expected_head_sha")
+        self._validate_sha(expected_base_sha, label="expected_base_sha")
+        with self._client(self._mint_token()) as client:
+            http = _GitHubHTTP(client, deadline=self.deadline)
+
+            def fresh() -> None:
+                self._require_expected_actor(http, expected_actor=expected_actor)
+                self._fresh_pull(http, pull_number=pull_number,
+                                 expected_head_sha=expected_head_sha,
+                                 expected_base_sha=expected_base_sha)
+                before_create()
+
+            fresh()
+            repo = self.policy.repository
+            prefix = f"/repos/{repo}"
+            parent_id = None
+            if review_id is not None:
+                parent = _as_mapping(http.request_json("GET", f"{prefix}/pulls/comments/{review_id}"), label="review comment")
+                if parent.get("pull_request_url") != f"{self.base_url.rstrip('/')}{prefix}/pulls/{pull_number}":
+                    raise PolicyViolation("Review comment belongs to a different pull request.")
+                parent_id = _as_int(parent.get("in_reply_to_id") or parent.get("id"), label="review parent id")
+            collection = f"{prefix}/pulls/{pull_number}/comments" if parent_id else f"{prefix}/issues/{pull_number}/comments"
+            matches = [
+                item for item in http.paginate(collection)
+                if isinstance(item.get("user"), Mapping)
+                and (item["user"].get("id"), item["user"].get("type"))
+                == (expected_actor.id, expected_actor.type)
+                and item.get("in_reply_to_id") == parent_id
+                and marker in str(item.get("body") or "")
+            ]
+            if len(matches) > 1:
+                raise PolicyViolation("Ambiguous Guardian explanation markers.")
+
+            def validate(item: Mapping[str, Any], expected_body: str, created: bool) -> ReplyResult:
+                actor = _trusted_actor_from_payload(item.get("user"), label="explanation author")
+                comment_id = _as_int(item.get("id"), label="explanation id")
+                anchor = f"discussion_r{comment_id}" if parent_id else f"issuecomment-{comment_id}"
+                url = f"{self.web_base_url}/{repo}/pull/{pull_number}#{anchor}"
+                if ((actor.id, actor.type) != (expected_actor.id, expected_actor.type)
+                    or item.get("body") != expected_body or item.get("html_url") != url
+                    or (parent_id and item.get("in_reply_to_id") != parent_id)):
+                    raise PolicyViolation("Guardian explanation actor, content, or route changed.")
+                return ReplyResult(comment_id=comment_id, html_url=url, body=expected_body, created=created)
+
+            if matches and matches[0].get("body") == body:
+                return validate(matches[0], body, False)
+            if matches:
+                if previous_body is None or parent_id:
+                    raise PolicyViolation("Guardian explanation was edited externally.")
+                known_bodies = (previous_body,) if isinstance(previous_body, str) else tuple(previous_body)
+                if len(known_bodies) > 100 or matches[0].get("body") not in known_bodies:
+                    raise PolicyViolation("Guardian summary was edited externally.")
+                exact_previous_body = matches[0]["body"]
+                prior = validate(matches[0], exact_previous_body, False)
+                target = f"{prefix}/issues/comments/{prior.comment_id}"
+                method = "PATCH"
+            else:
+                target = f"{prefix}/pulls/{pull_number}/comments/{parent_id}/replies" if parent_id else collection
+                method = "POST"
+            fresh()
+            if matches:
+                # Re-read the exact old summary immediately before replacement.
+                validate(_as_mapping(http.request_json("GET", target), label="summary"), exact_previous_body, False)
+                before_create()
+            response = _as_mapping(http.request_json(method, target, payload={"body": body}), label="explanation")
+            return validate(response, body, method == "POST")
+
+    def post_feedback_summary(
+        self, *, pull_number: int, expected_head_sha: str, expected_base_sha: str,
+        expected_actor: TrustedActor, reports: Sequence[Mapping[str, Any]],
+        previous_body: str | Sequence[str] | None, before_create: Callable[[], None],
+    ) -> ReplyResult:
+        """Use one managed comment; never weaken PR description recovery checks."""
+        from localize.guardian.reporting import summary_body
+
+        marker = "<!-- localize-guardian:feedback-summary:v1 -->"
+        return self._post_explanation(
+            pull_number=pull_number, expected_head_sha=expected_head_sha,
+            expected_base_sha=expected_base_sha, expected_actor=expected_actor,
+            body=summary_body(reports, repository=self.policy.repository,
+                              pull_number=pull_number, web_base_url=self.web_base_url),
+            marker=marker, before_create=before_create,
+            previous_body=previous_body,
+        )

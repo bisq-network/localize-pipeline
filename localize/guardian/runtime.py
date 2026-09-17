@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import errno
 import json
 import os
@@ -40,6 +40,7 @@ from localize.guardian.credentials import (
     resolve_model_api_key,
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
+from localize.guardian.diagnostics import announce_failure, failure_audit, record_failure
 from localize.guardian.executable_trust import (
     ExecutableTrustError,
     require_absolute_trusted_direct_executable,
@@ -109,6 +110,8 @@ from localize.guardian.workspace import (
 _GITHUB_API_URL = "https://api.github.com"
 _GITHUB_HOST = "github.com"
 _POLL_ATTEMPT_COMPONENT = "guardian-poll-attempt"
+_RESPONSIVE_SCHEDULE_COMPONENT = "guardian-responsive-schedule"
+_HISTORY_ATTEMPT_COMPONENT = "guardian-history-attempt"
 _MAX_CONFIG_BYTES = 1_048_576
 _MAX_CODEX_AUTH_BYTES = 1_048_576
 _MAX_OPERATOR_PIPELINE_FILE_BYTES = 1_048_576
@@ -124,6 +127,10 @@ _WRITE_MODES = frozenset(
 
 class GuardianRuntimeError(RuntimeError):
     """A redacted production-wiring failure safe for operator output."""
+
+
+class GuardianAuthenticationError(GuardianRuntimeError):
+    """A local authentication prerequisite needs operator recovery."""
 
 
 class _GuardianPollAlreadyRunning(RuntimeError):
@@ -779,13 +786,15 @@ def _validate_subscription_codex_home(config: GuardianConfig) -> Path:
             or auth_metadata.st_size <= 0
             or auth_metadata.st_size > _MAX_CODEX_AUTH_BYTES
         ):
-            raise GuardianRuntimeError(
+            raise GuardianAuthenticationError(
                 "Guardian ChatGPT authentication is unavailable or unsafe."
             )
     except GuardianRuntimeError:
-        raise
+        raise GuardianAuthenticationError(
+            "Guardian ChatGPT authentication is unavailable or unsafe."
+        ) from None
     except OSError:
-        raise GuardianRuntimeError(
+        raise GuardianAuthenticationError(
             "Guardian ChatGPT authentication is unavailable or unsafe."
         ) from None
     return codex_home
@@ -1418,7 +1427,24 @@ def _scheduled_poll_is_due(
     now: datetime,
     schedule: GuardianSchedule,
 ) -> bool:
-    """Use the latest durable poll attempt as the once-daily checkpoint."""
+    """Use durable attempts to enforce daily or opt-in interval bounds."""
+
+    if schedule.poll_interval_seconds is not None:
+        if not is_run_due(now=now, last_success=None, hour=schedule.hour, minute=schedule.minute):
+            return False
+        checkpoint = state.latest_health(_RESPONSIVE_SCHEDULE_COMPONENT)
+        if checkpoint is None:
+            return True
+        # UTC arithmetic also enforces the interval across a DST clock rollback.
+        elapsed = (now.astimezone(timezone.utc) - checkpoint.checked_at).total_seconds()
+        if elapsed < schedule.poll_interval_seconds:
+            return False
+        if checkpoint.details.get("local_date") != now.date().isoformat():
+            return True
+        return (
+            checkpoint.details["attempt_count"] < schedule.max_polls_per_day
+            and not checkpoint.details.get("circuit_open", False)
+        )
 
     latest_attempt = state.latest_health(_POLL_ATTEMPT_COMPONENT)
     if latest_attempt is None:
@@ -1546,7 +1572,7 @@ def _poll_with_locked_state(
         raise GuardianRuntimeError("Guardian private state is unavailable.") from None
 
     try:
-        with state_context as state:
+        with state_context as state, failure_audit(state), _record_schedule_auth_failure(state):
             attempted_at = _local_now()
             if scheduled and not _scheduled_poll_is_due(
                 state,
@@ -1555,6 +1581,29 @@ def _poll_with_locked_state(
             ):
                 return 0
             deadline = PollDeadline(config.limits.run_timeout_seconds)
+            responsive_details = None
+            if config.schedule.poll_interval_seconds is not None:
+                previous = state.latest_health(_RESPONSIVE_SCHEDULE_COMPONENT)
+                local_date = attempted_at.date().isoformat()
+                count = (
+                    previous.details["attempt_count"]
+                    if previous is not None and previous.details.get("local_date") == local_date
+                    else 0
+                )
+                responsive_details = {
+                    "local_date": local_date, "attempt_count": count + 1,
+                    # A failed manual recovery must not silently reopen a circuit.
+                    "circuit_open": bool(
+                        previous is not None
+                        and previous.details.get("local_date") == local_date
+                        and previous.details.get("circuit_open")
+                    ),
+                }
+                state.record_health(
+                    component=_RESPONSIVE_SCHEDULE_COMPONENT,
+                    status="attempted", message="Bounded feedback poll started.",
+                    details=responsive_details, checked_at=attempted_at,
+                )
             state.record_health(
                 component=_POLL_ATTEMPT_COMPONENT,
                 status="attempted",
@@ -1634,12 +1683,45 @@ def _poll_with_locked_state(
                         deadline=deadline,
                     )
                     try:
-                        outcome = controller.poll_once()
-                    except Exception:
+                        if responsive_details is not None:
+                            previous_history = state.latest_health(_HISTORY_ATTEMPT_COMPONENT)
+                            include_history = (
+                                not scheduled or previous_history is None
+                                or previous_history.details.get("local_date")
+                                != attempted_at.date().isoformat()
+                            )
+                            if include_history:
+                                state.record_health(
+                                    component=_HISTORY_ATTEMPT_COMPONENT, status="attempted",
+                                    message="Daily historical backfill attempt started.",
+                                    details={"local_date": attempted_at.date().isoformat()},
+                                    checked_at=attempted_at,
+                                )
+                            outcome = controller.poll_once(include_history=include_history)
+                            state.record_health(
+                                component=_RESPONSIVE_SCHEDULE_COMPONENT,
+                                status="failed" if _exit_code(outcome) else "ok",
+                                message="Bounded feedback poll finished.",
+                                details={
+                                    **responsive_details,
+                                    "circuit_open": (
+                                        outcome.authentication_circuit_open
+                                        or outcome.model_circuit_open
+                                        or bool(_exit_code(outcome) and responsive_details["circuit_open"])
+                                    ),
+                                }, checked_at=attempted_at,
+                            )
+                        else:
+                            outcome = controller.poll_once()
+                    except Exception as error:
+                        record_failure(error)
                         raise GuardianRuntimeError(
                             "Guardian poll failed before a bounded outcome was recorded."
                         ) from None
-                    return _exit_code(outcome)
+                    result = _exit_code(outcome)
+                    if result:
+                        announce_failure()
+                    return result
     except GuardianRuntimeError:
         raise
     except Exception:
@@ -1648,11 +1730,28 @@ def _poll_with_locked_state(
         ) from None
 
 
+@contextmanager
+def _record_schedule_auth_failure(state: GuardianState) -> Iterator[None]:
+    """Stop scheduled retries when authentication fails before controller setup."""
+    try:
+        yield
+    except (CredentialError, GitHubAuthenticationError, GuardianAuthenticationError):
+        checkpoint = state.latest_health(_RESPONSIVE_SCHEDULE_COMPONENT)
+        if checkpoint is not None:
+            state.record_health(
+                component=_RESPONSIVE_SCHEDULE_COMPONENT,
+                status="failed", message="Authentication failed; scheduled retries stopped.",
+                details={**checkpoint.details, "circuit_open": True},
+                checked_at=checkpoint.checked_at,
+            )
+        raise
+
+
 def run_once(config_path: Path, scheduled: bool = False) -> int:
     """Load trusted policy and execute one finite, non-overlapping poll.
 
-    Scheduled calls run at most once per local calendar day after the first
-    attempted wake, regardless of its outcome. Manual invocations always poll.
+    Scheduled calls default to once per local day; opt-in interval polling uses
+    durable time/count/circuit bounds. Manual invocations always poll.
     Credential contents and untrusted exception messages never cross this
     adapter's error boundary.
     """

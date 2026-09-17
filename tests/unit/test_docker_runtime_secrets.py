@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
+import subprocess
 
+import pytest
 import yaml
 
 
@@ -40,6 +43,38 @@ def test_dockerfile_does_not_handle_private_keys_at_build_time():
     assert "/tmp/deploy_key" not in dockerfile
     assert "gpg --batch --import" not in dockerfile
     assert "cp /tmp/deploy_key" not in dockerfile
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_image_source_is_readable_without_granting_non_owner_write(tmp_path, restricted):
+    """Exercise the actual image permission command on a restrictive checkout."""
+    app = tmp_path / "app"
+    for name in ("localize", "docker"):
+        (app / name).mkdir(parents=True, mode=0o700 if restricted else 0o755)
+    source = app / "localize" / "__init__.py"
+    scripts = [app / "docker" / "docker-entrypoint.sh", app / "update-translations.sh"]
+    for path in [source, *scripts]:
+        path.write_text("# source\n", encoding="utf-8")
+        path.chmod(0o600 if restricted else 0o644)
+
+    instructions = _dockerfile().replace("\\\n", " ").splitlines()
+    command = next(line[4:] for line in instructions if line.startswith("RUN chmod") and "/app/" in line)
+    command = command.replace("/app", shlex.quote(str(app)))
+    subprocess.run(["/bin/sh", "-eu", "-c", command], check=True)
+
+    for path in [source, *scripts]:
+        assert path.stat().st_mode & 0o444 == 0o444, path
+        assert path.stat().st_mode & 0o022 == 0, path
+    for path in [app / "localize", app / "docker", *scripts]:
+        assert path.stat().st_mode & 0o111 == 0o111, path
+
+
+def test_image_build_checks_cli_as_unprivileged_runtime_user():
+    dockerfile = _dockerfile()
+    assert "RUN gosu appuser python3.11 -m localize.cli --help" in dockerfile
+    workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
+    assert "chmod -R go-rwx localize" in workflow
+    assert workflow.index("chmod -R go-rwx localize") < workflow.index("name: Build Docker Image")
 
 
 def test_compose_mounts_private_keys_only_as_runtime_secrets():

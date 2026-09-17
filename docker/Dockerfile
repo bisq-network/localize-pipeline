@@ -147,8 +147,15 @@ COPY requirements.txt .
 RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-# Ensure the entrypoint and orchestration script are executable
-RUN chmod +x /app/docker/docker-entrypoint.sh /app/update-translations.sh
+# COPY preserves checkout modes, including root-only files from umask 077.
+# Make packaged code readable/traversable without granting write access.
+# Private configuration and secrets are excluded by .dockerignore.
+RUN chmod -R a+rX /app && \
+    chmod +x /app/docker/docker-entrypoint.sh /app/update-translations.sh
+
+# A root-only smoke check misses unreadable modules after privilege drop.
+# This requires neither runtime credentials nor a model call.
+RUN gosu appuser python3.11 -m localize.cli --help
 
 # Set entrypoint
 ENTRYPOINT ["/app/docker/docker-entrypoint.sh"]

@@ -4197,6 +4197,7 @@ def test_coordinator_revalidates_current_base_at_remote_and_terminal_boundaries(
                 "login": "guardian-publisher",
                 "type": "User",
             },
+            "quality_report_actor": None,
             "prevention": {
                 "allowed_code_path_globs": ["localize/*.py"],
                 "allowed_test_path_globs": ["tests/**/*.py"],

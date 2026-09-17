@@ -427,10 +427,12 @@ class GuardianLimits:
 
 @dataclass(frozen=True)
 class GuardianSchedule:
-    """Once-daily local wall-clock schedule used by scheduled invocations."""
+    """Daily schedule with optional bounded same-day feedback polling."""
 
     hour: int = 0
     minute: int = 0
+    poll_interval_seconds: int | None = None
+    max_polls_per_day: int = 96
 
     def __post_init__(self) -> None:
         if isinstance(self.hour, bool) or not isinstance(self.hour, int):
@@ -441,6 +443,18 @@ class GuardianSchedule:
             raise ValueError("Schedule hour must be between 0 and 23.")
         if not 0 <= self.minute <= 59:
             raise ValueError("Schedule minute must be between 0 and 59.")
+        if self.poll_interval_seconds is not None and (
+            isinstance(self.poll_interval_seconds, bool)
+            or not isinstance(self.poll_interval_seconds, int)
+            or not 900 <= self.poll_interval_seconds <= 86400
+        ):
+            raise ValueError("Schedule poll interval must be between 900 and 86400 seconds.")
+        if (
+            isinstance(self.max_polls_per_day, bool)
+            or not isinstance(self.max_polls_per_day, int)
+            or not 1 <= self.max_polls_per_day <= 96
+        ):
+            raise ValueError("Schedule poll count must be between 1 and 96.")
 
 
 @dataclass(frozen=True)
@@ -892,8 +906,15 @@ class RepositoryPolicy:
     closed_pr_backfill: ClosedPrBackfillPolicy | None = None
     publication_actor: TrustedActor | None = None
 
+    quality_report_actor: TrustedActor | None = None
+
     def __post_init__(self) -> None:
         _validate_repository_name(self.base_repo, field_name="base_repo")
+        if self.quality_report_actor is not None and (
+            not isinstance(self.quality_report_actor, TrustedActor)
+            or self.quality_report_actor.type not in {"User", "Bot"}
+        ):
+            raise ValueError("quality_report_actor must be a User or Bot identity.")
         if (
             isinstance(self.base_repo_id, bool)
             or not isinstance(self.base_repo_id, int)
@@ -1368,8 +1389,23 @@ class GuardianAssessment:
     rationale: str
     replacements: tuple[ProposedReplacement, ...] = ()
     recurrence_candidates: tuple[RecurrenceCandidate, ...] = ()
+    report_reason: str = "unspecified"
+    decision_required: bool = False
+    held_value_edits: int = 0
 
     def __post_init__(self) -> None:
+        from localize.guardian.reporting import validated_decision_required
+
+        object.__setattr__(self, "decision_required", validated_decision_required(
+            self.verdict, self.report_reason, self.decision_required
+        ))
+        if (
+            type(self.held_value_edits) is not int
+            or not 0 <= self.held_value_edits <= 100000
+        ):
+            raise ValueError(
+                "held_value_edits must be an integer between 0 and 100000."
+            )
         if self.verdict not in {"apply", "reject", "needs_human"}:
             raise ValueError("verdict must be apply, reject, or needs_human.")
         if not 0.0 <= self.confidence <= 1.0:
