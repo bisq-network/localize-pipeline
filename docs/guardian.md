@@ -1148,6 +1148,10 @@ The initial scope is unexpected source-identical values and disallowed control
 characters in changed entries. Guardian verifies the report's repository, PR,
 base/head commits, target path, locale and value hashes, then independently
 recomputes the finding with the trusted brand/ignore policy before assessment.
+An unreproduced finding is recorded as rejected with insufficient evidence and
+excluded from model input and recurrence authority. Other verified findings and
+trusted review feedback in the same poll can still proceed; an invalid-only
+batch makes no model call and does not read or populate the assessment cache.
 Source-echo flags do not prove shared-language wording is wrong; the assessment
 must still distinguish a defect from legitimate identical wording. Placeholder,
 semantic, glossary and model-failure narratives do not independently authorize

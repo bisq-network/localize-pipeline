@@ -17,6 +17,7 @@ from itertools import islice
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import tempfile
 from typing import ContextManager, Protocol
@@ -6340,8 +6341,7 @@ class GuardianController:
                     evidence_kwargs["trusted_config_bundle_digest"] = (
                         scope.config_bundle_digest
                     )
-                bundle = self.evidence_builder(
-                    destination=Path(temporary_directory) / "bundle",
+                bundle_arguments = dict(
                     repo_root=head_workspace.path,
                     trusted_pipeline_config_path=scope.config_path,
                     repository=policy.base_repo,
@@ -6357,6 +6357,59 @@ class GuardianController:
                     expected_source_locale=policy.source_locale,
                     **evidence_kwargs,
                 )
+                bundle = self.evidence_builder(
+                    destination=Path(temporary_directory) / "bundle", **bundle_arguments,
+                )
+                machine_events = [event for event in events if event.body.startswith(QUALITY_REPORT_MARKER)]
+                invalid_machine_ids = set()
+                if machine_events:
+                    values = _localization_values(bundle)
+                    rules = json.loads((bundle.root / "validation-rules.json").read_text(encoding="utf-8"))
+                    for event in machine_events:
+                        try:
+                            verify_report_values(
+                                parse_report(event.body), values,
+                                brands=rules.get("brand_technical_glossary", ()),
+                                ignored_patterns=rules.get("ignore_key_patterns", ()),
+                                prevention_only=event.feedback_id in translation_suppressed_feedback_ids,
+                            )
+                        except ValueError:
+                            invalid_machine_ids.add(event.feedback_id)
+                if invalid_machine_ids:
+                    self._require_live_lease(lease_owner)
+                    rejected = tuple(item for item in actionable if item[0].feedback_id in invalid_machine_ids)
+                    self._complete_actions(
+                        run_id=run_id, actionable=rejected,
+                        assessments=tuple(GuardianAssessment(
+                            feedback_id=event.feedback_id, verdict="reject", confidence=1.0,
+                            rationale="Machine finding does not reproduce in exact trusted evidence.",
+                            report_reason="insufficient_evidence",
+                        ) for event, _revision in rejected),
+                        changed_keys=(), commit_sha=None, translation_suppressed_feedback_ids=frozenset(),
+                        observed_at=observed_at,
+                        report_context={**report_context, "machine_report_reason": "finding_not_reproduced"},
+                    )
+                    actionable = tuple(item for item in actionable if item[0].feedback_id not in invalid_machine_ids)
+                    events = tuple(event for event, _revision in actionable)
+                    revisions = tuple(revision for _event, revision in actionable)
+                    if not actionable:
+                        self.state.finish_run(
+                            run_id, status="completed", summary="Machine findings rejected after deterministic verification.",
+                            finished_at=observed_at,
+                        )
+                        outcome.runs_completed += 1
+                        return
+                    valid_locales = {event.locale for event in events}
+                    changed_paths = tuple(path for path in changed_paths if scope.path_locales[path] in valid_locales)
+                    bundle_arguments.update(
+                        feedback=events, changed_paths=changed_paths,
+                        diff_text=_diff_text(changed_paths, scope.changed_files),
+                    )
+                    bundle = self.evidence_builder(
+                        destination=Path(temporary_directory) / "verified-bundle", **bundle_arguments,
+                    )
+                    # The model receives only the rebuilt, verified event set.
+                    shutil.rmtree(Path(temporary_directory) / "bundle")
                 try:
                     result = self._assessment_result(
                         bundle=bundle,

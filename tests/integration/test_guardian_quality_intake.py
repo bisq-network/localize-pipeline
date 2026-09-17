@@ -26,6 +26,72 @@ controller_runtime = runtime
 SOURCE = "Push to %0 was rejected (%1). %2 %3"
 
 
+@pytest.mark.parametrize("valid_kind", ["machine", "reviewer", None])
+def test_invalid_machine_report_is_rejected_without_starving_verified_feedback(
+    tmp_path, controller_runtime, monkeypatch, valid_kind,
+):
+    _base, head, checkout, provider, broker, sequence = controller_runtime
+    (head / TARGET_PATH).write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    snapshot = machine_snapshot()
+    invalid = snapshot.feedback[0]
+    report = parse_report(invalid.body)
+    report["findings"][0]["source_sha256"] = "f" * 64
+    invalid = replace(invalid, source_id="42", body=render_report(report))
+    valid = (
+        replace(snapshot.feedback[0], source_id="43") if valid_kind == "machine"
+        else _feedback(source_id="44")
+    )
+    provider.snapshots = (replace(snapshot, feedback=(invalid, valid) if valid_kind else (invalid,)),)
+    policy = replace(_policy(), quality_report_actor=TrustedActor("producer", 8, "User"))
+
+    class InspectDriver(EchoDriver):
+        observed_feedback = []
+        def run(self, task, **kwargs):
+            self.observed_feedback = json.loads((task.evidence_dir / "feedback.json").read_text())
+            assert all(not item["feedback_id"].startswith("issue_comment:42:")
+                       for item in self.observed_feedback)
+            assert "issue_comment:42:" not in task.prompt
+            assert all("issue_comment:42:" not in path.read_text()
+                       for path in task.evidence_dir.iterdir() if path.is_file())
+            assert not (task.evidence_dir.parent / "bundle").exists()
+            return super().run(task, **kwargs)
+
+    driver = InspectDriver()
+    with GuardianState(tmp_path / "machine.sqlite3") as state:
+        if valid_kind is None:
+            def unexpected_cache_access(*args, **kwargs):
+                raise AssertionError("Invalid-only findings cannot access assessment cache")
+            monkeypatch.setattr(state, "cached_assessment_result", unexpected_cache_access)
+            monkeypatch.setattr(state, "cache_assessment_result", unexpected_cache_access)
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS, policies=(policy,)),
+            checkout=checkout, provider=provider, broker=broker, driver=driver,
+        )
+        first = controller.poll_once()
+        assert first.failures == ()
+        invalid_revision = next(item for item in state.latest_event_revisions()
+                                if item.event_id.startswith("42:quality:"))
+        details = state.latest_feedback_report(invalid_revision.revision_id)
+        assert details["verdict"] == "reject"
+        assert details["report_reason"] == "insufficient_evidence"
+        assert details["machine_report_reason"] == "finding_not_reproduced"
+        assert details["changed_keys"] == details["recurrence_candidates"] == 0
+        assert "not applied" in broker.feedback_summary.body
+        if valid_kind:
+            assert first.applied_commits == (COMMIT_SHA,)
+            assert len(driver.calls) == 1
+            assert len(driver.observed_feedback) == 1
+            cached = state._connection.execute("SELECT result_json FROM assessment_results").fetchall()
+            assert cached and all("issue_comment:42:" not in row[0] for row in cached)
+        else:
+            assert not first.applied_commits
+            assert controller.poll_once().failures == ()
+            assert not driver.calls
+            assert state._connection.execute("SELECT COUNT(*) FROM assessment_results").fetchone()[0] == 0
+            assert state._connection.execute("SELECT COUNT(*) FROM model_call_reservations").fetchone()[0] == 0
+
+
 class EchoDriver(FakeCodexDriver):
     prevention_only = False
     recurrence = False
