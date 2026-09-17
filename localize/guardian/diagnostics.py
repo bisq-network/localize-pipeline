@@ -31,6 +31,7 @@ _GIT_STAGES = {
 _GIT_REASONS = {
     "permission denied": "permission_denied",
     "authentication failed": "authentication_failed",
+    "without `workflow` scope": "workflow_scope_required",
     "could not resolve": "dns_failed",
     "couldn't connect": "connection_failed",
     "failed to connect": "connection_failed",
