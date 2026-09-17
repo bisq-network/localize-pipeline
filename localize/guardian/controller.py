@@ -25,6 +25,7 @@ from uuid import uuid4
 import yaml
 
 from localize.formats import get_localization_adapter
+from localize.translation_validator import find_glossary_mismatches
 from localize.guardian.authorization import (
     AuthorizedFeedback,
     IntakePolicyError,
@@ -6057,6 +6058,9 @@ class GuardianController:
             reasoning_effort=reasoning_effort,
         )
         source_values = _source_values(bundle)
+        validation_rules = json.loads(
+            (bundle.root / "validation-rules.json").read_text(encoding="utf-8")
+        )
 
         def validate_result(result: CodexResult) -> None:
             for decision in result.feedback:
@@ -6068,12 +6072,25 @@ class GuardianController:
                     raise CodexOutputError("Machine-report replacement escaped its exact verified keys.")
             # This is cache admission, independent of the later action converter.
             # Both open and historical work must match the trusted task exactly.
-            to_guardian_assessments(
+            assessments = to_guardian_assessments(
                 result,
                 feedback_events=feedback_events,
                 source_values=source_values,
                 target_locales_by_feedback=target_locales_by_feedback,
             )
+            if validation_rules["translation_glossary_enforcement"] == "exact":
+                for assessment in assessments:
+                    for proposal in assessment.replacements:
+                        glossary = dict(validation_rules["glossary"].get(proposal.locale, {}))
+                        glossary.update({term: term for term in validation_rules["brand_technical_glossary"]})
+                        if find_glossary_mismatches(
+                            source_values[(proposal.path, proposal.key)],
+                            proposal.proposed_value,
+                            glossary,
+                        ):
+                            raise CodexOutputError(
+                                "Replacement violates trusted glossary or brand requirements."
+                            )
 
         if cached is not None:
             try:
