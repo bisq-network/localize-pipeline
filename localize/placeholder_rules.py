@@ -95,6 +95,27 @@ def _active_pattern() -> re.Pattern[str]:
     return _PROFILE_PATTERNS[_ACTIVE_PROFILE.get()]
 
 
+_CAPTURE_PLACEHOLDER_TOKENS: ContextVar[bool] = ContextVar(
+    "capture_placeholder_tokens",
+    default=False,
+)
+
+
+@contextmanager
+def capture_placeholder_tokens() -> Iterator[None]:
+    """Use deterministic tokens while a prompt-capture harness is active.
+
+    Production calls retain UUID-backed tokens. The capture-only context makes
+    canonical prompt snapshots reproducible without weakening runtime token
+    uniqueness.
+    """
+    context_token = _CAPTURE_PLACEHOLDER_TOKENS.set(True)
+    try:
+        yield
+    finally:
+        _CAPTURE_PLACEHOLDER_TOKENS.reset(context_token)
+
+
 def extract_placeholder_tokens(text: str) -> Counter[str]:
     """Return placeholder/tag tokens in ``text`` with multiplicity."""
     if not isinstance(text, str):
@@ -117,10 +138,16 @@ def protect_placeholders(text: str) -> Tuple[str, Dict[str, str]]:
         return "", {}
 
     placeholder_mapping: Dict[str, str] = {}
+    deterministic_index = 0
 
     def replace_placeholder(match: Match[str]) -> str:
+        nonlocal deterministic_index
         full_match = match.group(0)
-        placeholder_token = f"__PH_{uuid.uuid4().hex}__"
+        if _CAPTURE_PLACEHOLDER_TOKENS.get():
+            deterministic_index += 1
+            placeholder_token = f"__PH_{deterministic_index:04d}__"
+        else:
+            placeholder_token = f"__PH_{uuid.uuid4().hex}__"
         placeholder_mapping[placeholder_token] = full_match
         return placeholder_token
 
