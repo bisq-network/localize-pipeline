@@ -129,7 +129,7 @@ def report_body(
         "review": "pullrequestreview-",
     }[kind]
     # Review-object links are generated from validated IDs, never supplied URLs.
-    body = f"🤖 **Localize Guardian — {labels[disposition]}** (`{feedback_id}`).\n\n"
+    body = f"🤖 **Localize Guardian — {labels[disposition]}**\n\n"
     if pull_number is not None:
         if type(pull_number) is not int or pull_number <= 0:
             raise ValueError("Invalid report pull number")
@@ -175,7 +175,6 @@ def summary_body(
 ) -> str:
     """One bounded, repository-bound summary without model-controlled prose."""
     lines = [
-        "<!-- localize-guardian:feedback-summary:v1 -->",
         "🤖 **Localize Guardian — feedback status**",
         "",
         "Assessment results; not a replacement for CI or translation validation.",
@@ -199,12 +198,18 @@ def summary_body(
     for report in reports:
         url, disposition = report["url"], report["disposition"]
         prefix = f"{web_base_url}/{repository}/pull/{pull_number}#"
+        commit_prefix = f"{web_base_url}/{repository}/commit/"
+        internal_commit = bool(
+            report.get("internal_finding") is True and isinstance(url, str)
+            and url.startswith(commit_prefix)
+            and re.fullmatch(r"[0-9a-f]{40}", url[len(commit_prefix):])
+        )
         if (
             not isinstance(url, str)
-            or not url.startswith(prefix)
+            or (not internal_commit and (not url.startswith(prefix)
             or not re.fullmatch(
                 r"(?:discussion_r|issuecomment-)[1-9][0-9]*", url[len(prefix) :]
-            )
+            )))
             or disposition not in allowed
         ):
             raise ValueError("Invalid feedback summary entry.")
@@ -217,6 +222,6 @@ def summary_body(
         if count is not None:
             if type(count) is not int or not 1 <= count <= 10000:
                 raise ValueError("Invalid machine finding summary count.")
-            suffix = f" — {count} machine finding(s)" + suffix
+            suffix = f" — {count} automated quality finding(s)" + suffix
         lines.append(f"- [{disposition.replace('_', ' ')}]({url}){suffix}")
     return "\n".join(lines)

@@ -17,6 +17,7 @@ from localize.guardian.quality_reports import MARKER, parse_report, render_repor
 
 _FULL_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _GUARDIAN_MARKERS = (
+    "🤖 **Localize Guardian",
     "<!-- localize-guardian:v1 ",
     "<!-- localize-guardian:feedback:",
     "<!-- localize-guardian:feedback-summary:v1 -->",
