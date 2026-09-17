@@ -41,6 +41,7 @@ from localize.guardian.codex import (
     CodexTask,
     CodexUsage,
     RESULT_SCHEMA_PATH,
+    REPLACEMENT_UNIQUENESS_GUIDANCE,
     parse_cached_codex_result,
     serialize_codex_result,
     to_guardian_assessments,
@@ -131,7 +132,7 @@ _SUPPORTED_CHANGED_FILE_STATUSES = frozenset({"added", "modified"})
 _ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
     "Assess every manifest feedback ID exactly once and write only the "
-    "schema-conforming result."
+    "schema-conforming result. " + REPLACEMENT_UNIQUENESS_GUIDANCE
 )
 _HISTORICAL_ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
@@ -144,7 +145,7 @@ _HISTORICAL_ASSESSMENT_PROMPT = (
     "the exact current source shown there; the controller binds source_value "
     "from that trusted evidence rather than accepting it from model output. "
     "Assess every manifest feedback ID exactly once and write only the "
-    "schema-conforming result."
+    "schema-conforming result. " + REPLACEMENT_UNIQUENESS_GUIDANCE
 )
 _REMEDIATION_FAIRNESS_COMPONENT = "guardian-remediation-fairness"
 _MAX_REMEDIATION_CHANGED_PATHS = 100
