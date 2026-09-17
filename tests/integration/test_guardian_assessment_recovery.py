@@ -9,17 +9,77 @@ from pathlib import Path
 import pytest
 
 from localize.guardian import codex
-from localize.guardian.models import CodexAuthMode, GuardianMode
+from localize.guardian.models import CodexAuthMode, GuardianMode, TrustedActor
 from localize.guardian.state import GuardianState
 from tests.unit.test_guardian_controller import (
     NOW,
     FakeCodexDriver,
     _config,
     _controller,
+    _feedback,
+    _policy,
+    _snapshot,
+    TARGET_PATH,
     runtime,
 )
+from tests.integration.test_guardian_quality_intake import SOURCE, machine_snapshot
 
 controller_runtime = runtime
+
+
+@pytest.mark.parametrize("recovery", [True, False])
+def test_duplicate_replacements_receive_fixed_guidance_before_bounded_retry(
+    tmp_path, monkeypatch, controller_runtime, recovery,
+):
+    _base, head, checkout, provider, broker, _sequence = controller_runtime
+    (head / TARGET_PATH).write_text("greeting=" + SOURCE + "\n")
+    provider.snapshots = (_snapshot(feedback=(_feedback(source_id="44"), machine_snapshot().feedback[0])),)
+    policy = replace(_policy(), quality_report_actor=TrustedActor("producer", 8, "User"))
+    config = _config(GuardianMode.OBSERVE, policies=(policy,))
+    prompts = []
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        def process(argv, **kwargs):
+            prompts.append(kwargs["input"])
+            task = codex.CodexTask(prompt="test", evidence_dir=Path(argv[argv.index("-C") + 1]))
+            payload = json.loads(codex.serialize_codex_result(FakeCodexDriver().run(task)))
+            payload["feedback"][0]["replacements"][0]["expected_value"] = SOURCE
+            second = json.loads(json.dumps(payload["feedback"][0]))
+            second["feedback_id"] = json.loads((task.evidence_dir / "manifest.json").read_text())["feedback_ids"][1]
+            if len(prompts) == 1 or not recovery:
+                payload["summary"] = "private-output-marker"
+            else:
+                second["replacements"] = []
+                second["verdict"] = "reject"
+            payload["feedback"].append(second)
+            # A failed first response must never have reached the durable cache.
+            assert state._connection.execute("SELECT COUNT(*) FROM assessment_results").fetchone()[0] == 0
+            Path(argv[argv.index("-o") + 1]).write_text(json.dumps(payload))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(codex, "run_bounded_process", process)
+        controller = _controller(
+            tmp_path=tmp_path, state=state, config=config, checkout=checkout,
+            provider=provider, broker=broker,
+            driver=codex.CodexDriver(model="test-model", max_attempts=2,
+                                     auth_mode=config.runtime.codex_auth_mode),
+        )
+        outcome = controller.poll_once()
+        assert len(prompts) == 2
+        assert "entire feedback array" in prompts[0]
+        assert "one replacement per (path, key)" in prompts[0]
+        assert "previous result failed schema or semantic validation" in prompts[1]
+        assert "one replacement per (path, key)" in prompts[1]
+        assert "private-output-marker" not in prompts[1]
+        assert "l10n/messages_ru.properties:greeting" not in prompts[1]
+        assert state.model_calls_committed_for_day(NOW.date()) == 2
+        cached = state._connection.execute("SELECT result_json FROM assessment_results").fetchall()
+        if recovery:
+            assert outcome.runs_completed == 1
+            assert outcome.runs_failed == 0
+            assert len(cached) == 1 and "private-output-marker" not in cached[0][0]
+        else:
+            assert outcome.runs_failed == 1
+            assert cached == []
 
 
 @pytest.mark.parametrize("cached", [False, True])

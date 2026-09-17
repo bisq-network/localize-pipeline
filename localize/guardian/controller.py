@@ -17,6 +17,7 @@ from itertools import islice
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import tempfile
 from typing import ContextManager, Protocol
@@ -40,6 +41,7 @@ from localize.guardian.codex import (
     CodexTask,
     CodexUsage,
     RESULT_SCHEMA_PATH,
+    REPLACEMENT_UNIQUENESS_GUIDANCE,
     parse_cached_codex_result,
     serialize_codex_result,
     to_guardian_assessments,
@@ -130,7 +132,7 @@ _SUPPORTED_CHANGED_FILE_STATUSES = frozenset({"added", "modified"})
 _ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
     "Assess every manifest feedback ID exactly once and write only the "
-    "schema-conforming result."
+    "schema-conforming result. " + REPLACEMENT_UNIQUENESS_GUIDANCE
 )
 _HISTORICAL_ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
@@ -143,7 +145,7 @@ _HISTORICAL_ASSESSMENT_PROMPT = (
     "the exact current source shown there; the controller binds source_value "
     "from that trusted evidence rather than accepting it from model output. "
     "Assess every manifest feedback ID exactly once and write only the "
-    "schema-conforming result."
+    "schema-conforming result. " + REPLACEMENT_UNIQUENESS_GUIDANCE
 )
 _REMEDIATION_FAIRNESS_COMPONENT = "guardian-remediation-fairness"
 _MAX_REMEDIATION_CHANGED_PATHS = 100
@@ -721,6 +723,10 @@ class _PublicationRecoveryManualRequired(RuntimeError):
 
 class _PublicationRecoveryBacklog(RuntimeError):
     """Bounded publication recovery must finish before new repository work."""
+
+
+class QualityReportLineageError(ValueError):
+    """One pull's publication lineage cannot provide bounded authority."""
 
 
 def _safe_failure_name(error: BaseException, **context: object) -> str:
@@ -2476,20 +2482,39 @@ class GuardianController:
                         policy.base_repo_id,
                         tuple(snapshot.pull_request.number for snapshot in snapshots),
                     )
+                    snapshot_failed = False
                     for snapshot in snapshots:
                         outcome.pull_requests_seen += 1
-                        self._process_snapshot(
-                            policy=policy,
-                            snapshot=snapshot,
-                            observed_at=observed_at,
-                            lease_owner=owner,
-                            outcome=outcome,
-                        )
+                        try:
+                            self._process_snapshot(
+                                policy=policy,
+                                snapshot=snapshot,
+                                observed_at=observed_at,
+                                lease_owner=owner,
+                                outcome=outcome,
+                            )
+                        except QualityReportLineageError as exc:
+                            snapshot_failed = True
+                            failure = _safe_failure_name(
+                                exc, repository=policy.base_repo,
+                                pull_numbers=[snapshot.pull_request.number],
+                            )
+                            outcome.failures.append(failure)
+                            self.state.record_health(
+                                component="guardian-snapshot", status="failed",
+                                message="Guardian rejected this pull's publication lineage.",
+                                details={
+                                    "repository": policy.base_repo,
+                                    "pr_number": snapshot.pull_request.number,
+                                    "failure_type": failure,
+                                }, checked_at=observed_at,
+                            )
                     # Historical writes are safe only after this poll obtained
                     # and processed a complete open-PR view for the same
                     # repository.  Retain the open target scope so closed
                     # evidence cannot race a still-open translation PR.
-                    open_poll_succeeded.add(policy.base_repo)
+                    if not snapshot_failed:
+                        open_poll_succeeded.add(policy.base_repo)
                     open_changed_paths[policy.base_repo] = frozenset(
                         changed.path
                         for snapshot in snapshots
@@ -5662,9 +5687,9 @@ class GuardianController:
             publications.append(publication)
             head_sha = publication.original_head_sha
             if head_sha in heads:
-                raise ValueError("Guardian publication lineage repeats a head")
+                raise QualityReportLineageError("Guardian publication lineage repeats a head")
             heads.add(head_sha)
-        raise ValueError("Guardian publication lineage exceeds its bound")
+        raise QualityReportLineageError("Guardian publication lineage exceeds its bound")
 
     def _quality_report_heads(self, policy, pull_number, head_sha):
         return frozenset((head_sha, *(publication.original_head_sha for publication in
@@ -6317,8 +6342,7 @@ class GuardianController:
                     evidence_kwargs["trusted_config_bundle_digest"] = (
                         scope.config_bundle_digest
                     )
-                bundle = self.evidence_builder(
-                    destination=Path(temporary_directory) / "bundle",
+                bundle_arguments = dict(
                     repo_root=head_workspace.path,
                     trusted_pipeline_config_path=scope.config_path,
                     repository=policy.base_repo,
@@ -6334,6 +6358,65 @@ class GuardianController:
                     expected_source_locale=policy.source_locale,
                     **evidence_kwargs,
                 )
+                bundle = self.evidence_builder(
+                    destination=Path(temporary_directory) / "bundle", **bundle_arguments,
+                )
+                machine_events = [event for event in events if event.body.startswith(QUALITY_REPORT_MARKER)]
+                invalid_machine_ids = set()
+                if machine_events:
+                    values = _localization_values(bundle)
+                    rules = json.loads((bundle.root / "validation-rules.json").read_text(encoding="utf-8"))
+                    for event in machine_events:
+                        try:
+                            verify_report_values(
+                                parse_report(event.body), values,
+                                brands=rules.get("brand_technical_glossary", ()),
+                                ignored_patterns=rules.get("ignore_key_patterns", ()),
+                                prevention_only=event.feedback_id in translation_suppressed_feedback_ids,
+                            )
+                        except ValueError:
+                            invalid_machine_ids.add(event.feedback_id)
+                if invalid_machine_ids:
+                    self._require_live_lease(lease_owner)
+                    rejected = tuple(item for item in actionable if item[0].feedback_id in invalid_machine_ids)
+                    self._complete_actions(
+                        run_id=run_id, actionable=rejected,
+                        assessments=tuple(GuardianAssessment(
+                            feedback_id=event.feedback_id, verdict="reject", confidence=1.0,
+                            rationale="Machine finding does not reproduce in exact trusted evidence.",
+                            report_reason="insufficient_evidence",
+                        ) for event, _revision in rejected),
+                        changed_keys=(), commit_sha=None, translation_suppressed_feedback_ids=frozenset(),
+                        observed_at=observed_at,
+                        report_context={**report_context, "machine_report_reason": "finding_not_reproduced"},
+                    )
+                    actionable = tuple(item for item in actionable if item[0].feedback_id not in invalid_machine_ids)
+                    events = tuple(event for event, _revision in actionable)
+                    revisions = tuple(revision for _event, revision in actionable)
+                    if not actionable:
+                        self.state.finish_run(
+                            run_id, status="completed", summary="Machine findings rejected after deterministic verification.",
+                            finished_at=observed_at,
+                        )
+                        outcome.runs_completed += 1
+                        return
+                    authorized_paths = {
+                        path
+                        for targets in _replacement_target_locales(
+                            policy, events, scope.path_locales,
+                        ).values()
+                        for path in targets
+                    }
+                    changed_paths = tuple(path for path in changed_paths if path in authorized_paths)
+                    bundle_arguments.update(
+                        feedback=events, changed_paths=changed_paths,
+                        diff_text=_diff_text(changed_paths, scope.changed_files),
+                    )
+                    bundle = self.evidence_builder(
+                        destination=Path(temporary_directory) / "verified-bundle", **bundle_arguments,
+                    )
+                    # The model receives only the rebuilt, verified event set.
+                    shutil.rmtree(Path(temporary_directory) / "bundle")
                 try:
                     result = self._assessment_result(
                         bundle=bundle,

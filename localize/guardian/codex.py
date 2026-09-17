@@ -46,6 +46,13 @@ from localize.guardian.process import (
 RESULT_SCHEMA_PATH = (
     Path(__file__).resolve().parent / "schemas" / "guardian-result.schema.json"
 )
+REPLACEMENT_UNIQUENESS_GUIDANCE = (
+    "Across the entire feedback array, emit at most one replacement per (path, key). "
+    "When feedback items overlap, assign the replacement to one feedback ID "
+    "authorized for that target. For the other overlapping IDs, use an appropriate "
+    "existing reject or needs_human verdict with empty replacements, not apply. "
+    "Do not describe an uncommitted correction as already addressed."
+)
 
 _ALLOWED_ENVIRONMENT_KEYS = frozenset(
     {
@@ -1007,6 +1014,13 @@ class CodexDriver:
                         )
                     if attempt == self.max_attempts:
                         raise
+                    # Only fixed instructions cross the retry boundary, never
+                    # result text or parser errors containing untrusted targets.
+                    prompt = task.prompt + (
+                        "\nThe previous result failed schema or semantic validation. "
+                        "Return only the schema-conforming result and assess each "
+                        "manifest feedback ID exactly once. "
+                    ) + REPLACEMENT_UNIQUENESS_GUIDANCE
                     continue
 
                 usage = _extract_usage(completed.stdout)
