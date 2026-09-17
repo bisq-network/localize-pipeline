@@ -730,17 +730,17 @@ class RemediationGitHubBroker:
         return branch
 
     @staticmethod
-    def marker(evidence_hash: str, candidate_sha: str) -> str:
-        """Return the exact idempotency marker embedded in the draft body."""
+    def marker(evidence_hash: str, candidate_sha: str, *, legacy: bool = False) -> str:
+        """Label public drafts; retain old markers only for exact recovery."""
 
         if not _HASH_RE.fullmatch(evidence_hash) or not _SHA_RE.fullmatch(
             candidate_sha
         ):
             raise ValueError("remediation marker identity is invalid")
-        return (
-            "<!-- localize-guardian-remediation:v1 "
-            f"evidence={evidence_hash} candidate={candidate_sha} -->"
-        )
+        if legacy:
+            return ("<!-- localize-guardian-remediation:v1 "
+                    f"evidence={evidence_hash} candidate={candidate_sha} -->")
+        return "## Localize Guardian — automated translation corrections"
 
     def _validated_html_url(self, value: object, *, number: int) -> str:
         if (
@@ -1155,7 +1155,7 @@ class RemediationGitHubBroker:
             candidate_sha if marker_candidate_sha is None else marker_candidate_sha
         )
         _full_sha(marker_sha, label="marker candidate SHA")
-        marker = self.marker(evidence_hash, marker_sha)
+        marker = self.marker(evidence_hash, marker_sha, legacy="\nEvidence SHA-256: " in body)
         title = _safe_single_line(title, label="title", max_bytes=_MAX_TITLE_BYTES)
         body = _safe_body(body)
         expected_body = _safe_body(f"{marker}\n{body}")
@@ -1204,7 +1204,8 @@ class RemediationGitHubBroker:
             max_bytes=_MAX_TITLE_BYTES,
         )
         body = _safe_body(body)
-        marker = self.marker(evidence_hash, candidate_sha)
+        legacy_body = "\nEvidence SHA-256: " in body
+        marker = self.marker(evidence_hash, candidate_sha, legacy=legacy_body)
         draft_body = _safe_body(f"{marker}\n{body}")
         push_owner = self.remediation.push_repository.full_name.split("/", 1)[0]
 
@@ -1227,6 +1228,10 @@ class RemediationGitHubBroker:
                     expected_body=draft_body,
                 )
 
+            if legacy_body:
+                raise RemediationRuntimeError(
+                    "Legacy machine-only draft text cannot be republished; prepare a new human-readable proposal."
+                )
             if self._base_sha(client) != expected_base_sha:
                 raise RemediationRuntimeError(
                     "Remediation target base moved before draft creation."
@@ -1677,8 +1682,7 @@ def _draft_text(
             f"Changed localization files: {len(patch_result.changed_files)}",
             f"Changed translation entries: {len(patch_result.changed_keys)}",
             "",
-            f"Evidence SHA-256: `{evidence_hash}`",
-            f"Batch SHA-256: `{batch_hash}`",
+            "Review the changed strings and existing checks before merging.",
             "",
         )
     )

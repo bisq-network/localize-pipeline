@@ -623,15 +623,14 @@ def test_policy_rejects_remediation_namespace_without_exact_allowlist() -> None:
         )
 
 
-def test_remediation_marker_contains_only_stable_evidence_and_candidate_ids() -> None:
+def test_remediation_marker_is_a_readable_heading() -> None:
     evidence_hash = "c" * 64
 
     marker = RemediationGitHubBroker.marker(evidence_hash, CANDIDATE_SHA)
 
-    assert marker == (
-        "<!-- localize-guardian-remediation:v1 "
-        f"evidence={evidence_hash} candidate={CANDIDATE_SHA} -->"
-    )
+    assert marker == "## Localize Guardian — automated translation corrections"
+    assert evidence_hash not in marker
+    assert CANDIDATE_SHA not in marker
 
 
 @pytest.mark.parametrize(

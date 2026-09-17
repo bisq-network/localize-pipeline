@@ -894,15 +894,6 @@ def _truncate_utf8(
     return candidate[:low].rstrip() + suffix
 
 
-def _sequence_fingerprint(values: Sequence[str]) -> str:
-    digest = hashlib.sha256()
-    for value in values:
-        encoded = value.encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return digest.hexdigest()
-
-
 def _bounded_code_list(values: Sequence[str], *, max_bytes: int) -> str:
     """Render complete list items and summarize any omitted tail deterministically."""
 
@@ -911,15 +902,11 @@ def _bounded_code_list(values: Sequence[str], *, max_bytes: int) -> str:
     if len(complete.encode("utf-8")) <= max_bytes:
         return complete
 
-    fingerprint = _sequence_fingerprint(values)
     selected: list[str] = []
     selected_bytes = 0
     for index, line in enumerate(rendered):
         omitted = len(rendered) - index - 1
-        omission = (
-            f"- {omitted} additional item(s) omitted; full-list fingerprint: "
-            f"{_code(fingerprint)}"
-        )
+        omission = f"- {omitted} additional item(s) omitted from this summary."
         separator_bytes = 1 if selected else 0
         projected = (
             selected_bytes
@@ -934,10 +921,7 @@ def _bounded_code_list(values: Sequence[str], *, max_bytes: int) -> str:
         selected_bytes += separator_bytes + len(line.encode("utf-8"))
 
     omitted = len(rendered) - len(selected)
-    omission = (
-        f"- {omitted} additional item(s) omitted; full-list fingerprint: "
-        f"{_code(fingerprint)}"
-    )
+    omission = f"- {omitted} additional item(s) omitted from this summary."
     result = "\n".join((*selected, omission))
     if len(result.encode("utf-8")) > max_bytes:  # pragma: no cover - fixed text
         raise PreventionPolicyError("generated list summary exceeds its byte bound")
@@ -952,11 +936,7 @@ def _argv_display(argv: tuple[str, ...]) -> str:
         label = "pytest"
     elif executable.startswith("python") and argv[1:3] == ("-m", "pytest"):
         label = "python -m pytest"
-    return (
-        f"{label}; executable path and arguments retained in private audit; "
-        "command fingerprint: "
-        f"{_sequence_fingerprint(argv)}"
-    )
+    return f"{label}: failed before the fix; passed after the fix."
 
 
 def _draft_text(
@@ -979,29 +959,23 @@ def _draft_text(
     )
     title = title_prefix + summary
 
-    feedback_lines = _bounded_code_list(
-        feedback_ids,
-        max_bytes=_MAX_BODY_LIST_BYTES,
-    )
     path_lines = _bounded_code_list(paths, max_bytes=_MAX_BODY_LIST_BYTES)
     command_lines = _bounded_code_list(
         tuple(_argv_display(argv) for argv in focused_argv),
         max_bytes=_MAX_BODY_LIST_BYTES,
     )
     body = (
-        "## Localize Guardian prevention proposal\n\n"
+        "Automated proposal for maintainer review.\n\n"
         f"Root cause: {_code(root_cause)}\n\n"
-        f"Evidence fingerprint: {_code(evidence_hash)}\n\n"
         "### Review evidence\n\n"
-        f"{feedback_lines}\n\n"
+        f"Based on {len(feedback_ids)} reviewed feedback items and the regression checks below.\n\n"
         "### Bounded patch\n\n"
-        f"Base: {_code(base_sha)}\n\n"
-        f"Candidate direct child: {_code(candidate_sha)}\n\n"
-        f"Patch fingerprint: {_code(patch_hash)}\n\n"
+        f"Base commit: {base_sha}\n\n"
+        f"Proposed fix (a direct child of that base): {candidate_sha}\n\n"
         f"{path_lines}\n\n"
         "### Regression proof supplied by the controller\n\n"
-        "The same focused argv failed on the exact base and passed on its direct child:\n\n"
-        "Portable runner labels below are display-only; exact commands remain private.\n\n"
+        "The same focused regression checks failed on the exact base and passed on its direct child:\n\n"
+        "Runner names are shown below; local paths and exact commands stay in the private audit.\n\n"
         f"{command_lines}\n\n"
         "Publication of this proposal requires a separate broker to re-verify current "
         "state and publish only this signed candidate. The Guardian cannot merge or "
