@@ -6399,8 +6399,14 @@ class GuardianController:
                         )
                         outcome.runs_completed += 1
                         return
-                    valid_locales = {event.locale for event in events}
-                    changed_paths = tuple(path for path in changed_paths if scope.path_locales[path] in valid_locales)
+                    authorized_paths = {
+                        path
+                        for targets in _replacement_target_locales(
+                            policy, events, scope.path_locales,
+                        ).values()
+                        for path in targets
+                    }
+                    changed_paths = tuple(path for path in changed_paths if path in authorized_paths)
                     bundle_arguments.update(
                         feedback=events, changed_paths=changed_paths,
                         diff_text=_diff_text(changed_paths, scope.changed_files),
