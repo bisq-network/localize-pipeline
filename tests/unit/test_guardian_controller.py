@@ -1027,6 +1027,181 @@ class FakeSnapshotProvider:
         )
 
 
+@pytest.mark.parametrize("race_at", ("initial", "final"))
+@pytest.mark.parametrize("change", ("edited", "added"))
+def test_reporting_defers_verified_same_head_feedback_change(
+    tmp_path: Path, runtime, race_at: str, change: str
+) -> None:
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    original = provider.snapshots[0]
+    feedback = list(original.feedback)
+    if change == "edited":
+        feedback[0] = replace(
+            feedback[0], body="Updated review text", updated_at="2026-08-30T10:01:00Z"
+        )
+    else:
+        feedback.append(_feedback(source_id="45"))
+    raced = replace(original, feedback=tuple(feedback))
+
+    class RacingProvider(FakeSnapshotProvider):
+        calls_count = 0
+
+        def revalidate_open_pull_request(self, policy, source):
+            del policy, source
+            self.calls_count += 1
+            return raced if race_at == "initial" or self.calls_count == 2 else original
+
+    policy = _policy()
+    authorized = authorize_feedback(
+        policy=policy, snapshot=original,
+        path_locales={TARGET_PATH: "ru"}, changed_locales=("ru",),
+    )
+    source = GuardianController._open_pull_authority_reference(
+        policy=policy, snapshot=original, authorized=authorized,
+    )
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        revision = state.record_feedback_event(authorized.events[0], observed_at=NOW)
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+            checkout=checkout, provider=RacingProvider((original,)),
+            driver=FakeCodexDriver(), broker=broker,
+        )
+        with pytest.raises(guardian_controller._SameHeadFeedbackChanged):
+            controller._require_exact_open_source_authority(
+                policy=policy, source=source,
+                event_revision_ids=(revision.revision_id,),
+                require_live_lease=lambda: None,
+                reporting_non_feedback_digest=guardian_controller._open_pull_non_feedback_digest(
+                    policy, original, source.repository
+                ),
+            )
+
+
+@pytest.mark.parametrize("change", ("feedback", "file", "head", "base"))
+def test_same_head_reporting_deferral_preserves_other_authority_guards(
+    tmp_path: Path, runtime, change: str
+) -> None:
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    original = provider.snapshots[0]
+    edited_feedback = replace(
+        original.feedback[0], body="Updated review text", updated_at="2026-08-30T10:01:00Z"
+    )
+    raced = replace(original, feedback=(edited_feedback,))
+    if change == "file":
+        raced = replace(raced, changed_files=(replace(original.changed_files[0], sha="e" * 40),))
+    elif change == "head":
+        raced = replace(raced, pull_request=replace(original.pull_request, head_sha="e" * 40))
+    elif change == "base":
+        raced = replace(raced, pull_request=replace(original.pull_request, base_sha="e" * 40))
+
+    class RacingProvider(FakeSnapshotProvider):
+        def revalidate_open_pull_request(self, policy, source):
+            del policy, source
+            return raced
+
+    policy = _policy()
+    authorized = authorize_feedback(
+        policy=policy, snapshot=original,
+        path_locales={TARGET_PATH: "ru"}, changed_locales=("ru",),
+    )
+    source = GuardianController._open_pull_authority_reference(
+        policy=policy, snapshot=original, authorized=authorized,
+    )
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        revision = state.record_feedback_event(authorized.events[0], observed_at=NOW)
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+            checkout=checkout, provider=RacingProvider((original,)),
+            driver=FakeCodexDriver(), broker=broker,
+        )
+        with pytest.raises(guardian_controller.PreventionSourceAuthorityError) as failure:
+            controller._require_exact_open_source_authority(
+                policy=policy, source=source,
+                event_revision_ids=(revision.revision_id,),
+                require_live_lease=lambda: None,
+                reporting_non_feedback_digest=(
+                    None if change == "feedback" else
+                    guardian_controller._open_pull_non_feedback_digest(
+                        policy, original, source.repository
+                    )
+                ),
+            )
+        assert type(failure.value) is guardian_controller.PreventionSourceAuthorityError
+
+
+def test_reporting_keeps_same_head_feedback_race_pending(
+    tmp_path: Path, runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    policy = _policy()
+    snapshot = provider.snapshots[0]
+    authorized = authorize_feedback(
+        policy=policy, snapshot=snapshot,
+        path_locales={TARGET_PATH: "ru"}, changed_locales=("ru",),
+    )
+    source = GuardianController._open_pull_authority_reference(
+        policy=policy, snapshot=snapshot, authorized=authorized,
+    )
+    raced = replace(snapshot, feedback=(replace(
+        snapshot.feedback[0], body="Updated review text",
+        updated_at="2026-08-30T10:01:00Z",
+    ),))
+
+    class RacingProvider(FakeSnapshotProvider):
+        def revalidate_open_pull_request(self, policy, source):
+            del policy, source
+            return raced
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        revision = state.record_feedback_event(authorized.events[0], observed_at=NOW)
+        assert state.acquire_lease(
+            name="guardian:poll", owner="test-owner", ttl_seconds=60, now=NOW
+        )
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+            checkout=checkout, provider=RacingProvider((snapshot,)),
+            driver=FakeCodexDriver(), broker=broker,
+        )
+        monkeypatch.setattr(
+            state, "latest_feedback_report",
+            lambda *_args, **_kwargs: {
+                "report_policy_digest": "policy", "report_outcome": "needs_human",
+                "report_reason": "insufficient_evidence", "decision_required": True,
+            },
+        )
+
+        controller._flush_feedback_reports(
+            policy=policy, snapshot=snapshot,
+            current=((authorized.events[0], revision),),
+            open_source=source, lease_owner="test-owner", policy_digest="policy",
+        )
+        health = state.latest_health("feedback-reporting")
+        assert health is not None and health.status == "pending"
+        assert broker.feedback_reports == {}
+
+        fresh_authorized = authorize_feedback(
+            policy=policy, snapshot=raced,
+            path_locales={TARGET_PATH: "ru"}, changed_locales=("ru",),
+        )
+        fresh_revision = state.record_feedback_event(
+            fresh_authorized.events[0], observed_at=NOW
+        )
+        fresh_source = GuardianController._open_pull_authority_reference(
+            policy=policy, snapshot=raced, authorized=fresh_authorized,
+        )
+        controller._flush_feedback_reports(
+            policy=policy, snapshot=raced,
+            current=((fresh_authorized.events[0], fresh_revision),),
+            open_source=fresh_source, lease_owner="test-owner", policy_digest="policy",
+        )
+        health = state.latest_health("feedback-reporting")
+        assert health is not None and health.status == "ok"
+        assert len(broker.feedback_reports) == 1
+
+
 class FakeHistoricalSnapshotProvider:
     def __init__(
         self,

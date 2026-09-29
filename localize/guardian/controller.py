@@ -130,6 +130,10 @@ class _PublishedFeedbackChanged(PreventionSourceAuthorityError):
     """The exact published PR is still authorized, but its review text changed."""
 
 
+class _SameHeadFeedbackChanged(PreventionSourceAuthorityError):
+    """Only trusted feedback changed while a same-head report was being posted."""
+
+
 _SUPPORTED_CHANGED_FILE_STATUSES = frozenset({"added", "modified"})
 _ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
@@ -965,6 +969,44 @@ def _historical_pull_revision_digest(
             "changed_files": changed_files,
             "trusted_feedback": feedback,
         }
+    )
+
+
+def _open_pull_non_feedback_digest(
+    policy: RepositoryPolicy,
+    snapshot: PullRequestFeedbackSnapshot,
+    repository: str,
+) -> str:
+    """Bind reporting deferral to every non-feedback source authority field."""
+    routed = (
+        snapshot
+        if repository == snapshot.repository_identity.full_name
+        else _repository_route_alias(snapshot, repository=repository)
+    )
+    return _historical_pull_revision_digest(policy, routed)
+
+
+def _same_head_feedback_only(
+    *,
+    policy: RepositoryPolicy,
+    source: OpenPullAuthorityReference,
+    current: OpenPullAuthorityReference,
+    snapshot: PullRequestFeedbackSnapshot,
+    reporting_non_feedback_digest: str | None,
+) -> bool:
+    return bool(
+        reporting_non_feedback_digest is not None
+        and source.feedback_digest is not None
+        and current.feedback_digest is not None
+        and current.feedback_digest != source.feedback_digest
+        and current.repository == source.repository
+        and current.repository_id == source.repository_id
+        and current.pull_id == source.pull_id
+        and current.pr_number == source.pr_number
+        and current.head_sha == source.head_sha
+        and current.base_sha == source.base_sha
+        and _open_pull_non_feedback_digest(policy, snapshot, source.repository)
+        == reporting_non_feedback_digest
     )
 
 
@@ -3014,6 +3056,7 @@ class GuardianController:
         require_live_lease: Callable[[], None],
         expected_current_head_sha: str | None = None,
         allow_empty_feedback: bool = False,
+        reporting_non_feedback_digest: str | None = None,
     ) -> None:
         """Rehydrate and reauthorize one complete open source before mutation."""
 
@@ -3144,6 +3187,19 @@ class GuardianController:
         )
         if not (same_original_authority or same_feedback_after_guardian_push):
             if (
+                expected_head == source.head_sha
+                and _same_head_feedback_only(
+                    policy=policy,
+                    source=source,
+                    current=current,
+                    snapshot=fresh,
+                    reporting_non_feedback_digest=reporting_non_feedback_digest,
+                )
+            ):
+                raise _SameHeadFeedbackChanged(
+                    "Trusted feedback changed during same-head reporting validation."
+                )
+            if (
                 expected_head != source.head_sha
                 and current.repository == source.repository
                 and current.repository_id == source.repository_id
@@ -3221,6 +3277,20 @@ class GuardianController:
             final_fresh.pull_request.head_sha != expected_head
             or final_current != current
         ):
+            if (
+                expected_head == source.head_sha
+                and final_fresh.pull_request.head_sha == expected_head
+                and _same_head_feedback_only(
+                    policy=policy,
+                    source=source,
+                    current=final_current,
+                    snapshot=final_fresh,
+                    reporting_non_feedback_digest=reporting_non_feedback_digest,
+                )
+            ):
+                raise _SameHeadFeedbackChanged(
+                    "Trusted feedback changed during final same-head reporting validation."
+                )
             if (
                 expected_head != source.head_sha
                 and final_fresh.pull_request.head_sha == expected_head
@@ -7247,6 +7317,11 @@ class GuardianController:
         revision_ids = tuple(
             revision.revision_id for event, revision in current if not event.deleted
         )
+        reporting_non_feedback_digest = (
+            _open_pull_non_feedback_digest(policy, snapshot, open_source.repository)
+            if head == open_source.head_sha
+            else None
+        )
         self.state.supersede_unavailable_feedback_reports(
             policy.base_repo_id,
             snapshot.pull_request.number,
@@ -7263,6 +7338,7 @@ class GuardianController:
                 require_live_lease=lambda: self._require_live_lease(lease_owner),
                 expected_current_head_sha=head,
                 allow_empty_feedback=not revision_ids,
+                reporting_non_feedback_digest=reporting_non_feedback_digest,
             )
 
         try:
@@ -7423,7 +7499,7 @@ class GuardianController:
                 },
                 checked_at=_as_utc(self.now()),
             )
-        except _PublishedFeedbackChanged:
+        except (_PublishedFeedbackChanged, _SameHeadFeedbackChanged):
             self.state.record_health(
                 component="feedback-reporting",
                 status="pending",
