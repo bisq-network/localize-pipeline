@@ -448,12 +448,73 @@ def test_quality_gate_blocks_many_unexpected_source_identical_changes(tmp_path):
     assert report["status_state"] == "failure"
 
 
+def test_quality_gate_blocks_new_source_identical_sentences_but_allows_shared_terms(tmp_path):
+    input_folder = tmp_path / "resources"
+    entries = {
+        "offer.create": "Create an offer to buy bitcoin.",
+        "offer.review": "The seller will review your offer before accepting.",
+        "offer.amount": "{0}",
+        "offer.divider": "---",
+        "offer.break": "<br/>",
+        "offer.brand": "Bisq",
+        "offer.network": "Internet",
+        "offer.done": "Your offer is ready.",
+    }
+    _write_properties(input_folder / "offers.properties", entries)
+    diff_header = """diff --git a/resources/offers_da.properties b/resources/offers_da.properties
++++ b/resources/offers_da.properties
+"""
+    controls = {
+        "offer.amount": "{0}",
+        "offer.divider": "---",
+        "offer.break": "<br/>",
+        "offer.brand": "Bisq",
+        "offer.network": "Internet",
+        "offer.done": "Dit tilbud er klar.",
+    }
+
+    def report_for(target_entries):
+        diff_text = diff_header + "".join(
+            f"+{key}={value}\n" for key, value in target_entries.items()
+        )
+        stats = analyze_source_identical_changes(
+            diff_text=diff_text,
+            repo_root=str(tmp_path),
+            input_folder=str(input_folder),
+            locale_codes=["da"],
+            brand_glossary=["Bisq"],
+        )
+        report = build_quality_gate_report(
+            source_stats=stats,
+            semantic_stats=None,
+            validation_summary={"files": {}, "pipeline_warnings": []},
+            changed_files=["resources/offers_da.properties"],
+            input_folder=str(input_folder),
+            config=QualityGateConfig(),
+        )
+        return stats, report
+
+    _, control_report = report_for(controls)
+    assert control_report["blocking"] is False
+
+    stats, report = report_for({
+        **controls,
+        "offer.create": entries["offer.create"],
+        "offer.review": entries["offer.review"],
+    })
+    assert {example["key"] for example in stats.examples} >= {
+        "offer.create", "offer.review"
+    }
+    assert report["blocking"] is True
+    assert "source-identical prose" in report["blocking_reasons"][0]
+
+
 @pytest.mark.parametrize("removed,blocking", [
     ("-payment.safety=Bewahren Sie den Beleg für {0} Tage auf.\n", True),
-    ("", False),
+    ("", True),
     ("-payment.safety=Keep the receipt for {0} days.\n", False),
 ])
-def test_quality_gate_blocks_regression_but_respects_new_entry_thresholds(tmp_path, removed, blocking):
+def test_quality_gate_blocks_regression_and_new_prose_but_respects_other_thresholds(tmp_path, removed, blocking):
     repo_root = tmp_path
     input_folder = repo_root / "resources"
     _write_properties(
