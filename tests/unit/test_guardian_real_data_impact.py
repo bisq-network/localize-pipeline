@@ -386,8 +386,13 @@ def _result(base: QualityGateSummary, candidate: QualityGateSummary):
         (_summary(9, "A"), _summary(2, "A"), None),
         (_summary(0), _summary(5), None),
         (_summary(0), _summary(6), "findings_increase"),
-        (_summary(0), _summary(1, "B"), "new_blocking_reasons"),
-        (_summary(4, "A"), _summary(4, "A", "B"), "new_blocking_reasons"),
+        # A narrow rule that correctly catches the reported defect may make
+        # the gate block, as long as it adds no more than N findings.
+        (_summary(0), _summary(1, "B"), None),
+        (_summary(4, "A"), _summary(4, "A", "B"), None),
+        (_summary(0), _summary(5, "B"), None),
+        (_summary(0), _summary(6, "B"), "new_blocking_reasons"),
+        (_summary(3), _summary(259, "B"), "new_blocking_reasons"),
     ),
 )
 def test_evaluate_real_data_impact_thresholds(base, candidate, expected) -> None:

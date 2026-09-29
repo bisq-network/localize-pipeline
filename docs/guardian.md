@@ -886,10 +886,11 @@ candidate. Inside the same sandbox wrapper, probe, and timeout as the focused
 tests, the Guardian's own Python runs each tree's
 `localize.translation_quality_gate` entry point on that data. Closed-PR
 prevention measures the current base's real files for the same paths without a
-diff. The candidate is rejected when it adds any new blocking reason or raises
-semantic plus source-identical findings by more than
-`limits.max_new_real_data_findings` (default 5); fewer or unchanged findings
-pass. A missing corpus, gate error, malformed report, or timeout also rejects
+diff. The candidate is rejected when it raises semantic plus source-identical
+findings by more than `limits.max_new_real_data_findings` (default 5), with or
+without a new blocking reason. A narrow rule that adds a blocking reason with at
+most that many new findings, such as one that catches the reported defect,
+passes, as do fewer or unchanged findings. A missing corpus, gate error, malformed report, or timeout also rejects
 the candidate. Rejections are recorded like failed regression proofs in the
 private failure ledger (stage `real-data-impact`, a reason code, and base and
 candidate finding counts) and never publish a branch. The sandbox policy must

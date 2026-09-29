@@ -383,7 +383,8 @@ def test_guardian_guide_documents_audit_cost_retention_and_safe_prevention():
     assert "durable utc-day cap" in lowered
     assert "slots are never refunded" in lowered
     assert "`limits.max_new_real_data_findings` (default 5)" in guide
-    assert "adds any new blocking reason" in lowered
+    assert "with or without a new blocking reason" in lowered
+    assert "adds a blocking reason with at most that many new findings" in lowered
     assert "or timeout also rejects the candidate" in lowered
     assert "max_prevention_drafts_per_day: 1" in _example_text()
     assert "max_new_real_data_findings: 5" in _example_text()

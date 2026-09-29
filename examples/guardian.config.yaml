@@ -52,8 +52,8 @@ limits:
   max_prevention_drafts_per_run: 0
   # Durable UTC-day prevention publication cap; 0 is also a kill switch.
   max_prevention_drafts_per_day: 1
-  # Reject prevention candidates that add a blocking reason or more than this
-  # many quality-gate findings on real target-repository localization data.
+  # Reject prevention candidates that add more than this many quality-gate
+  # findings on real target-repository localization data.
   max_new_real_data_findings: 5
   # Closed-PR history is disabled below, and report-only mode cannot publish.
   max_remediation_drafts_per_run: 0

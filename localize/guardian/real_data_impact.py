@@ -345,11 +345,13 @@ def evaluate_real_data_impact(
         or candidate is None
     ):
         return "impact_run_failed"
+    if candidate.findings - base.findings <= max_new_findings:
+        # A narrow rule that catches the reported defect may make the gate
+        # block; only a finding increase beyond the bound is over-firing.
+        return None
     if set(candidate.blocking_reasons) - set(base.blocking_reasons):
         return "new_blocking_reasons"
-    if candidate.findings - base.findings > max_new_findings:
-        return "findings_increase"
-    return None
+    return "findings_increase"
 
 
 __all__ = (

@@ -9205,7 +9205,7 @@ def test_prevention_author_is_told_about_real_data_impact_gate(
     prompt = observed["prompt"]
     instructions = prompt.split("UNTRUSTED_REQUEST_JSON", 1)[0]
     assert "real repository localization data" in instructions
-    assert "new blocking reason" in instructions
+    assert "whether or not they add a new\nblocking reason" in instructions
     assert f"more than {bound} new findings" in instructions
     assert "narrow" in instructions
 
@@ -9252,3 +9252,34 @@ def test_daily_cap_defers_later_candidates_within_one_poll_before_authoring(
         assert outcome.failures == ()
         assert author.calls == 1
         assert broker.open_calls == 1
+
+
+def test_narrow_candidate_adding_blocking_reason_within_bound_is_published(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+    # The rule correctly flags the reported defect on the PR head, which
+    # makes the gate block, but adds only a bounded number of findings.
+    runner = _FakeTestRunner(
+        _impact(
+            QualityGateSummary((), 22),
+            QualityGateSummary(
+                ("Semantic translation QA findings require manual resolution.",),
+                24,
+            ),
+        )
+    )
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        broker = _FakeBroker()
+        coordinator = _coordinator(
+            state=state,
+            tmp_path=tmp_path,
+            broker=broker,
+            author=_FakeAuthor(),
+            test_runner=runner,
+        )
+        outcome = _propose_once(coordinator, state, now=now)
+
+    assert len(outcome.drafts) == 1
+    assert outcome.failures == ()
+    assert broker.open_calls == 1

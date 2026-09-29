@@ -165,10 +165,11 @@ tools. The controller will independently reject extra paths and prove the regres
 
 The controller also measures the candidate against real repository localization data:
 it runs the pipeline's translation quality gate on real target-repository files with
-the base code and with your patch. The candidate is rejected if it adds any
-new blocking reason or more than {max_new_findings} new findings there. Prefer a narrow
-rule that fires only on the reported defect; never flag entries that are legitimately
-identical to the source, such as placeholders, markup, brand names, or technical tokens.
+the base code and with your patch. The candidate is rejected if it adds
+more than {max_new_findings} new findings there, whether or not they add a new
+blocking reason. Prefer a narrow rule that fires only on the reported defect; never
+flag entries that are legitimately identical to the source, such as placeholders,
+markup, brand names, or technical tokens.
 
 UNTRUSTED_REQUEST_JSON
 """
