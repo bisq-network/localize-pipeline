@@ -661,6 +661,10 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     assert request["max_changed_bytes"] == 32_768
     assert "full" in instructions and "before" in instructions and "after" in instructions
     assert "not diff" in instructions
+    assert "unpatched base" in instructions
+    assert "fail by assertion" in instructions
+    assert "exit code 1" in instructions and "exit code 0" in instructions
+    assert "top-level imports of newly added helpers" in instructions
     assert kwargs["timeout"] == 17
     assert kwargs["limits"].require_linux_cgroup is True
     assert kwargs["limits"].max_file_size_bytes == 128 * 1024 * 1024

@@ -149,6 +149,11 @@ tools. The controller will independently reject extra paths and prove the regres
 Stay within max_changed_files and max_changed_bytes in the request. The byte total
 counts the full larger before or after file size for each changed path, including
 new files, not diff bytes. Choose small allowed files for the fix and test.
+Regression test files are overlaid onto the unpatched base for proof. Write tests
+that collect there and fail by assertion on the reported bug (exit code 1).
+The same focused tests must pass with the patch (exit code 0). Exercise existing
+behavior; avoid top-level imports of newly added helpers or setup that works
+only after the fix. A collection or setup error is not regression proof.
 
 UNTRUSTED_REQUEST_JSON
 """
