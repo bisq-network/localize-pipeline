@@ -847,6 +847,136 @@ def test_historical_authority_digest_excludes_deletion_tombstones() -> None:
     assert with_tombstone == live_digest
 
 
+def test_historical_quality_retirement_rechecks_immutable_assessment(
+    tmp_path: Path, runtime,
+) -> None:
+    base, head, checkout, provider, broker, _sequence = runtime
+    policy = replace(
+        _historical_policy(remediation=True),
+        quality_report_actor=TrustedActor("quality-reporter", 202, "User"),
+    )
+    config = _config(GuardianMode.APPLY_OWNED_TRANSLATIONS, policies=(policy,))
+    snapshot = _snapshot(pull=_pull(state="closed", head_sha=COMMIT_SHA))
+    authorized = authorize_historical_feedback(
+        policy=policy, snapshot=snapshot, path_locales={TARGET_PATH: "ru"},
+        changed_locales=("ru",),
+    )
+    assert len(authorized.events) == 1
+    old_policy_basis = {
+        "assessment": {
+            "minimum_confidence": config.limits.min_apply_confidence,
+            "model": FakeCodexDriver().model,
+            "reasoning_effort": config.runtime.codex_reasoning_effort,
+        },
+        "controller_implementation_version": guardian_controller._HISTORICAL_CONTROLLER_VERSION,
+        "mode": config.mode,
+        "pipeline_config_bundle": "f" * 64,
+        "repository_policy": policy,
+    }
+    old_policy_digest = guardian_controller._canonical_digest(old_policy_basis)
+    new_policy_digest = guardian_controller._historical_policy_digest(
+        config=config, policy=policy, model=FakeCodexDriver().model,
+        pipeline_config_bundle_digest="f" * 64,
+    )
+    assert new_policy_digest != old_policy_digest
+    non_quality_policy = _historical_policy(remediation=True)
+    assert guardian_controller._historical_policy_digest(
+        config=config, policy=non_quality_policy, model=FakeCodexDriver().model,
+        pipeline_config_bundle_digest="f" * 64,
+    ) == guardian_controller._canonical_digest({
+        **old_policy_basis, "repository_policy": non_quality_policy,
+    })
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        for index in range(39):
+            state.record_feedback_event(
+                FeedbackEvent(
+                    repository=policy.base_repo, pr_number=12,
+                    kind="issue_comment", event_id=f"400:quality:{index:064x}",
+                    author="quality-reporter", author_id=202, author_type="User",
+                    body="Prior private finding.", head_sha=HEAD_SHA,
+                    base_sha=BASE_SHA, locale="ru", path=TARGET_PATH,
+                    html_url=f"https://github.com/acme/widgets/pull/12#issuecomment-{index + 1}",
+                ),
+                observed_at=NOW,
+            )
+        selected = state.record_feedback_event(authorized.events[0], observed_at=NOW)
+        digest = guardian_controller._historical_pull_revision_digest(
+            policy, snapshot, feedback_events=authorized.events,
+        )
+        state.record_historical_pull_completion(
+            repository=policy.base_repo, repository_id=policy.base_repo_id,
+            pull_id=snapshot.pull_request.pull_id, pr_number=12,
+            pull_revision_digest=digest, policy_digest=old_policy_digest,
+            head_sha=COMMIT_SHA, base_sha=BASE_SHA,
+            event_revision_ids=(selected.revision_id,),
+            authority_scope=HistoricalCheckScope.ASSESSMENT, completed_at=NOW,
+        )
+        controller = _controller(
+            tmp_path=tmp_path, state=state, config=config, checkout=checkout,
+            provider=provider, driver=FakeCodexDriver(), broker=broker,
+            historical_snapshot_provider=FakeHistoricalSnapshotProvider((snapshot,)),
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(
+                base, head, tmp_path,
+            ),
+            current_base_provider=FakeCurrentBaseProvider(),
+            remediation_runner=FakeRemediationRunner(),
+        )
+        controller._require_live_lease = lambda _owner: None  # type: ignore[method-assign]
+        intake = controller._prepare_historical_intake(
+            policy=policy, snapshot=snapshot, operator_config=None,
+            lease_owner="test-owner",
+        )
+        assert len(intake.tombstones) == 39
+        assert all(event.deleted and event.head_sha == COMMIT_SHA for event in intake.tombstones)
+        assert intake.historical_digest == digest
+        retired_ids = tuple(
+            state.record_feedback_event(event, observed_at=NOW).revision_id
+            for event in intake.tombstones
+        )
+
+        # Simulate interruption after retirement but before the new checkpoint.
+        retry = controller._prepare_historical_intake(
+            policy=policy, snapshot=snapshot, operator_config=None,
+            lease_owner="test-owner",
+        )
+        assert len(retry.tombstones) == 39
+        ignored = tuple(
+            state.record_feedback_event(event, observed_at=NOW).revision_id
+            for event in retry.tombstones
+        )
+        assert ignored == retired_ids
+        controller._historical_checkpoint(
+            policy=policy, snapshot=snapshot, pull_revision_digest=retry.historical_digest,
+            policy_digest=new_policy_digest, scope=HistoricalCheckScope.ASSESSMENT,
+            observed_at=NOW, event_revision_ids=(selected.revision_id,),
+            ignored_event_revision_ids=ignored,
+        )
+        controller._historical_checkpoint(
+            policy=policy, snapshot=snapshot, pull_revision_digest=retry.historical_digest,
+            policy_digest=new_policy_digest, scope=HistoricalCheckScope.ASSESSMENT,
+            observed_at=NOW, event_revision_ids=(selected.revision_id,),
+            ignored_event_revision_ids=ignored,
+        )
+        source = HistoricalPullReference(
+            repository=policy.base_repo, repository_id=policy.base_repo_id,
+            pull_id=snapshot.pull_request.pull_id, pr_number=12,
+            pull_revision_digest=digest, authority_digest=digest,
+            policy_digest=new_policy_digest, head_sha=COMMIT_SHA, base_sha=BASE_SHA,
+        )
+        state.validate_current_historical_remediation_evidence(
+            source_pulls=(source,), event_revision_ids=(selected.revision_id,),
+        )
+        state.record_feedback_event(
+            replace(authorized.events[0], event_id="new-real-review"),
+            observed_at=NOW,
+        )
+        with pytest.raises(ValueError, match="no longer current"):
+            state.validate_current_historical_remediation_evidence(
+                source_pulls=(source,), event_revision_ids=(selected.revision_id,),
+            )
+
+
 class FakeSnapshotProvider:
     def __init__(
         self,

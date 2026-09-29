@@ -1110,19 +1110,22 @@ def _historical_policy_digest(
 ) -> str:
     """Bind completion to all authority and assessment inputs."""
 
-    return _canonical_digest(
-        {
-            "assessment": {
-                "minimum_confidence": config.limits.min_apply_confidence,
-                "model": model,
-                "reasoning_effort": config.runtime.codex_reasoning_effort,
-            },
-            "controller_implementation_version": _HISTORICAL_CONTROLLER_VERSION,
-            "mode": config.mode,
-            "pipeline_config_bundle": pipeline_config_bundle_digest,
-            "repository_policy": policy,
-        }
-    )
+    basis = {
+        "assessment": {
+            "minimum_confidence": config.limits.min_apply_confidence,
+            "model": model,
+            "reasoning_effort": config.runtime.codex_reasoning_effort,
+        },
+        "controller_implementation_version": _HISTORICAL_CONTROLLER_VERSION,
+        "mode": config.mode,
+        "pipeline_config_bundle": pipeline_config_bundle_digest,
+        "repository_policy": policy,
+    }
+    if policy.quality_report_actor is not None:
+        # Closed historical intake now retires obsolete internal quality
+        # projections. Give its immutable checkpoints a distinct policy key.
+        basis["historical_quality_projection_version"] = 2
+    return _canonical_digest(basis)
 
 
 def _required_historical_scopes(
@@ -1746,6 +1749,7 @@ def _trusted_tombstones(
     snapshot: PullRequestFeedbackSnapshot,
     previous: Sequence[EventRevision],
     quality_event_ids: frozenset[str] | None = None,
+    include_deleted_quality: bool = False,
 ) -> tuple[FeedbackEvent, ...]:
     previous_by_object = {
         (revision.kind, revision.event_id): revision for revision in previous
@@ -1756,7 +1760,8 @@ def _trusted_tombstones(
         actor = policy.quality_report_actor
         for prior in previous:
             if (":quality:" in prior.event_id and prior.event_id not in quality_event_ids
-                    and not prior.deleted and (prior.author_id, prior.author_type) == (actor.id, actor.type)):
+                    and (include_deleted_quality or not prior.deleted)
+                    and (prior.author_id, prior.author_type) == (actor.id, actor.type)):
                 events.append(FeedbackEvent(
                     repository=policy.base_repo, pr_number=pull.number,
                     kind=prior.kind, event_id=prior.event_id, author=prior.author,
@@ -2935,6 +2940,10 @@ class GuardianController:
                 policy=policy,
                 snapshot=snapshot,
                 previous=previous,
+                quality_event_ids=frozenset(
+                    event.event_id for event in authorized.events
+                ),
+                include_deleted_quality=True,
             )
             if not authorized.events and not tombstones:
                 raise _HistoricalPolicyRejection(
