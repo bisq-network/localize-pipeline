@@ -251,7 +251,7 @@ def _analyze_source_identical_translation_changes(
 
         stats.checked_entries_count += 1
         stats.unexpected_source_identical_count += 1
-        if change.old_value is None and _is_prose(source_value):
+        if not normalize_value(change.old_value or "") and _is_prose(source_value):
             stats.new_source_identical_prose_count += 1
         if (
             change.old_value is not None

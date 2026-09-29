@@ -552,6 +552,7 @@ def test_quality_gate_blocks_new_source_identical_sentences_but_allows_shared_te
     ("-payment.safety=Bewahren Sie den Beleg für {0} Tage auf.\n", True),
     ("", True),
     ("-payment.safety=Keep the receipt for {0} days.\n", False),
+    ("-payment.safety=\n", True),
 ])
 def test_quality_gate_blocks_regression_and_new_prose_but_respects_other_thresholds(tmp_path, removed, blocking):
     repo_root = tmp_path
