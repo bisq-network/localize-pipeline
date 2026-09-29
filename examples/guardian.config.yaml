@@ -50,6 +50,11 @@ limits:
   # Report-only mode creates no prevention drafts. This cap provides two full
   # assessment attempts; further same-day work defers after the cap is spent.
   max_prevention_drafts_per_run: 0
+  # Durable UTC-day prevention publication cap; 0 is also a kill switch.
+  max_prevention_drafts_per_day: 1
+  # Reject prevention candidates that add a blocking reason or more than this
+  # many quality-gate findings on real target-repository localization data.
+  max_new_real_data_findings: 5
   # Closed-PR history is disabled below, and report-only mode cannot publish.
   max_remediation_drafts_per_run: 0
   max_model_calls_per_day: 2

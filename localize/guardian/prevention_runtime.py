@@ -43,7 +43,11 @@ from localize.guardian.deadline import (
     PollDeadlineExceeded,
     deadline_httpx_timeout,
 )
-from localize.guardian.diagnostics import record_failure, regression_proof_failure
+from localize.guardian.diagnostics import (
+    real_data_impact_failure,
+    record_failure,
+    regression_proof_failure,
+)
 from localize.guardian.credentials import (
     CredentialError,
     CredentialSnapshot,
@@ -66,6 +70,18 @@ from localize.guardian.prevention import (
     inspect_prevention_patch,
     plan_prevention_draft,
     prevention_evidence_hash,
+)
+from localize.guardian.real_data_impact import (
+    DEFAULT_MAX_NEW_REAL_DATA_FINDINGS,
+    IMPACT_HARNESS,
+    REPORT_NAME,
+    RealDataCorpus,
+    RealDataCorpusError,
+    RealDataImpactResult,
+    RealDataImpactRun,
+    evaluate_real_data_impact,
+    install_corpus,
+    parse_quality_gate_summary,
 )
 from localize.guardian.remediation import RemediationSourceAuthorityError
 from localize.guardian.process import (
@@ -146,6 +162,13 @@ Change only files matching the explicit code and test path allowlists. Do not ch
 project-specific localization config, glossaries, workflows, credentials, Git metadata,
 or generated artifacts. Do not commit, sign, push, open a pull request, or use network
 tools. The controller will independently reject extra paths and prove the regression.
+
+The controller also measures the candidate against real repository localization data:
+it runs the pipeline's translation quality gate on real target-repository files with
+the base code and with your patch. The candidate is rejected if it adds any
+new blocking reason or more than {max_new_findings} new findings there. Prefer a narrow
+rule that fires only on the reported defect; never flag entries that are legitimately
+identical to the source, such as placeholders, markup, brand names, or technical tokens.
 
 UNTRUSTED_REQUEST_JSON
 """
@@ -1919,9 +1942,16 @@ class PreventionCodexAuthor:
         timeout_seconds: float = 1200,
         max_attempts: int = 2,
         deadline: PollDeadline | None = None,
+        max_new_real_data_findings: int = DEFAULT_MAX_NEW_REAL_DATA_FINDINGS,
     ) -> None:
         if not model or not executable or max_attempts not in {1, 2}:
             raise ValueError("Prevention Codex author configuration is invalid.")
+        if (
+            isinstance(max_new_real_data_findings, bool)
+            or not isinstance(max_new_real_data_findings, int)
+            or max_new_real_data_findings < 0
+        ):
+            raise ValueError("Prevention real-data finding bound is invalid.")
         if reasoning_effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
             raise ValueError("Prevention Codex reasoning effort is invalid.")
         if timeout_seconds <= 0:
@@ -1936,6 +1966,7 @@ class PreventionCodexAuthor:
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
         self.deadline = deadline
+        self.max_new_real_data_findings = max_new_real_data_findings
 
     def _argv(self, workspace: Path) -> list[str]:
         config_arguments = [
@@ -1989,7 +2020,9 @@ class PreventionCodexAuthor:
             "scope": scope,
             "summary": summary,
         }
-        prompt = _AUTHOR_PROMPT + json.dumps(
+        prompt = _AUTHOR_PROMPT.format(
+            max_new_findings=self.max_new_real_data_findings
+        ) + json.dumps(
             request,
             ensure_ascii=True,
             separators=(",", ":"),
@@ -2378,6 +2411,77 @@ class SandboxedTestRunner:
                 )
         return tuple(results)
 
+    def _run_real_data_impact_one(
+        self,
+        *,
+        workspace: Path,
+        sandbox_prefix: tuple[str, ...],
+        corpus: RealDataCorpus,
+    ) -> RealDataImpactRun:
+        """Run the workspace's own quality gate on one installed corpus copy."""
+
+        try:
+            data = install_corpus(corpus, workspace)
+        except (OSError, RealDataCorpusError):
+            return RealDataImpactRun(TestOutcome.ERROR, 125, None)
+        outcome, returncode = self._run_one(
+            workspace=workspace,
+            sandbox_prefix=sandbox_prefix,
+            argv=(
+                str(Path(sys.executable).resolve()),
+                "-I",
+                "-c",
+                IMPACT_HARNESS,
+                str(workspace),
+                str(data),
+            ),
+        )
+        if outcome is not TestOutcome.PASSED:
+            # Exit 1 from the harness is an uncaught interpreter failure, not
+            # a quality-gate verdict; the harness maps every verdict to 0.
+            if outcome is TestOutcome.FAILED:
+                outcome = TestOutcome.ERROR
+            return RealDataImpactRun(outcome, returncode, None)
+        report = data / REPORT_NAME
+        try:
+            if not stat.S_ISREG(report.lstat().st_mode):
+                raise ValueError("Quality-gate report is not a regular file.")
+            with report.open("rb") as handle:
+                summary = parse_quality_gate_summary(handle.read(8 * 1024 * 1024 + 1))
+        except (OSError, ValueError):
+            return RealDataImpactRun(TestOutcome.ERROR, returncode, None)
+        return RealDataImpactRun(outcome, returncode, summary)
+
+    def run_real_data_impact(
+        self,
+        *,
+        base_workspace: Path,
+        candidate_workspace: Path,
+        policy: PreventionPolicy,
+        corpus: RealDataCorpus,
+    ) -> RealDataImpactResult:
+        """Measure base and candidate quality-gate results on real data."""
+
+        if (
+            len(policy.sandbox_argv_prefix) != 1
+            or not Path(policy.sandbox_argv_prefix[0]).is_absolute()
+        ):
+            raise PreventionPolicyError(
+                "configured sandbox prefix must contain one absolute wrapper executable"
+            )
+        return RealDataImpactResult(
+            base=self._run_real_data_impact_one(
+                workspace=base_workspace,
+                sandbox_prefix=policy.sandbox_argv_prefix,
+                corpus=corpus,
+            ),
+            candidate=self._run_real_data_impact_one(
+                workspace=candidate_workspace,
+                sandbox_prefix=policy.sandbox_argv_prefix,
+                corpus=corpus,
+            ),
+        )
+
 
 def _copy_file_contents(
     source: Path | str,
@@ -2745,6 +2849,8 @@ class PreventionCoordinator:
         reservation_usd: float | None,
         daily_limit_usd: float | None,
         max_model_calls_per_day: int = 2,
+        max_drafts_per_day: int = 1,
+        max_new_real_data_findings: int = DEFAULT_MAX_NEW_REAL_DATA_FINDINGS,
         api_billed: bool = True,
         temporary_root: Path | None = None,
         now: Callable[[], datetime] = _utc_now,
@@ -2752,6 +2858,18 @@ class PreventionCoordinator:
     ) -> None:
         if max_drafts < 0:
             raise ValueError("max_drafts must be non-negative")
+        if (
+            isinstance(max_drafts_per_day, bool)
+            or not isinstance(max_drafts_per_day, int)
+            or max_drafts_per_day < 0
+        ):
+            raise ValueError("max_drafts_per_day must be a non-negative integer")
+        if (
+            isinstance(max_new_real_data_findings, bool)
+            or not isinstance(max_new_real_data_findings, int)
+            or max_new_real_data_findings < 0
+        ):
+            raise ValueError("max_new_real_data_findings must be a non-negative integer")
         if max_model_calls_per_day <= 0:
             raise ValueError("max_model_calls_per_day must be positive")
         if api_billed and (reservation_usd is None or daily_limit_usd is None):
@@ -2770,6 +2888,8 @@ class PreventionCoordinator:
         self.signing_key = signing_key
         self.signing_environment = signing_environment
         self.max_drafts = max_drafts
+        self.max_drafts_per_day = max_drafts_per_day
+        self.max_new_real_data_findings = max_new_real_data_findings
         self.reservation_usd = reservation_usd
         self.daily_limit_usd = daily_limit_usd
         self.max_model_calls_per_day = max_model_calls_per_day
@@ -2797,6 +2917,88 @@ class PreventionCoordinator:
             return False
         self._recovery_repositories_seen.add(source_repository_id)
         return True
+
+    def _daily_publication_capacity_available(self, observed_at: datetime) -> bool:
+        """Whether the poll day's durable prevention publication cap has room."""
+        today = _as_utc(observed_at).date()
+        return (
+            self.state.prevention_publication_slots_for_day(today)
+            < self.max_drafts_per_day
+        )
+
+    def _consume_publication_capacity(self, draft_key: str) -> None:
+        """Charge per-poll and durable UTC-day slots before a remote write."""
+        if self._publication_slots_used >= self.max_drafts:
+            raise _PublicationCapacityError(
+                "Prevention publication cap is exhausted."
+            )
+        if not self.state.try_reserve_prevention_publication_slot(
+            draft_key=draft_key,
+            daily_limit=self.max_drafts_per_day,
+            reserved_at=_as_utc(self.now()),
+        ):
+            raise _PublicationCapacityError(
+                "Daily prevention publication cap is exhausted."
+            )
+        # Never refund either slot: after this returns, the next operation
+        # mutates remote state and may have succeeded even if its response is
+        # lost. The durable daily slot also survives a process crash.
+        self._publication_slots_used += 1
+
+    def _require_real_data_impact(
+        self,
+        *,
+        prevention: PreventionPolicy,
+        base_workspace: Path,
+        candidate_source: Path,
+        patch_paths: Sequence[str],
+        temporary: Path,
+        real_data: RealDataCorpus,
+    ) -> None:
+        """Reject candidates whose rule over-fires on real localization data."""
+        deadline_kwargs = {} if self.deadline is None else {"deadline": self.deadline}
+        base_impact = temporary / "base-impact"
+        candidate_impact = temporary / "candidate-impact"
+        _snapshot_repository(base_workspace, base_impact, **deadline_kwargs)
+        _snapshot_repository(base_workspace, candidate_impact, **deadline_kwargs)
+        _copy_regular_paths(
+            candidate_source,
+            candidate_impact,
+            patch_paths,
+            **deadline_kwargs,
+        )
+        self._require_remaining()
+        impact = self.test_runner.run_real_data_impact(
+            base_workspace=base_impact,
+            candidate_workspace=candidate_impact,
+            policy=prevention,
+            corpus=real_data,
+        )
+        reason = evaluate_real_data_impact(
+            impact,
+            max_new_findings=self.max_new_real_data_findings,
+        )
+        if reason is None:
+            return
+        base_summary = impact.base.summary
+        candidate_summary = impact.candidate.summary
+        new_reasons = (
+            set(candidate_summary.blocking_reasons)
+            - set(base_summary.blocking_reasons)
+            if base_summary is not None and candidate_summary is not None
+            else set()
+        )
+        raise real_data_impact_failure(
+            PreventionPolicyError(
+                "candidate failed the real-data quality-gate impact check"
+            ),
+            reason=reason,
+            base_findings=None if base_summary is None else base_summary.findings,
+            candidate_findings=(
+                None if candidate_summary is None else candidate_summary.findings
+            ),
+            new_blocking_reasons=len(new_reasons),
+        )
 
     @staticmethod
     def _ledger_metadata(record: PreventionDraftRecord) -> dict[str, object]:
@@ -3550,11 +3752,7 @@ class PreventionCoordinator:
                 self._require_pending_candidate(draft_key)
                 if slot_consumed:
                     return
-                if self._publication_slots_used >= self.max_drafts:
-                    raise _PublicationCapacityError(
-                        "Prevention publication cap is exhausted."
-                    )
-                self._publication_slots_used += 1
+                self._consume_publication_capacity(draft_key)
                 slot_consumed = True
 
             try:
@@ -4213,8 +4411,21 @@ class PreventionCoordinator:
             [Sequence[HistoricalPullReference], Sequence[int]], None
         ]
         | None,
+        real_data: RealDataCorpus | None = None,
     ) -> PreventionDraftResult:
         """Author, test, sign, and publish one bounded prevention candidate."""
+        if real_data is None:
+            # Without real data the candidate's effect cannot be measured, so
+            # fail closed before spending a model call on unpublishable work.
+            raise real_data_impact_failure(
+                PreventionPolicyError(
+                    "real localization data is unavailable for the impact check"
+                ),
+                reason="real_data_unavailable",
+                base_findings=None,
+                candidate_findings=None,
+                new_blocking_reasons=0,
+            )
         evidence_hash = prevention_evidence_hash(
             root_cause=candidate.summary,
             evidence_feedback_ids=evidence_ids,
@@ -4327,6 +4538,14 @@ class PreventionCoordinator:
                         candidate_sha=commit.commit_sha,
                         test_overlay_hash=patch.test_overlay_hash,
                     )
+                    self._require_real_data_impact(
+                        prevention=prevention,
+                        base_workspace=base_workspace.path,
+                        candidate_source=signing_workspace.path,
+                        patch_paths=patch.paths,
+                        temporary=temporary,
+                        real_data=real_data,
+                    )
                     plan = plan_prevention_draft(
                         base_workspace=base_workspace.path,
                         candidate_workspace=signing_workspace.path,
@@ -4407,14 +4626,7 @@ class PreventionCoordinator:
                         self._require_pending_candidate(draft_key)
                         if slot_consumed:
                             return
-                        if self._publication_slots_used >= self.max_drafts:
-                            raise _PublicationCapacityError(
-                                "Prevention publication cap is exhausted."
-                            )
-                        # Never refund this slot: after this callback returns,
-                        # the next operation mutates remote state and may have
-                        # succeeded even if its response is lost.
-                        self._publication_slots_used += 1
+                        self._consume_publication_capacity(draft_key)
                         slot_consumed = True
 
                     def before_push() -> None:
@@ -4584,6 +4796,7 @@ class PreventionCoordinator:
             [Sequence[HistoricalPullReference], Sequence[int]], None
         ]
         | None = None,
+        real_data: RealDataCorpus | None = None,
     ) -> PreventionBatchOutcome:
         """Handle pipeline-code recurrences within one explicit repository policy."""
 
@@ -4698,7 +4911,7 @@ class PreventionCoordinator:
                 "Prevention sources require one exact open or historical "
                 "authority, paired revisions, and a revalidation callback."
             )
-        if self.max_drafts == 0:
+        if self.max_drafts == 0 or self.max_drafts_per_day == 0:
             return PreventionBatchOutcome(
                 drafts=tuple(drafts),
                 skipped=len(recurrence_candidates),
@@ -4835,8 +5048,12 @@ class PreventionCoordinator:
             skipped += 1
 
         base: PreventionBaseSnapshot | None = None
+        daily_capacity = bool(
+            candidates
+        ) and self._daily_publication_capacity_available(observed_at)
         if (
             candidates
+            and daily_capacity
             and self._publication_slots_used < self.max_drafts
             and self._authoring_slots_used < self.max_drafts
         ):
@@ -4850,7 +5067,9 @@ class PreventionCoordinator:
 
         for _evidence_hash, (candidate, evidence_ids) in sorted(candidates.items()):
             if (
-                self._publication_slots_used >= self.max_drafts
+                not daily_capacity
+                or not self._daily_publication_capacity_available(observed_at)
+                or self._publication_slots_used >= self.max_drafts
                 or self._authoring_slots_used >= self.max_drafts
             ):
                 deferred += 1
@@ -4883,6 +5102,7 @@ class PreventionCoordinator:
                     require_exact_sources_still_closed=(
                         require_exact_sources_still_closed
                     ),
+                    real_data=real_data,
                 )
             except (
                 CodexAuthenticationError,

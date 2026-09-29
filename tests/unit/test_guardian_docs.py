@@ -378,7 +378,15 @@ def test_guardian_guide_documents_audit_cost_retention_and_safe_prevention():
     assert "consume another call slot" in lowered
     assert "max_model_calls_per_day >= max_attempts" in guide
     assert "max_attempts *" in guide
-    assert "(1 + max_prevention_drafts_per_run)" in guide
+    assert "(1 + drafts_per_poll)" in guide
+    assert "`max_prevention_drafts_per_run` and `max_prevention_drafts_per_day`" in guide
+    assert "durable utc-day cap" in lowered
+    assert "slots are never refunded" in lowered
+    assert "`limits.max_new_real_data_findings` (default 5)" in guide
+    assert "adds any new blocking reason" in lowered
+    assert "or timeout also rejects the candidate" in lowered
+    assert "max_prevention_drafts_per_day: 1" in _example_text()
+    assert "max_new_real_data_findings: 5" in _example_text()
     assert "daily_cost_limit_usd >= model_call_reservation_usd" in guide
     assert "report-only example pins the cap to zero" in lowered
     assert "cap provides two full" in _example_text()

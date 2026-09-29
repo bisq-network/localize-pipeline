@@ -7,7 +7,8 @@ how an operator retrieves a GitHub token or a Codex API key.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -50,6 +51,11 @@ from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.diagnostics import record_failure
 from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
+from localize.guardian.real_data_impact import (
+    RealDataCorpus,
+    RealDataCorpusError,
+    build_real_data_corpus,
+)
 from localize.guardian.private_quality import derive_private_findings, lineage_finding_identity
 from localize.guardian.github import (
     BaseRevisionSnapshot,
@@ -1128,7 +1134,7 @@ def _required_historical_scopes(
     scopes = [HistoricalCheckScope.ASSESSMENT]
     if (
         config.mode is GuardianMode.PROPOSE_PREVENTION
-        and config.limits.max_prevention_drafts_per_run > 0
+        and config.limits.prevention_drafts_per_poll > 0
     ):
         scopes.append(HistoricalCheckScope.PREVENTION)
     backfill = policy.closed_pr_backfill
@@ -4193,6 +4199,7 @@ class GuardianController:
                     policy=policy,
                     work=assessed_work,
                     scopes=scopes,
+                    current_workspace=current_workspace,
                     observed_at=observed_at,
                     require_live_lease=require_live_lease,
                     require_cleanup_lease=require_cleanup_lease,
@@ -4684,6 +4691,7 @@ class GuardianController:
             [Sequence[HistoricalPullReference], Sequence[int]], None
         ],
         outcome: _PollAccumulator,
+        current_workspace: GuardianWorkspace | None = None,
     ) -> None:
         if HistoricalCheckScope.PREVENTION not in scopes:
             return
@@ -4766,21 +4774,44 @@ class GuardianController:
                 for revision in item.revisions
             )
         )
+        # Closed pull-request heads are no longer checked out here. Measure the
+        # impact on the current base's real target files for those same paths;
+        # without a base-to-head diff this audits the files as they stand.
+        impact_scope = replace(
+            candidate_work[0].current_scope,
+            path_locales={
+                path: locale
+                for item in candidate_work
+                for path, locale in item.current_scope.path_locales.items()
+            },
+        )
         try:
             require_current_base_unchanged()
-            result = self.prevention_runner.propose(
-                policy=policy,
-                recurrence_candidates=candidates,
-                evidence_revision_ids=revision_ids,
-                run_id=candidate_work[0].run_id,
-                observed_at=observed_at,
-                require_live_lease=require_live_lease,
-                require_cleanup_lease=require_cleanup_lease,
-                require_current_base_unchanged=require_current_base_unchanged,
-                source_pulls=candidate_sources,
-                source_event_revision_ids=candidate_revision_ids,
-                require_exact_sources_still_closed=(require_exact_sources_still_closed),
-            )
+            with (
+                self._real_data_corpus(
+                    head_root=current_workspace.path,
+                    base_root=None,
+                    scope=impact_scope,
+                )
+                if current_workspace is not None
+                else nullcontext(None)
+            ) as real_data:
+                result = self.prevention_runner.propose(
+                    policy=policy,
+                    recurrence_candidates=candidates,
+                    evidence_revision_ids=revision_ids,
+                    run_id=candidate_work[0].run_id,
+                    observed_at=observed_at,
+                    require_live_lease=require_live_lease,
+                    require_cleanup_lease=require_cleanup_lease,
+                    require_current_base_unchanged=require_current_base_unchanged,
+                    source_pulls=candidate_sources,
+                    source_event_revision_ids=candidate_revision_ids,
+                    require_exact_sources_still_closed=(
+                        require_exact_sources_still_closed
+                    ),
+                    real_data=real_data,
+                )
         except CodexAuthenticationError:
             raise _AuthenticationCircuit from None
         except CodexCapacityError:
@@ -6350,6 +6381,40 @@ class GuardianController:
             success_observer=persist_success,
         )
 
+    @contextmanager
+    def _real_data_corpus(
+        self,
+        *,
+        head_root: Path,
+        base_root: Path | None,
+        scope: _TargetScope,
+    ) -> Iterator[RealDataCorpus | None]:
+        """Capture real target files for the prevention impact gate.
+
+        A corpus that cannot be captured within its bounds yields ``None``;
+        prevention then fails closed instead of publishing an unmeasured rule.
+        """
+
+        parent = self.evidence_root
+        if parent is not None:
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(
+            prefix="localize-guardian-real-data-",
+            dir=parent,
+        ) as raw:
+            try:
+                corpus: RealDataCorpus | None = build_real_data_corpus(
+                    destination=Path(raw) / "corpus",
+                    head_root=head_root,
+                    base_root=base_root,
+                    source_root=scope.source_root,
+                    config_path=scope.config_path,
+                    target_paths=tuple(scope.path_locales),
+                )
+            except RealDataCorpusError:
+                corpus = None
+            yield corpus
+
     def _assess_and_act(
         self,
         *,
@@ -6645,34 +6710,40 @@ class GuardianController:
             ):
                 assert self.prevention_runner is not None
                 try:
-                    prevention_outcome = self.prevention_runner.propose(
-                        policy=policy,
-                        recurrence_candidates=recurrence_candidates,
-                        evidence_revision_ids={
-                            event.feedback_id: revision.revision_id
-                            for event, revision in actionable
-                        },
-                        run_id=run_id,
-                        observed_at=observed_at,
-                        require_live_lease=require_live_lease,
-                        require_cleanup_lease=lambda: self._refresh_live_lease(
-                            lease_owner
-                        ),
-                        require_current_base_unchanged=require_live_lease,
-                        open_source=open_source,
-                        source_event_revision_ids=tuple(
-                            revision.revision_id for _event, revision in actionable
-                        ),
-                        require_exact_open_source_authority=lambda source,
-                        revision_ids: (
-                            self._require_exact_open_source_authority(
-                                policy=policy,
-                                source=source,
-                                event_revision_ids=revision_ids,
-                                require_live_lease=require_live_lease,
-                            )
-                        ),
-                    )
+                    with self._real_data_corpus(
+                        head_root=head_workspace.path,
+                        base_root=base_workspace.path,
+                        scope=scope,
+                    ) as real_data:
+                        prevention_outcome = self.prevention_runner.propose(
+                            policy=policy,
+                            recurrence_candidates=recurrence_candidates,
+                            evidence_revision_ids={
+                                event.feedback_id: revision.revision_id
+                                for event, revision in actionable
+                            },
+                            run_id=run_id,
+                            observed_at=observed_at,
+                            require_live_lease=require_live_lease,
+                            require_cleanup_lease=lambda: self._refresh_live_lease(
+                                lease_owner
+                            ),
+                            require_current_base_unchanged=require_live_lease,
+                            open_source=open_source,
+                            source_event_revision_ids=tuple(
+                                revision.revision_id for _event, revision in actionable
+                            ),
+                            require_exact_open_source_authority=lambda source,
+                            revision_ids: (
+                                self._require_exact_open_source_authority(
+                                    policy=policy,
+                                    source=source,
+                                    event_revision_ids=revision_ids,
+                                    require_live_lease=require_live_lease,
+                                )
+                            ),
+                            real_data=real_data,
+                        )
                 except CodexAuthenticationError:
                     self._fail_actions(
                         run_id=run_id,
