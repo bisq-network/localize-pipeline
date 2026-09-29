@@ -146,6 +146,9 @@ Change only files matching the explicit code and test path allowlists. Do not ch
 project-specific localization config, glossaries, workflows, credentials, Git metadata,
 or generated artifacts. Do not commit, sign, push, open a pull request, or use network
 tools. The controller will independently reject extra paths and prove the regression.
+Stay within max_changed_files and max_changed_bytes in the request. The byte total
+counts the full larger before or after file size for each changed path, including
+new files, not diff bytes. Choose small allowed files for the fix and test.
 
 UNTRUSTED_REQUEST_JSON
 """
@@ -1986,6 +1989,8 @@ class PreventionCodexAuthor:
             "allowed_test_path_globs": policy.allowed_test_path_globs,
             "evidence_feedback_ids": tuple(evidence_feedback_ids),
             "focused_test_argv": policy.focused_test_argv,
+            "max_changed_bytes": policy.max_changed_bytes,
+            "max_changed_files": policy.max_changed_files,
             "scope": scope,
             "summary": summary,
         }
