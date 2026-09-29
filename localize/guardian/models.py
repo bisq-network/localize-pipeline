@@ -346,6 +346,16 @@ class GuardianLimits:
     min_apply_confidence: float = 0.9
     raw_retention_days: int = 90
     max_remediation_drafts_per_run: int = 0
+    max_prevention_drafts_per_day: int = 1
+    max_new_real_data_findings: int = 5
+
+    @property
+    def prevention_drafts_per_poll(self) -> int:
+        """Prevention publications one poll may attempt under both caps."""
+        return min(
+            self.max_prevention_drafts_per_run,
+            self.max_prevention_drafts_per_day,
+        )
 
     def __post_init__(self) -> None:
         integer_bounds = (
@@ -361,6 +371,18 @@ class GuardianLimits:
             (
                 "max_remediation_drafts_per_run",
                 self.max_remediation_drafts_per_run,
+                0,
+                None,
+            ),
+            (
+                "max_prevention_drafts_per_day",
+                self.max_prevention_drafts_per_day,
+                0,
+                None,
+            ),
+            (
+                "max_new_real_data_findings",
+                self.max_new_real_data_findings,
                 0,
                 None,
             ),
@@ -1262,7 +1284,7 @@ class GuardianConfig:
             )
         if (
             self.mode is GuardianMode.PROPOSE_PREVENTION
-            and self.limits.max_prevention_drafts_per_run > 0
+            and self.limits.prevention_drafts_per_poll > 0
         ):
             actors.extend(
                 policy.prevention.publication_actor

@@ -9739,3 +9739,106 @@ def test_enabling_prevention_cap_revisits_prior_historical_recurrence(
     assert second.historical_pull_requests_completed == 1
     assert len(prevention.propose_calls) == 1
     assert len(driver.calls) == 1
+
+
+def test_open_prevention_receives_exact_real_data_corpus_for_impact_gate(
+    tmp_path: Path, runtime
+) -> None:
+    from localize.guardian.real_data_impact import RealDataCorpus
+
+    base, head, checkout, provider, broker, sequence = runtime
+    (head / TARGET_PATH).write_text(
+        "greeting=Новый %0 был отклонён (%1). %2 %3\n",
+        encoding="utf-8",
+    )
+    observed: dict[str, object] = {}
+
+    class CorpusRecordingPrevention(FakePreventionRunner):
+        def propose(self, **kwargs: object) -> PreventionBatchOutcome:
+            corpus = kwargs["real_data"]
+            assert isinstance(corpus, RealDataCorpus)
+            repo = corpus.root / "repo"
+            observed["target"] = (repo / TARGET_PATH).read_text(encoding="utf-8")
+            observed["source"] = (repo / "l10n/messages_en.properties").read_text(
+                encoding="utf-8"
+            )
+            observed["config"] = (corpus.root / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+            observed["diff"] = (corpus.root / "diff.txt").read_text(encoding="utf-8")
+            observed["root"] = corpus.root
+            return super().propose(**kwargs)
+
+    prevention = CorpusRecordingPrevention(sequence=sequence)
+    policy = replace(_policy(), prevention=_prevention_policy())
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.PROPOSE_PREVENTION, policies=(policy,)),
+            checkout=checkout,
+            provider=provider,
+            driver=RecurrenceCodexDriver(),
+            broker=broker,
+            prevention_runner=prevention,
+        ).poll_once()
+
+    assert observed["target"] == "greeting=Новый %0 был отклонён (%1). %2 %3\n"
+    # Source text and operator profile come from the trusted base, never head.
+    assert observed["source"] == (base / "l10n/messages_en.properties").read_text(
+        encoding="utf-8"
+    )
+    assert observed["config"] == (base / ".localize/config.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert f"+++ b/{TARGET_PATH}" in observed["diff"]
+    assert "-greeting=Старый" in observed["diff"]
+    assert "+greeting=Новый" in observed["diff"]
+    assert not Path(observed["root"]).exists()
+
+
+def test_historical_prevention_measures_current_base_real_data(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    from localize.guardian.real_data_impact import RealDataCorpus
+
+    base, head, checkout, _provider, broker, _sequence = runtime
+    observed: dict[str, str] = {}
+
+    class CorpusRecordingPrevention(FakePreventionRunner):
+        def propose(self, **kwargs: object) -> PreventionBatchOutcome:
+            corpus = kwargs["real_data"]
+            assert isinstance(corpus, RealDataCorpus)
+            observed["target"] = (corpus.root / "repo" / TARGET_PATH).read_text(
+                encoding="utf-8"
+            )
+            observed["diff"] = (corpus.root / "diff.txt").read_text(encoding="utf-8")
+            return super().propose(**kwargs)
+
+    prevention = CorpusRecordingPrevention()
+    policy = replace(_historical_policy(), prevention=_prevention_policy())
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.PROPOSE_PREVENTION, policies=(policy,)),
+            checkout=checkout,
+            provider=FakeSnapshotProvider(()),
+            driver=RecurrenceCodexDriver(),
+            broker=broker,
+            prevention_runner=prevention,
+            historical_snapshot_provider=FakeHistoricalSnapshotProvider(
+                (_snapshot(pull=_pull(state="closed")),)
+            ),
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(
+                base,
+                head,
+                tmp_path,
+            ),
+            current_base_provider=FakeCurrentBaseProvider(),
+        ).poll_once()
+
+    assert len(prevention.propose_calls) == 1
+    assert observed["target"] == (base / TARGET_PATH).read_text(encoding="utf-8")
+    assert observed["diff"] == ""

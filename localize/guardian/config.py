@@ -294,6 +294,14 @@ _CONFIG_SCHEMA: dict[str, Any] = {
                     "type": "integer",
                     "minimum": 0,
                 },
+                "max_prevention_drafts_per_day": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "max_new_real_data_findings": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
                 "max_model_calls_per_day": {
                     "type": "integer",
                     "minimum": 1,
@@ -1253,6 +1261,14 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
                 "max_model_calls_per_day",
                 defaults.max_model_calls_per_day,
             ),
+            max_prevention_drafts_per_day=raw_limits.get(
+                "max_prevention_drafts_per_day",
+                defaults.max_prevention_drafts_per_day,
+            ),
+            max_new_real_data_findings=raw_limits.get(
+                "max_new_real_data_findings",
+                defaults.max_new_real_data_findings,
+            ),
             daily_cost_limit_usd=(
                 float(raw_limits["daily_cost_limit_usd"])
                 if has_daily_cost
@@ -1278,7 +1294,7 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
     required_calls = limits.max_attempts * (
         1
         + (
-            limits.max_prevention_drafts_per_run
+            limits.prevention_drafts_per_poll
             if mode is GuardianMode.PROPOSE_PREVENTION
             else 0
         )
@@ -1298,12 +1314,12 @@ def parse_guardian_config(raw_config: Mapping[str, Any]) -> GuardianConfig:
         )
     if (
         mode is GuardianMode.PROPOSE_PREVENTION
-        and limits.max_prevention_drafts_per_run > 0
+        and limits.prevention_drafts_per_poll > 0
         and limits.daily_cost_limit_usd is not None
         and limits.model_call_reservation_usd is not None
         and limits.daily_cost_limit_usd < limits.model_call_reservation_usd
         * limits.max_attempts
-        * (1 + limits.max_prevention_drafts_per_run)
+        * (1 + limits.prevention_drafts_per_poll)
     ):
         raise GuardianConfigError(
             "propose-prevention requires daily_cost_limit_usd to reserve one "
