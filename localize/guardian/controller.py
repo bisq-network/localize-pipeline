@@ -5725,9 +5725,18 @@ class GuardianController:
         profiles, locale_codes = _load_base_profiles(
             scope.config_path, expected_source_locale=policy.source_locale,
         )
-        anchor_snapshot = replace(snapshot, pull_request=replace(snapshot.pull_request, head_sha=anchor))
-        _base, head_revision = _exact_revisions(policy, anchor_snapshot, github_host=self.github_host)
-        with self.checkout_factory(head_revision) as head_workspace:
+        _base, head_revision = _exact_revisions(policy, snapshot, github_host=self.github_host)
+        evidence_revision = (
+            head_revision
+            if anchor == snapshot.pull_request.head_sha
+            else HistoricalRevision(
+                host=head_revision.host,
+                owner=head_revision.owner,
+                repository=head_revision.repository,
+                sha=anchor,
+            )
+        )
+        with self.checkout_factory(evidence_revision) as head_workspace:
             events = derive_private_findings(
                 policy=policy, pull=snapshot.pull_request, evidence_head_sha=anchor,
                 head_root=head_workspace.path, base_root=scope.source_root,

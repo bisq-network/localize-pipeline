@@ -97,6 +97,7 @@ from localize.guardian.remediation import (
 )
 from localize.guardian.workspace import (
     CommitResult,
+    ExactRevision,
     HistoricalRevision,
     HistoricalWorkspace,
     PublicationResult,
@@ -5640,6 +5641,103 @@ def test_head_checkout_failure_finishes_run_and_keeps_feedback_retryable(
         assert driver.calls == []
         assert state.pending_event_revisions(mode=GuardianMode.OBSERVE)
         assert state.reconcile_incomplete_runs(before=NOW + timedelta(days=1)) == ()
+
+
+@pytest.mark.parametrize(
+    ("published", "terminal_lineage"),
+    [(False, False), (True, False), (True, True)],
+)
+def test_private_quality_uses_historical_original_head_after_guardian_push(
+    tmp_path: Path, runtime, published: bool, terminal_lineage: bool,
+) -> None:
+    base, head, checkout, provider, broker, _sequence = runtime
+    (head / TARGET_PATH).write_text(
+        "greeting=Push to %0 was rejected (%1). %2 %3\n",
+        encoding="utf-8",
+    )
+    policy = replace(
+        _policy(), quality_report_actor=TrustedActor("quality-reporter", 202, "User"),
+    )
+    live_head = COMMIT_SHA if published else HEAD_SHA
+    snapshot = _snapshot(pull=_pull(head_sha=live_head))
+    revisions: list[ExactRevision | HistoricalRevision] = []
+
+    @contextmanager
+    def checkout_at_live_ref(revision):
+        revisions.append(revision)
+        if isinstance(revision, ExactRevision) and revision.sha != live_head:
+            raise RuntimeError("remote ref did not resolve to the exact expected SHA")
+        with checkout(revision) as workspace:
+            yield workspace
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        if terminal_lineage:
+            event = authorize_feedback(
+                policy=policy, snapshot=_snapshot(),
+                path_locales={TARGET_PATH: "ru"}, changed_locales=("ru",),
+            ).events[0]
+            revision = state.record_feedback_event(event, observed_at=NOW)
+            run_id = state.start_run(
+                repository=policy.base_repo, locale="ru",
+                mode=GuardianMode.APPLY_OWNED_TRANSLATIONS, started_at=NOW,
+            )
+            publication = dict(
+                run_id=run_id, repository=policy.base_repo, pr_number=12,
+                original_head_sha=HEAD_SHA, base_sha=BASE_SHA,
+                commit_sha=COMMIT_SHA, publication_actor_id=8,
+                publication_actor_type="User",
+                event_revision_ids=(revision.revision_id,),
+                open_source=OpenPullAuthorityReference(
+                    repository=policy.base_repo, repository_id=42,
+                    pull_id=9001, pr_number=12,
+                    authority_digest="1" * 64, head_sha=HEAD_SHA,
+                    base_sha=BASE_SHA, feedback_digest="2" * 64,
+                ),
+            )
+            publication_key = state.record_publication_event(
+                **publication, phase="prepared",
+                completion_actions=(
+                    (revision.revision_id, "completed", {"outcome": "applied"}),
+                ),
+                occurred_at=NOW,
+            )
+            state.record_publication_event(
+                **publication, phase="published", occurred_at=NOW,
+            )
+            state.finalize_publication_reply_terminal(
+                publication_key=publication_key,
+                reason="trusted_feedback_changed",
+                summary="Feedback changed before reply.", occurred_at=NOW,
+            )
+        controller = _controller(
+            tmp_path=tmp_path,
+            state=state,
+            config=_config(GuardianMode.OBSERVE, policies=(policy,)),
+            checkout=checkout_at_live_ref,
+            provider=provider,
+            driver=FakeCodexDriver(),
+            broker=broker,
+        )
+        scope = guardian_controller._target_scope(
+            base_root=base, policy=policy, changed_files=snapshot.changed_files,
+        )
+        authorized = controller._authorize_open_feedback(
+            policy=policy, snapshot=snapshot, scope=scope,
+            evidence_head_sha=None if terminal_lineage else HEAD_SHA,
+        )
+
+    assert len(revisions) == 1
+    if published:
+        assert isinstance(revisions[0], HistoricalRevision)
+        assert revisions[0].sha == HEAD_SHA
+        assert revisions[0].pull_number is None
+    else:
+        assert isinstance(revisions[0], ExactRevision)
+        assert revisions[0].sha == HEAD_SHA
+    findings = [event for event in authorized.events if event.kind == "quality_finding"]
+    assert len(findings) == 1
+    assert findings[0].head_sha == live_head
+    assert guardian_controller.parse_report(findings[0].body)["head_sha"] == HEAD_SHA
 
 
 def test_non_target_or_wrong_source_locale_pr_is_rejected_before_model(
