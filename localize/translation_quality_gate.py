@@ -38,6 +38,7 @@ from localize.localization_profiles import (
     LocalizationProfile,
     load_localization_profiles,
 )
+from localize.placeholder_rules import strip_placeholder_tokens
 from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
@@ -306,6 +307,76 @@ def analyze_source_identical_changes_for_profiles(
         examples_limit=examples_limit,
         ignore_key_patterns=ignore_key_patterns,
     )
+
+
+def _analyze_unchanged_source_prose(
+    diff_text: str,
+    repo_root: str,
+    input_folder: str,
+    changed_files: Sequence[str],
+    locale_codes: Sequence[str],
+    brand_glossary: Iterable[str],
+    localization_profiles: Sequence[LocalizationProfile],
+    ignore_key_patterns: Sequence[Pattern[str]],
+) -> SemanticQAStats:
+    """Find source prose left untouched in a changed target locale file."""
+    changed_keys = {
+        (change.file, change.key)
+        for change in _iter_profile_translation_changes(
+            diff_text, repo_root, input_folder, locale_codes, localization_profiles
+        )
+    }
+    changed_paths = _changed_files_relative_to_input(changed_files, input_folder)
+    findings: List[SemanticFinding] = []
+    seen: set[tuple[str, str]] = set()
+    for profile in localization_profiles:
+        source_language = (
+            profile.localization_layout.source_locale.replace("-", "_")
+            .split("_")[0]
+            .casefold()
+        )
+        for change in iter_all_translation_entries(
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_format=profile.localization_format,
+            localization_layout=profile.localization_layout,
+        ):
+            identity = (change.file, change.key)
+            if (
+                identity in seen
+                or identity in changed_keys
+                or change.file not in changed_paths
+            ):
+                continue
+            seen.add(identity)
+            target_language = change.locale_code.replace("-", "_").split("_")[0].casefold()
+            if target_language == source_language or is_ignored_key(
+                change.key, ignore_key_patterns
+            ):
+                continue
+            source_value = normalize_value(change.source_value)
+            if (
+                source_value != normalize_value(change.new_value)
+                or is_expected_source_identical(change.key, source_value, brand_glossary)
+            ):
+                continue
+            # Single words and tokens are often shared across languages. Require
+            # prose after removing placeholders and markup before blocking.
+            if len(re.findall(r"[A-Za-z]+", strip_placeholder_tokens(source_value))) < 2:
+                continue
+            findings.append(
+                SemanticFinding(
+                    file=change.file,
+                    key=change.key,
+                    value=change.new_value,
+                    reason="Target retains unchanged source-language prose.",
+                    severity="error",
+                    rule_id="source-identical-prose",
+                    source="heuristic",
+                )
+            )
+    return SemanticQAStats.from_findings(findings)
 
 
 def analyze_semantic_qa_changes(
@@ -1068,6 +1139,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             localization_profiles=localization_profiles,
             ignore_key_patterns=config.ignore_key_patterns,
         )
+    semantic_stats = _merge_semantic_stats(
+        semantic_stats,
+        _analyze_unchanged_source_prose(
+            diff_text=diff_text,
+            repo_root=args.repo_root,
+            input_folder=args.input_folder,
+            changed_files=args.changed_files,
+            locale_codes=locale_codes,
+            brand_glossary=brand_glossary,
+            localization_profiles=localization_profiles,
+            ignore_key_patterns=config.ignore_key_patterns,
+        ),
+    )
     report = build_quality_gate_report(
         source_stats=source_stats,
         semantic_stats=semantic_stats,
