@@ -38,6 +38,7 @@ from localize.localization_profiles import (
     LocalizationProfile,
     load_localization_profiles,
 )
+from localize.placeholder_rules import strip_placeholder_tokens
 from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
@@ -98,6 +99,7 @@ class SourceIdenticalStats:
     expected_source_identical_count: int = 0
     unexpected_source_identical_count: int = 0
     localized_to_source_regression_count: int = 0
+    new_source_identical_prose_count: int = 0
     unexpected_source_identical_ratio: float = 0.0
     control_character_findings_count: int = 0
     examples: List[Dict[str, str]] = field(default_factory=list)
@@ -114,6 +116,14 @@ _TOKEN_PATTERNS = [
     re.compile(r"^[A-Z0-9_.:+/#-]{2,}$"),
 ]
 _ENUM_LIKE_KEY = re.compile(r"^[A-Z0-9_.$-]+$")
+_PROSE_WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _is_prose(value: str) -> bool:
+    """Separate sentences and longer copy from short shared-language terms."""
+    text = strip_placeholder_tokens(value).strip()
+    words = _PROSE_WORD.findall(text)
+    return len(words) >= 3 or (len(words) >= 2 and text.endswith((".", "!", "?")))
 
 
 def is_expected_source_identical(
@@ -140,6 +150,8 @@ def is_expected_source_identical(
         for term in (*allowlist.get("*", ()), *allowlist.get(locale_code, ()))
     }
     if normalized.casefold() in allowed_values:
+        return True
+    if not strip_placeholder_tokens(normalized).strip():
         return True
     if not any(character.isalpha() for character in normalized):
         return True
@@ -239,6 +251,8 @@ def _analyze_source_identical_translation_changes(
 
         stats.checked_entries_count += 1
         stats.unexpected_source_identical_count += 1
+        if not normalize_value(change.old_value or "") and _is_prose(source_value):
+            stats.new_source_identical_prose_count += 1
         if (
             change.old_value is not None
             and normalize_value(change.old_value)
@@ -740,11 +754,14 @@ def build_quality_gate_report(
         "remediated_ai_findings_count": remediated_ai_findings_count,
     }
 
-    # Never tolerate destruction of an existing localized value. Thresholds
-    # still govern new source-identical entries; do not silently ignore config.
+    # Never tolerate destruction of an existing localized value.
     if source_stats.localized_to_source_regression_count:
         blocking_reasons.append(
             "Existing localized values were replaced by unexpected source-identical text."
+        )
+    if source_stats.new_source_identical_prose_count:
+        blocking_reasons.append(
+            "New translations contain unexpected source-identical prose."
         )
     source_identical_blocking = (
         source_stats.unexpected_source_identical_count
