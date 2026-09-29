@@ -49,6 +49,10 @@ are private events, never projections of arbitrary public text.
     actor = policy.quality_report_actor
     if actor is None or pull.state != "open":
         return ()
+    # Temporary checkouts may have an aliased parent (for example /var on macOS).
+    # The evidence reader compares resolved files with these trusted roots.
+    head_root = head_root.resolve(strict=True)
+    base_root = base_root.resolve(strict=True)
     config = _yaml_mapping(scope.config_path)
     ignored_patterns = compile_ignore_key_patterns(config.get("ignore_key_patterns"))
     payload, _paths, _locales = _localization_payload(

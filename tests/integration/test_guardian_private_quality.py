@@ -19,9 +19,47 @@ from tests.unit.test_guardian_controller import (
     FakePreventionRunner, _prevention_policy, _feedback,
 )
 from localize.guardian.github import FeedbackKind
-from localize.guardian.private_quality import lineage_finding_identity
+from localize.guardian.controller import _load_base_profiles, _target_scope
+from localize.guardian.evidence import EvidenceError
+from localize.guardian.private_quality import derive_private_findings, lineage_finding_identity
 
 controller_runtime = runtime
+
+
+def test_private_findings_accept_checkout_parent_alias_without_allowing_file_symlinks(
+    tmp_path, controller_runtime,
+):
+    base, head, _checkout, _provider, _broker, _sequence = controller_runtime
+    (head / TARGET_PATH).write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    policy = replace(_policy(), quality_report_actor=TrustedActor("producer", 8, "User"))
+    snapshot = _snapshot(feedback=())
+    scope = _target_scope(
+        base_root=base, policy=policy, changed_files=snapshot.changed_files,
+    )
+    profiles, locale_codes = _load_base_profiles(
+        scope.config_path, expected_source_locale=policy.source_locale,
+    )
+
+    def scan(head_root, base_root):
+        return derive_private_findings(
+            policy=policy, pull=snapshot.pull_request, evidence_head_sha=HEAD_SHA,
+            head_root=head_root, base_root=base_root, scope=scope,
+            profiles=profiles, locale_codes=locale_codes,
+        )
+
+    expected = scan(head, base)
+    assert len(expected) == 1
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    aliased_head, aliased_base = alias / head.name, alias / base.name
+    assert scan(aliased_head, aliased_base) == expected
+
+    outside = tmp_path / "outside.properties"
+    outside.write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    (head / TARGET_PATH).unlink()
+    (head / TARGET_PATH).symlink_to(outside)
+    with pytest.raises(EvidenceError, match="symbolic link"):
+        scan(aliased_head, aliased_base)
 
 
 def immutable_head_checkout(checkout, head, tmp_path):
