@@ -4167,6 +4167,38 @@ def test_base_bundle_change_reconsiders_deterministic_patch_rejection(
         assert len(calls) == 2
 
 
+def test_lint_policy_version_retries_rejection_without_repeating_model(
+    tmp_path: Path, runtime, monkeypatch,
+) -> None:
+    """Retry rejected patches after a validator fix through the normal ledger."""
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    driver = FakeCodexDriver()
+    calls = []
+
+    def reject_first(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise guardian_controller.PatchPolicyError("old lint comparison rejected patch")
+        return apply_replacements(**kwargs)
+
+    monkeypatch.setattr(guardian_controller, "PATCH_VALIDATION_VERSION", 1, raising=False)
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        def poll():
+            return _controller(
+                tmp_path=tmp_path, state=state,
+                config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS),
+                checkout=checkout, provider=provider, driver=driver, broker=broker,
+                replacement_applier=reject_first,
+            ).poll_once()
+
+        assert poll().translation_policy_rejections == 1
+        assert poll().runs_started == 0
+        monkeypatch.setattr(guardian_controller, "PATCH_VALIDATION_VERSION", 2)
+        assert poll().applied_commits == (COMMIT_SHA,)
+        assert len(calls) == 2
+        assert len(driver.calls) == 1
+
+
 def test_crash_after_model_success_reuses_durable_result_without_rebilling(
     tmp_path: Path,
     runtime,
@@ -7692,6 +7724,7 @@ def test_open_pull_processing_queries_only_its_pending_feedback_workset(
         locale: str | None = None,
         mode: GuardianMode | str | None = None,
         policy_digest: str | None = None,
+        patch_validation_version: int | None = None,
         limit: int = 500,
     ):
         """Record the exact PR boundary used for pending-feedback selection."""
@@ -7705,6 +7738,7 @@ def test_open_pull_processing_queries_only_its_pending_feedback_workset(
             locale=locale,
             mode=mode,
             policy_digest=policy_digest,
+            patch_validation_version=patch_validation_version,
             limit=limit,
         )
 

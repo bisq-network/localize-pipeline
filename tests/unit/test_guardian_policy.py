@@ -5,7 +5,8 @@ import pytest
 import yaml
 
 from localize.guardian import ProposedReplacement
-from localize.guardian.policy import PatchPolicyError, apply_replacements
+from localize.guardian.policy import PatchPolicyError, _new_findings, apply_replacements
+from localize.formats import JAVA_PROPERTIES_ADAPTER
 
 
 def _replacement(**overrides):
@@ -81,6 +82,113 @@ def test_applies_exact_properties_value_and_preserves_all_other_bytes(tmp_path):
         "Старое %0 (%1). %2 %3".encode(),
         "Отправка в %0 была отклонена (%1). %2 %3".encode(),
     ) == after
+
+
+def test_existing_control_in_unedited_key_does_not_block_replacement(tmp_path):
+    config = _write_properties_project(tmp_path)
+    target = tmp_path / "l10n/Messages_ru.properties"
+    target.write_text(target.read_text(encoding="utf-8") + "old=Existing \x7f artifact\n", encoding="utf-8")
+
+    result = apply_replacements(
+        repo_root=tmp_path,
+        pipeline_config_path=config,
+        allowed_paths=("l10n/*.properties",),
+        replacements=(_replacement(),),
+        max_changes=20,
+    )
+
+    assert result.changed_keys == (("l10n/Messages_ru.properties", "push"),)
+    assert "old=Existing \x7f artifact\n" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("artifact", ["\x7f", "\ufffd", "Ã¼"])
+def test_existing_artifact_location_shift_is_not_a_new_finding(tmp_path, artifact):
+    before = tmp_path / "before.properties"
+    after = tmp_path / "after.properties"
+    before.write_text("old=Existing " + artifact + " artifact\n", encoding="utf-8")
+    after.write_text("# inserted line\nold=Existing " + artifact + " artifact\n", encoding="utf-8")
+
+    assert _new_findings(
+        adapter=JAVA_PROPERTIES_ADAPTER, before_path=before, after_path=after,
+    ) == []
+
+
+def test_added_control_beyond_linter_preview_is_a_new_finding(tmp_path):
+    before = tmp_path / "before.properties"
+    after = tmp_path / "after.properties"
+    before.write_text("old=" + "\x7f" * 6 + "\n", encoding="utf-8")
+    after.write_text("old=" + "\x7f" * 7 + "\n", encoding="utf-8")
+
+    assert _new_findings(
+        adapter=JAVA_PROPERTIES_ADAPTER, before_path=before, after_path=after,
+    )
+
+
+def test_literal_control_replacing_escaped_control_is_a_new_finding(tmp_path):
+    before = tmp_path / "before.properties"
+    after = tmp_path / "after.properties"
+    before.write_text(r"old=\u007F" + "\n", encoding="utf-8")
+    after.write_text("old=\x7f\n", encoding="utf-8")
+
+    assert _new_findings(
+        adapter=JAVA_PROPERTIES_ADAPTER, before_path=before, after_path=after,
+    )
+
+
+@pytest.mark.parametrize("artifact", ["\ufffd", "Ã¼"])
+def test_increased_encoding_artifact_is_a_new_finding(tmp_path, artifact):
+    before = tmp_path / "before.properties"
+    after = tmp_path / "after.properties"
+    before.write_text("old=" + artifact + "\n", encoding="utf-8")
+    after.write_text("old=" + artifact * 2 + "\n", encoding="utf-8")
+
+    assert _new_findings(
+        adapter=JAVA_PROPERTIES_ADAPTER, before_path=before, after_path=after,
+    )
+
+
+def test_proposed_control_remains_rejected_without_writing(tmp_path):
+    config = _write_properties_project(tmp_path)
+    target = tmp_path / "l10n/Messages_ru.properties"
+    before = target.read_bytes()
+
+    with pytest.raises(PatchPolicyError, match="contains a control character"):
+        apply_replacements(
+            repo_root=tmp_path,
+            pipeline_config_path=config,
+            allowed_paths=("l10n/*.properties",),
+            replacements=(_replacement(proposed_value="Rejected \x7f %0 (%1). %2 %3"),),
+            max_changes=20,
+        )
+
+    assert target.read_bytes() == before
+
+
+@pytest.mark.parametrize("artifact", ["\ufffd", "Ã¼"])
+def test_encoding_artifact_cannot_move_into_another_proposed_key(tmp_path, artifact):
+    config = _write_properties_project(tmp_path)
+    source = tmp_path / "l10n/Messages_en.properties"
+    target = tmp_path / "l10n/Messages_ru.properties"
+    source.write_text(source.read_text(encoding="utf-8") + "old=Source\n", encoding="utf-8")
+    target.write_text(target.read_text(encoding="utf-8") + "old=" + artifact + "\n", encoding="utf-8")
+    before = target.read_bytes()
+
+    with pytest.raises(PatchPolicyError, match="encoding artifact"):
+        apply_replacements(
+            repo_root=tmp_path,
+            pipeline_config_path=config,
+            allowed_paths=("l10n/*.properties",),
+            replacements=(
+                _replacement(proposed_value="Отправка " + artifact + " в %0 была отклонена (%1). %2 %3"),
+                _replacement(
+                    feedback_id="review-comment:43", key="old", source_value="Source",
+                    expected_value=artifact, proposed_value="Clean",
+                ),
+            ),
+            max_changes=20,
+        )
+
+    assert target.read_bytes() == before
 
 
 def test_explicit_glossary_path_must_exist(tmp_path: Path) -> None:

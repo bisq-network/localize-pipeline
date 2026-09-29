@@ -878,6 +878,10 @@ def _canonical_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# Changes to patch validation must release only policy-rejected work for retry.
+PATCH_VALIDATION_VERSION = 2
+
+
 def _patch_policy_digest(
     config: GuardianConfig, policy: RepositoryPolicy, scope: _TargetScope
 ) -> str:
@@ -5914,6 +5918,7 @@ class GuardianController:
                     pr_number=snapshot.pull_request.number,
                     mode=self.config.mode,
                     policy_digest=_patch_policy_digest(self.config, policy, scope),
+                    patch_validation_version=PATCH_VALIDATION_VERSION,
                 )
             )
             current_revision_ids = {
@@ -6833,6 +6838,7 @@ class GuardianController:
                     status="skipped",
                     details={
                         "outcome": "deterministic_policy_rejection",
+                        "patch_validation_version": PATCH_VALIDATION_VERSION,
                         **report_context,
                         "report_reason": "policy_conflict",
                         "decision_required": False,

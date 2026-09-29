@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
@@ -198,10 +199,56 @@ def _load_glossary(
     return result
 
 
+def _encoding_artifact_counts(text: str) -> Counter[str]:
+    artifacts = Counter(
+        "mojibake: " + match.group()
+        for match in re.finditer(r"Ã[\x80-\xff]", text)
+    )
+    artifacts["replacement character: U+FFFD"] = text.count("\ufffd")
+    return artifacts
+
+
 def _new_findings(*, adapter: Any, before_path: Path, after_path: Path) -> list[str]:
-    before = set(adapter.lint_file(str(before_path))) | set(check_encoding_and_mojibake(str(before_path)))
-    after = set(adapter.lint_file(str(after_path))) | set(check_encoding_and_mojibake(str(after_path)))
-    return sorted(after - before)
+    def stable_diagnostics(path: Path) -> Counter[str]:
+        diagnostics = Counter()
+        for message in (
+            *adapter.lint_file(str(path)),
+            *check_encoding_and_mojibake(str(path)),
+        ):
+            # These summaries show only whether an artifact exists, or its
+            # first few locations. Count every occurrence from the file below.
+            if message.startswith((
+                "Disallowed control character artifact detected in '",
+                "Potential mojibake detected in '",
+                "File '",
+            )) and (
+                "control character artifact" in message
+                or "Potential mojibake" in message
+                or "official Unicode replacement character" in message
+            ):
+                continue
+            identity = message.replace(str(path), "<checked file>")
+            if identity.startswith(
+                "Linter Error: Disallowed control character artifact in value for key "
+            ):
+                # Keep the key and artifact types while ignoring line shifts.
+                identity = re.sub(r" on line \d+:", " on line <position>:", identity)
+                identity = re.sub(r" at line \d+, column \d+", "", identity)
+            diagnostics[identity] += 1
+        return diagnostics
+
+    def artifact_counts(path: Path) -> Counter[str]:
+        content = path.read_text(encoding="utf-8")
+        artifacts = Counter(
+            "control: " + finding.split(" at line ", 1)[0]
+            for finding in find_disallowed_control_characters(content)
+        )
+        artifacts.update(_encoding_artifact_counts(content))
+        return artifacts
+
+    added = stable_diagnostics(after_path) - stable_diagnostics(before_path)
+    added.update(artifact_counts(after_path) - artifact_counts(before_path))
+    return sorted(added.elements())
 
 
 def _write_preserving_mode(path: Path, content: str) -> None:
@@ -381,6 +428,10 @@ def apply_replacements(
                 if find_disallowed_control_characters(proposal.proposed_value):
                     raise PatchPolicyError(
                         f"Proposed value for {relative_path}:{proposal.key} contains a control character."
+                    )
+                if _encoding_artifact_counts(proposal.proposed_value) - _encoding_artifact_counts(current_value):
+                    raise PatchPolicyError(
+                        f"Proposed value for {relative_path}:{proposal.key} introduces an encoding artifact."
                     )
                 if not check_placeholder_parity(source_value, proposal.proposed_value):
                     raise PatchPolicyError(
