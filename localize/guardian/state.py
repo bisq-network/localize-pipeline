@@ -5730,6 +5730,7 @@ class GuardianState:
         locale: str | None = None,
         mode: GuardianMode | str | None = None,
         policy_digest: str | None = None,
+        patch_validation_version: int | None = None,
         limit: int = _MAX_PENDING_EVENT_WORKSET,
     ) -> tuple[EventRevision, ...]:
         """Return a bounded unresolved workset, oldest first.
@@ -5758,6 +5759,12 @@ class GuardianState:
             r"[0-9a-f]{64}", policy_digest
         ):
             raise ValueError("policy_digest must be a lowercase SHA-256 digest.")
+        if patch_validation_version is not None and (
+            isinstance(patch_validation_version, bool)
+            or not isinstance(patch_validation_version, int)
+            or patch_validation_version < 1
+        ):
+            raise ValueError("patch_validation_version must be a positive integer.")
         terminal_statuses = tuple(sorted(_TERMINAL_ACTION_STATUSES))
         terminal_placeholders = ", ".join("?" for _ in terminal_statuses)
         parameters: list[Any] = list(terminal_statuses)
@@ -5783,6 +5790,16 @@ class GuardianState:
                 OR json_extract(a.details_json, '$.report_policy_digest') IS ?
             )"""
             parameters.append(policy_digest)
+        if patch_validation_version is not None:
+            # Validator repairs retry rejected patches without reopening held
+            # human decisions or changing their report-policy identity.
+            policy_filter += """ AND (
+                a.status != 'skipped'
+                OR json_extract(a.details_json, '$.outcome')
+                    IS NOT 'deterministic_policy_rejection'
+                OR json_extract(a.details_json, '$.patch_validation_version') IS ?
+            )"""
+            parameters.append(patch_validation_version)
         filters = [
             f"""NOT EXISTS (
                 SELECT 1 FROM actions AS a

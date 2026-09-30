@@ -851,6 +851,38 @@ def test_policy_rejections_only_resolve_the_same_effective_policy(
         assert state.pending_event_revisions(policy_digest="b" * 64) == ()
 
 
+def test_validation_upgrade_retries_only_rejected_patches(tmp_path: Path) -> None:
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        rejected = state.record_feedback_event(_event())
+        held = state.record_feedback_event(replace(_event(), event_id="held"))
+        run_id = state.start_run(
+            repository="acme/widgets", locale="ru", mode=GuardianMode.APPLY_OWNED_TRANSLATIONS,
+        )
+        state.record_action(
+            run_id=run_id, event_revision_id=rejected.revision_id,
+            action="apply-owned-translations", status="skipped",
+            details={"outcome": "deterministic_policy_rejection", "policy_digest": "a" * 64},
+        )
+        state.record_action(
+            run_id=run_id, event_revision_id=held.revision_id,
+            action="apply-owned-translations", status="skipped",
+            details={"decision_required": True, "report_policy_digest": "a" * 64},
+        )
+        assert state.pending_event_revisions(policy_digest="a" * 64) == ()
+        assert [r.revision_id for r in state.pending_event_revisions(
+            policy_digest="a" * 64, patch_validation_version=2,
+        )] == [rejected.revision_id]
+        state.record_action(
+            run_id=run_id, event_revision_id=rejected.revision_id,
+            action="apply-owned-translations", status="skipped",
+            details={"outcome": "deterministic_policy_rejection", "policy_digest": "a" * 64,
+                     "patch_validation_version": 2},
+        )
+        assert state.pending_event_revisions(
+            policy_digest="a" * 64, patch_validation_version=2,
+        ) == ()
+
+
 def test_exact_duplicate_is_not_pending_but_edits_and_sha_changes_are(
     tmp_path: Path,
 ) -> None:

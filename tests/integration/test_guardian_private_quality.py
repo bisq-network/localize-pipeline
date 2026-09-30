@@ -6,6 +6,7 @@ import shutil
 import json
 
 import pytest
+import yaml
 
 from localize.guardian.models import GuardianMode, TrustedActor
 from localize.guardian.state import GuardianState
@@ -15,13 +16,162 @@ from localize.guardian.quality_reports import build_report, finding, render_repo
 from localize.guardian.codex import GuardianRecurrenceCandidate
 from localize.guardian.prevention_runtime import PreventionBatchOutcome
 from tests.unit.test_guardian_controller import (
-    TARGET_PATH, COMMIT_SHA, HEAD_SHA, _config, _controller, _policy, _snapshot, runtime,
+    TARGET_PATH, SECOND_TARGET_PATH, COMMIT_SHA, HEAD_SHA, _add_second_localization_target,
+    _config, _controller, _policy, _snapshot, runtime,
     FakePreventionRunner, _prevention_policy, _feedback,
 )
 from localize.guardian.github import FeedbackKind
-from localize.guardian.private_quality import lineage_finding_identity
+from localize.guardian.controller import _load_base_profiles, _target_scope
+from localize.guardian.evidence import EvidenceError
+from localize.guardian.private_quality import derive_private_findings, lineage_finding_identity
 
 controller_runtime = runtime
+
+
+def _two_file_private_scan(controller_runtime):
+    base, head, _checkout, _provider, _broker, _sequence = controller_runtime
+    for root in (base, head):
+        _add_second_localization_target(root)
+    (head / TARGET_PATH).write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    (head / SECOND_TARGET_PATH).write_text("failure=Connection failed\n", encoding="utf-8")
+    changed = tuple(
+        replace(_snapshot().changed_files[0], path=path)
+        for path in (SECOND_TARGET_PATH, TARGET_PATH)
+    )
+    snapshot = _snapshot(feedback=(), changed_files=changed)
+    policy = replace(_policy(), quality_report_actor=TrustedActor("producer", 8, "User"))
+    scope = _target_scope(base_root=base, policy=policy, changed_files=changed)
+    profiles, locale_codes = _load_base_profiles(
+        scope.config_path, expected_source_locale=policy.source_locale,
+    )
+
+    def scan(current_scope=scope):
+        return derive_private_findings(
+            policy=policy, pull=snapshot.pull_request, evidence_head_sha=HEAD_SHA,
+            head_root=head, base_root=base, scope=current_scope,
+            profiles=profiles, locale_codes=locale_codes,
+        )
+
+    return base, head, scope, scan
+
+
+def test_private_scan_rejects_empty_authorized_scope(controller_runtime):
+    _base, _head, scope, scan = _two_file_private_scan(controller_runtime)
+    with pytest.raises(EvidenceError, match="at least one changed target locale file"):
+        scan(replace(scope, path_locales={}))
+
+
+def test_private_scan_rejects_symlink_in_late_file(tmp_path, controller_runtime):
+    _base, head, _scope, scan = _two_file_private_scan(controller_runtime)
+    outside = tmp_path / "outside.properties"
+    outside.write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    (head / TARGET_PATH).unlink()
+    (head / TARGET_PATH).symlink_to(outside)
+    with pytest.raises(EvidenceError, match="symbolic link"):
+        scan()
+
+
+def test_private_scan_preserves_single_file_size_limit(controller_runtime, monkeypatch):
+    _base, head, _scope, scan = _two_file_private_scan(controller_runtime)
+    monkeypatch.setattr("localize.guardian.private_quality.MAX_PRIVATE_EVIDENCE_BYTES", 512)
+    (head / SECOND_TARGET_PATH).write_bytes(b"x" * 513)
+    with pytest.raises(EvidenceError, match="512-byte input limit"):
+        scan()
+
+
+@pytest.mark.parametrize("bound", ["count", "bytes"])
+def test_private_scan_keeps_cumulative_finding_caps_across_files(
+    controller_runtime, monkeypatch, bound,
+):
+    _base, _head, _scope, scan = _two_file_private_scan(controller_runtime)
+    events = scan()
+    assert len(events) == 2
+    if bound == "count":
+        monkeypatch.setattr("localize.guardian.private_quality.MAX_PRIVATE_FINDINGS", 1)
+        error = "count bound"
+    else:
+        first_body_bytes = max(len(event.body.encode("utf-8")) for event in events)
+        monkeypatch.setattr(
+            "localize.guardian.private_quality.MAX_PRIVATE_EVIDENCE_BYTES", first_body_bytes,
+        )
+        error = "byte bound"
+    with pytest.raises(ValueError, match=error):
+        scan()
+
+
+def test_private_findings_accept_checkout_parent_alias_without_allowing_file_symlinks(
+    tmp_path, controller_runtime,
+):
+    base, head, _checkout, _provider, _broker, _sequence = controller_runtime
+    (head / TARGET_PATH).write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    policy = replace(_policy(), quality_report_actor=TrustedActor("producer", 8, "User"))
+    snapshot = _snapshot(feedback=())
+    scope = _target_scope(
+        base_root=base, policy=policy, changed_files=snapshot.changed_files,
+    )
+    profiles, locale_codes = _load_base_profiles(
+        scope.config_path, expected_source_locale=policy.source_locale,
+    )
+
+    def scan(head_root, base_root):
+        return derive_private_findings(
+            policy=policy, pull=snapshot.pull_request, evidence_head_sha=HEAD_SHA,
+            head_root=head_root, base_root=base_root, scope=scope,
+            profiles=profiles, locale_codes=locale_codes,
+        )
+
+    expected = scan(head, base)
+    assert len(expected) == 1
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    aliased_head, aliased_base = alias / head.name, alias / base.name
+    assert scan(aliased_head, aliased_base) == expected
+
+    outside = tmp_path / "outside.properties"
+    outside.write_text("greeting=" + SOURCE + "\n", encoding="utf-8")
+    (head / TARGET_PATH).unlink()
+    (head / TARGET_PATH).symlink_to(outside)
+    with pytest.raises(EvidenceError, match="symbolic link"):
+        scan(aliased_head, aliased_base)
+
+
+def test_private_scan_reaches_late_finding_after_four_megabytes_of_changed_files(
+    tmp_path, controller_runtime,
+):
+    base, head, _checkout, _provider, _broker, _sequence = controller_runtime
+    codes = [f"q{index:02d}" for index in range(1, 46)]
+    config_path = base / ".localize/config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["supported_locales"] = [{"code": code, "name": code} for code in codes]
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    (base / "l10n/messages_en.properties").write_text(
+        "greeting=" + SOURCE + "\npadding=" + "Source text " * 4_000 + "\n",
+        encoding="utf-8",
+    )
+    paths = []
+    for code in codes:
+        path = f"l10n/messages_{code}.properties"
+        paths.append(path)
+        original = "greeting=Старый\npadding=" + "Ц" * 25_000 + "\n"
+        (base / path).write_text(original, encoding="utf-8")
+        (head / path).write_text(
+            original if code != codes[-1] else original.replace("greeting=Старый", "greeting=" + SOURCE),
+            encoding="utf-8",
+        )
+    changed = tuple(replace(_snapshot().changed_files[0], path=path) for path in paths)
+    snapshot = _snapshot(feedback=(), changed_files=changed)
+    policy = replace(_policy(), quality_report_actor=TrustedActor("producer", 8, "User"))
+    scope = _target_scope(base_root=base, policy=policy, changed_files=changed)
+    profiles, locale_codes = _load_base_profiles(
+        scope.config_path, expected_source_locale=policy.source_locale,
+    )
+    events = derive_private_findings(
+        policy=policy, pull=snapshot.pull_request, evidence_head_sha=HEAD_SHA,
+        head_root=head, base_root=base, scope=scope,
+        profiles=profiles, locale_codes=locale_codes,
+    )
+    assert len(events) == 1
+    assert events[0].path == paths[-1]
 
 
 def immutable_head_checkout(checkout, head, tmp_path):

@@ -10,7 +10,7 @@ import json
 
 from localize.formats import get_localization_adapter, load_localization_format
 from localize.guardian.evidence import (
-    _localization_payload, _safe_relative_file, _yaml_mapping,
+    EvidenceError, _localization_payload, _safe_relative_file, _yaml_mapping,
 )
 from localize.guardian.models import FeedbackEvent
 from localize.guardian.policy import _load_glossary
@@ -50,8 +50,14 @@ are private events, never projections of arbitrary public text.
     actor = policy.quality_report_actor
     if actor is None or pull.state != "open":
         return ()
+    # Temporary checkouts may have an aliased parent (for example /var on macOS).
+    # The evidence reader compares resolved files with these trusted roots.
+    head_root = head_root.resolve(strict=True)
+    base_root = base_root.resolve(strict=True)
     config = _yaml_mapping(scope.config_path)
     ignored_patterns = compile_ignore_key_patterns(config.get("ignore_key_patterns"))
+    if not scope.path_locales:
+        raise EvidenceError("Evidence bundle requires at least one changed target locale file.")
     glossary_relative = str(config.get("glossary_file_path", "glossary.json"))
     glossary_path = scope.config_path.parent / glossary_relative
     if "glossary_file_path" in config or glossary_path.exists() or glossary_path.is_symlink():
@@ -62,14 +68,6 @@ are private events, never projections of arbitrary public text.
     glossary = _load_glossary(
         config, config_path=scope.config_path, trusted_root=scope.config_root,
     )
-    payload, _paths, _locales = _localization_payload(
-        repo_root=head_root, source_root=base_root,
-        paths=tuple(sorted(scope.path_locales)),
-        allowed_path_globs=policy.allowed_path_globs,
-        profiles=profiles, locale_codes=locale_codes,
-        max_file_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
-        max_payload_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
-    )
     legacy_keys = set()
     for event in legacy_events:
         if event.body.startswith(MARKER):
@@ -77,7 +75,17 @@ are private events, never projections of arbitrary public text.
             legacy_keys.update((report["path"], item["key"]) for item in report["findings"])
     events = []
     evidence_bytes = 0
-    for file_data in payload:
+    for raw_path in sorted(scope.path_locales):
+        # Keep only one checked file's localization data in memory. The
+        # cumulative finding caps below still apply to the complete PR.
+        payload, _paths, _locales = _localization_payload(
+            repo_root=head_root, source_root=base_root,
+            paths=(raw_path,), allowed_path_globs=policy.allowed_path_globs,
+            profiles=profiles, locale_codes=locale_codes,
+            max_file_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
+            max_payload_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
+        )
+        file_data = payload[0]
         path, locale = file_data["path"], file_data["locale"]
         base_values = {}
         if scope.changed_files[path].status != "added":

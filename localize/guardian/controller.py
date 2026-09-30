@@ -136,6 +136,10 @@ class _PublishedFeedbackChanged(PreventionSourceAuthorityError):
     """The exact published PR is still authorized, but its review text changed."""
 
 
+class _SameHeadFeedbackChanged(PreventionSourceAuthorityError):
+    """Only trusted feedback changed while a same-head report was being posted."""
+
+
 _SUPPORTED_CHANGED_FILE_STATUSES = frozenset({"added", "modified"})
 _ASSESSMENT_PROMPT = (
     "Read INSTRUCTIONS.md and the complete sanitized evidence bundle. "
@@ -884,6 +888,10 @@ def _canonical_digest(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+# Changes to patch validation must release only policy-rejected work for retry.
+PATCH_VALIDATION_VERSION = 2
+
+
 def _patch_policy_digest(
     config: GuardianConfig, policy: RepositoryPolicy, scope: _TargetScope
 ) -> str:
@@ -967,6 +975,44 @@ def _historical_pull_revision_digest(
             "changed_files": changed_files,
             "trusted_feedback": feedback,
         }
+    )
+
+
+def _open_pull_non_feedback_digest(
+    policy: RepositoryPolicy,
+    snapshot: PullRequestFeedbackSnapshot,
+    repository: str,
+) -> str:
+    """Bind reporting deferral to every non-feedback source authority field."""
+    routed = (
+        snapshot
+        if repository == snapshot.repository_identity.full_name
+        else _repository_route_alias(snapshot, repository=repository)
+    )
+    return _historical_pull_revision_digest(policy, routed)
+
+
+def _same_head_feedback_only(
+    *,
+    policy: RepositoryPolicy,
+    source: OpenPullAuthorityReference,
+    current: OpenPullAuthorityReference,
+    snapshot: PullRequestFeedbackSnapshot,
+    reporting_non_feedback_digest: str | None,
+) -> bool:
+    return bool(
+        reporting_non_feedback_digest is not None
+        and source.feedback_digest is not None
+        and current.feedback_digest is not None
+        and current.feedback_digest != source.feedback_digest
+        and current.repository == source.repository
+        and current.repository_id == source.repository_id
+        and current.pull_id == source.pull_id
+        and current.pr_number == source.pr_number
+        and current.head_sha == source.head_sha
+        and current.base_sha == source.base_sha
+        and _open_pull_non_feedback_digest(policy, snapshot, source.repository)
+        == reporting_non_feedback_digest
     )
 
 
@@ -1112,19 +1158,22 @@ def _historical_policy_digest(
 ) -> str:
     """Bind completion to all authority and assessment inputs."""
 
-    return _canonical_digest(
-        {
-            "assessment": {
-                "minimum_confidence": config.limits.min_apply_confidence,
-                "model": model,
-                "reasoning_effort": config.runtime.codex_reasoning_effort,
-            },
-            "controller_implementation_version": _HISTORICAL_CONTROLLER_VERSION,
-            "mode": config.mode,
-            "pipeline_config_bundle": pipeline_config_bundle_digest,
-            "repository_policy": policy,
-        }
-    )
+    basis = {
+        "assessment": {
+            "minimum_confidence": config.limits.min_apply_confidence,
+            "model": model,
+            "reasoning_effort": config.runtime.codex_reasoning_effort,
+        },
+        "controller_implementation_version": _HISTORICAL_CONTROLLER_VERSION,
+        "mode": config.mode,
+        "pipeline_config_bundle": pipeline_config_bundle_digest,
+        "repository_policy": policy,
+    }
+    if policy.quality_report_actor is not None:
+        # Closed historical intake now retires obsolete internal quality
+        # projections. Give its immutable checkpoints a distinct policy key.
+        basis["historical_quality_projection_version"] = 2
+    return _canonical_digest(basis)
 
 
 def _required_historical_scopes(
@@ -1748,6 +1797,7 @@ def _trusted_tombstones(
     snapshot: PullRequestFeedbackSnapshot,
     previous: Sequence[EventRevision],
     quality_event_ids: frozenset[str] | None = None,
+    include_deleted_quality: bool = False,
 ) -> tuple[FeedbackEvent, ...]:
     previous_by_object = {
         (revision.kind, revision.event_id): revision for revision in previous
@@ -1758,7 +1808,8 @@ def _trusted_tombstones(
         actor = policy.quality_report_actor
         for prior in previous:
             if (":quality:" in prior.event_id and prior.event_id not in quality_event_ids
-                    and not prior.deleted and (prior.author_id, prior.author_type) == (actor.id, actor.type)):
+                    and (include_deleted_quality or not prior.deleted)
+                    and (prior.author_id, prior.author_type) == (actor.id, actor.type)):
                 events.append(FeedbackEvent(
                     repository=policy.base_repo, pr_number=pull.number,
                     kind=prior.kind, event_id=prior.event_id, author=prior.author,
@@ -2937,6 +2988,10 @@ class GuardianController:
                 policy=policy,
                 snapshot=snapshot,
                 previous=previous,
+                quality_event_ids=frozenset(
+                    event.event_id for event in authorized.events
+                ),
+                include_deleted_quality=True,
             )
             if not authorized.events and not tombstones:
                 raise _HistoricalPolicyRejection(
@@ -3007,6 +3062,7 @@ class GuardianController:
         require_live_lease: Callable[[], None],
         expected_current_head_sha: str | None = None,
         allow_empty_feedback: bool = False,
+        reporting_non_feedback_digest: str | None = None,
     ) -> None:
         """Rehydrate and reauthorize one complete open source before mutation."""
 
@@ -3137,6 +3193,19 @@ class GuardianController:
         )
         if not (same_original_authority or same_feedback_after_guardian_push):
             if (
+                expected_head == source.head_sha
+                and _same_head_feedback_only(
+                    policy=policy,
+                    source=source,
+                    current=current,
+                    snapshot=fresh,
+                    reporting_non_feedback_digest=reporting_non_feedback_digest,
+                )
+            ):
+                raise _SameHeadFeedbackChanged(
+                    "Trusted feedback changed during same-head reporting validation."
+                )
+            if (
                 expected_head != source.head_sha
                 and current.repository == source.repository
                 and current.repository_id == source.repository_id
@@ -3214,6 +3283,20 @@ class GuardianController:
             final_fresh.pull_request.head_sha != expected_head
             or final_current != current
         ):
+            if (
+                expected_head == source.head_sha
+                and final_fresh.pull_request.head_sha == expected_head
+                and _same_head_feedback_only(
+                    policy=policy,
+                    source=source,
+                    current=final_current,
+                    snapshot=final_fresh,
+                    reporting_non_feedback_digest=reporting_non_feedback_digest,
+                )
+            ):
+                raise _SameHeadFeedbackChanged(
+                    "Trusted feedback changed during final same-head reporting validation."
+                )
             if (
                 expected_head != source.head_sha
                 and final_fresh.pull_request.head_sha == expected_head
@@ -5752,9 +5835,18 @@ class GuardianController:
         profiles, locale_codes = _load_base_profiles(
             scope.config_path, expected_source_locale=policy.source_locale,
         )
-        anchor_snapshot = replace(snapshot, pull_request=replace(snapshot.pull_request, head_sha=anchor))
-        _base, head_revision = _exact_revisions(policy, anchor_snapshot, github_host=self.github_host)
-        with self.checkout_factory(head_revision) as head_workspace:
+        _base, head_revision = _exact_revisions(policy, snapshot, github_host=self.github_host)
+        evidence_revision = (
+            head_revision
+            if anchor == snapshot.pull_request.head_sha
+            else HistoricalRevision(
+                host=head_revision.host,
+                owner=head_revision.owner,
+                repository=head_revision.repository,
+                sha=anchor,
+            )
+        )
+        with self.checkout_factory(evidence_revision) as head_workspace:
             events = derive_private_findings(
                 policy=policy, pull=snapshot.pull_request, evidence_head_sha=anchor,
                 head_root=head_workspace.path, base_root=scope.source_root,
@@ -5945,6 +6037,7 @@ class GuardianController:
                     pr_number=snapshot.pull_request.number,
                     mode=self.config.mode,
                     policy_digest=_patch_policy_digest(self.config, policy, scope),
+                    patch_validation_version=PATCH_VALIDATION_VERSION,
                 )
             )
             current_revision_ids = {
@@ -6904,6 +6997,7 @@ class GuardianController:
                     status="skipped",
                     details={
                         "outcome": "deterministic_policy_rejection",
+                        "patch_validation_version": PATCH_VALIDATION_VERSION,
                         **report_context,
                         "report_reason": "policy_conflict",
                         "decision_required": False,
@@ -7294,6 +7388,11 @@ class GuardianController:
         revision_ids = tuple(
             revision.revision_id for event, revision in current if not event.deleted
         )
+        reporting_non_feedback_digest = (
+            _open_pull_non_feedback_digest(policy, snapshot, open_source.repository)
+            if head == open_source.head_sha
+            else None
+        )
         self.state.supersede_unavailable_feedback_reports(
             policy.base_repo_id,
             snapshot.pull_request.number,
@@ -7310,6 +7409,7 @@ class GuardianController:
                 require_live_lease=lambda: self._require_live_lease(lease_owner),
                 expected_current_head_sha=head,
                 allow_empty_feedback=not revision_ids,
+                reporting_non_feedback_digest=reporting_non_feedback_digest,
             )
 
         try:
@@ -7470,7 +7570,7 @@ class GuardianController:
                 },
                 checked_at=_as_utc(self.now()),
             )
-        except _PublishedFeedbackChanged:
+        except (_PublishedFeedbackChanged, _SameHeadFeedbackChanged):
             self.state.record_health(
                 component="feedback-reporting",
                 status="pending",

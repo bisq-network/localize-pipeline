@@ -143,6 +143,10 @@ class GitHubAPIError(RuntimeError):
     """A redacted GitHub or token-helper failure."""
 
 
+class GitHubSnapshotChangedError(GitHubAPIError):
+    """The complete pull snapshot changed during its consistency check."""
+
+
 class GitHubAuthenticationError(GitHubAPIError):
     """GitHub authentication or authorization failed; further calls must stop."""
 
@@ -1248,6 +1252,18 @@ class GitHubReader:
             raise ValueError(
                 "exact open pull identity must contain a positive pull ID and number"
             )
+        for attempt in range(3):
+            try:
+                return self._collect_exact_open_pull_once(expected_pull)
+            except GitHubSnapshotChangedError:
+                if attempt == 2:
+                    raise
+        raise AssertionError("unreachable exact-pull retry state")
+
+    def _collect_exact_open_pull_once(
+        self, expected_pull: tuple[int, int],
+    ) -> PullRequestFeedbackSnapshot:
+        """Restart every identity and material read after a consistency race."""
         pull_id, pull_number = expected_pull
         repository_identity = self.repository_identity()
         pull = _parse_pull_request(
@@ -1938,7 +1954,7 @@ class GitHubReader:
         current, changed_files = collect_material()
         confirmed_feedback, confirmed_changed_files = collect_material()
         if confirmed_feedback != current or confirmed_changed_files != changed_files:
-            raise GitHubAPIError("GitHub pull request changed during hydration")
+            raise GitHubSnapshotChangedError("GitHub pull request changed during hydration")
 
         final_pull = _parse_pull_request(
             self.policy.repository,
@@ -1955,7 +1971,7 @@ class GitHubReader:
             label="pull-request updated_at",
         )
         if _pull_hydration_identity(final_pull) != _pull_hydration_identity(pull):
-            raise GitHubAPIError("GitHub pull request changed during hydration")
+            raise GitHubSnapshotChangedError("GitHub pull request changed during hydration")
 
         current_by_object = {revision.object_key: revision for revision in current}
         for object_key, old_revision in previous_by_object.items():

@@ -104,6 +104,73 @@ _INVARIANT_REASONS = {
     "remediation commit is not a direct child of exact base": "base_mismatch",
     "checkout HEAD no longer matches remediation commit": "head_mismatch",
 }
+_HYDRATION_CHANGED_MESSAGES = frozenset({
+    "GitHub pull request changed during hydration",
+    "GitHub pull-request changed files moved during hydration",
+    "GitHub open pull changed during path-authority hydration",
+    "GitHub open-pull listing changed during path hydration",
+    "GitHub repository identity changed during path hydration",
+})
+_INTAKE_BOUND_MESSAGES = frozenset({
+    "GitHub pull-request feedback exceeded the intake bound",
+    "GitHub pull-request feedback authority exceeded the intake bound",
+    "GitHub pull-request changed-file metadata exceeded the intake bound",
+})
+_HTTP_CAUSE_REASONS = frozenset({
+    "http_error", "rate_limited", "authentication_failed",
+})
+_TRANSPORT_CAUSES = {
+    "ConnectError": "connection_failed",
+    "ConnectTimeout": "timeout",
+    "ReadTimeout": "timeout",
+    "WriteTimeout": "timeout",
+    "PoolTimeout": "timeout",
+}
+
+
+def _safe_cause(error: BaseException) -> dict[str, object]:
+    """Classify an inner exception without persisting its untrusted text."""
+    module, name = type(error).__module__, type(error).__name__
+    result: dict[str, object] = {"exception": "Exception", "reason": "unclassified"}
+    if module == "localize.guardian.github":
+        if name == "GitHubSnapshotChangedError":
+            result.update(exception=name, reason="hydration_changed")
+        elif name == "GitHubAuthenticationError":
+            result.update(exception=name, reason="authentication_failed")
+        elif name == "GitHubAPIError":
+            message = str(error)
+            reason = (
+                "hydration_changed" if message in _HYDRATION_CHANGED_MESSAGES
+                else "intake_bounds" if message in _INTAKE_BOUND_MESSAGES
+                else "provider_error"
+            )
+            result.update(exception=name, reason=reason)
+    elif module == "httpx" and name in _TRANSPORT_CAUSES:
+        result.update(exception=name, reason=_TRANSPORT_CAUSES[name])
+    adapter = getattr(error, "guardian_failure", None)
+    if (
+        isinstance(adapter, AdapterFailure)
+        and module == "localize.guardian.github"
+        and name in {"GitHubAPIError", "GitHubAuthenticationError"}
+        and adapter.stage == "github-api"
+        and adapter.reason in _HTTP_CAUSE_REASONS
+    ):
+        result["reason"] = adapter.reason
+        if type(adapter.http_status) is int and 100 <= adapter.http_status <= 599:
+            result["http_status"] = adapter.http_status
+    return result
+
+
+def _safe_causes(error: BaseException) -> list[dict[str, object]]:
+    """Keep at most three distinct explicit causes, even for malformed cycles."""
+    causes = []
+    seen = {id(error)}
+    cause = error.__cause__
+    while isinstance(cause, BaseException) and id(cause) not in seen and len(causes) < 3:
+        seen.add(id(cause))
+        causes.append(_safe_cause(cause))
+        cause = cause.__cause__
+    return causes
 
 
 def git_failure(error, *, operation, returncode=None, output="", reason=None):
@@ -220,6 +287,9 @@ def record_failure(error, **context):
     cause = error.__cause__
     if isinstance(cause, OSError) and isinstance(cause.errno, int):
         details["os_errno"] = cause.errno
+    causes = _safe_causes(error)
+    if causes:
+        details["causes"] = causes
     for key, pattern in (
         ("repository", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
         ("run_id", r"[A-Za-z0-9-]+"),

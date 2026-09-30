@@ -636,12 +636,13 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
         auth_mode=CodexAuthMode.API_KEY,
         timeout_seconds=17,
     )
+    policy = replace(_prevention_policy(), max_changed_files=2, max_changed_bytes=32_768)
     result = author.run(
         workspace=workspace,
         scope="pipeline_code",
         summary="Preserve indexed placeholders in the validator",
         evidence_feedback_ids=("review_comment:42:revision-7",),
-        policy=_prevention_policy(),
+        policy=policy,
         api_key="explicit-model-key",
     )
 
@@ -662,6 +663,16 @@ def test_prevention_author_uses_workspace_write_stdin_and_scrubs_write_credentia
     assert kwargs["input"].startswith("You are preparing")
     assert "Preserve indexed placeholders" in kwargs["input"]
     assert "Preserve indexed placeholders" not in argv
+    instructions, request_json = kwargs["input"].split("UNTRUSTED_REQUEST_JSON\n", 1)
+    request = json.loads(request_json)
+    assert request["max_changed_files"] == 2
+    assert request["max_changed_bytes"] == 32_768
+    assert "full" in instructions and "before" in instructions and "after" in instructions
+    assert "not diff" in instructions
+    assert "unpatched base" in instructions
+    assert "fail by assertion" in instructions
+    assert "exit code 1" in instructions and "exit code 0" in instructions
+    assert "top-level imports of newly added helpers" in instructions
     assert kwargs["timeout"] == 17
     assert kwargs["limits"].require_linux_cgroup is True
     assert kwargs["limits"].max_file_size_bytes == 128 * 1024 * 1024

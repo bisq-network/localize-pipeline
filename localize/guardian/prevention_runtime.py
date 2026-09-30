@@ -162,6 +162,14 @@ Change only files matching the explicit code and test path allowlists. Do not ch
 project-specific localization config, glossaries, workflows, credentials, Git metadata,
 or generated artifacts. Do not commit, sign, push, open a pull request, or use network
 tools. The controller will independently reject extra paths and prove the regression.
+Stay within max_changed_files and max_changed_bytes in the request. The byte total
+counts the full larger before or after file size for each changed path, including
+new files, not diff bytes. Choose small allowed files for the fix and test.
+Regression test files are overlaid onto the unpatched base for proof. Write tests
+that collect there and fail by assertion on the reported bug (exit code 1).
+The same focused tests must pass with the patch (exit code 0). Exercise existing
+behavior; avoid top-level imports of newly added helpers or setup that works
+only after the fix. A collection or setup error is not regression proof.
 
 The controller also measures the candidate against real repository localization data:
 it runs the pipeline's translation quality gate on real target-repository files with
@@ -2018,6 +2026,8 @@ class PreventionCodexAuthor:
             "allowed_test_path_globs": policy.allowed_test_path_globs,
             "evidence_feedback_ids": tuple(evidence_feedback_ids),
             "focused_test_argv": policy.focused_test_argv,
+            "max_changed_bytes": policy.max_changed_bytes,
+            "max_changed_files": policy.max_changed_files,
             "scope": scope,
             "summary": summary,
         }
