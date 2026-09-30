@@ -120,10 +120,13 @@ _PROSE_WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
 def _is_prose(value: str) -> bool:
-    """Separate sentences and longer copy from short shared-language terms."""
+    """Include short UI phrases while leaving single shared-language terms alone."""
     text = strip_placeholder_tokens(value).strip()
     words = _PROSE_WORD.findall(text)
-    return len(words) >= 3 or (len(words) >= 2 and text.endswith((".", "!", "?")))
+    return len(words) >= 3 or (
+        len(words) == 2
+        and (words[1].islower() or text.endswith((".", "!", "?")))
+    )
 
 
 def is_expected_source_identical(

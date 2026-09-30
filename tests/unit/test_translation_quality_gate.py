@@ -118,6 +118,50 @@ def test_source_identical_gate_blocks_new_non_brand_values_and_honors_locale_all
     assert report["blocking"] is True
 
 
+def test_new_short_ui_copy_blocks_across_locales_without_flagging_shared_values(tmp_path):
+    input_folder = tmp_path / "resources"
+    _write_properties(input_folder / "mobile.properties", {
+        "mobile.action": "Open trades",
+        "mobile.brand": "Bisq",
+        "mobile.shared": "Internet",
+        "mobile.placeholder": "{0}",
+        "mobile.markup": "<br/>",
+        "mobile.token": "BTC",
+    })
+    diff_text = "".join(
+        f"diff --git a/resources/mobile_{locale}.properties b/resources/mobile_{locale}.properties\n"
+        f"+++ b/resources/mobile_{locale}.properties\n"
+        "+mobile.action=Open trades\n"
+        "+mobile.brand=Bisq\n"
+        "+mobile.shared=Internet\n"
+        "+mobile.placeholder={0}\n"
+        "+mobile.markup=<br/>\n"
+        "+mobile.token=BTC\n"
+        for locale in ("de", "es", "fr")
+    )
+    stats = analyze_source_identical_changes(
+        diff_text=diff_text,
+        repo_root=str(tmp_path),
+        input_folder=str(input_folder),
+        locale_codes=["de", "es", "fr"],
+        brand_glossary=["Bisq"],
+        source_identical_allowlist={"*": ["Internet"]},
+    )
+    report = build_quality_gate_report(
+        source_stats=stats,
+        semantic_stats=None,
+        validation_summary={"files": {}, "pipeline_warnings": []},
+        changed_files=[f"resources/mobile_{locale}.properties" for locale in ("de", "es", "fr")],
+        input_folder=str(input_folder),
+        config=QualityGateConfig(),
+    )
+
+    assert stats.new_source_identical_prose_count == 3
+    assert stats.unexpected_source_identical_count == 3
+    assert {example["key"] for example in stats.examples} == {"mobile.action"}
+    assert report["blocking"] is True
+
+
 def test_source_identical_gate_supports_json_locale_directory_layout(tmp_path):
     repo_root = tmp_path
     input_folder = repo_root / "locales"
