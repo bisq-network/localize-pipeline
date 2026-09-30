@@ -1334,6 +1334,7 @@ def _build_controller(
                 executable=config.runtime.codex_executable,
                 timeout_seconds=attempt_timeout,
                 max_attempts=config.limits.max_attempts,
+                max_new_real_data_findings=config.limits.max_new_real_data_findings,
                 **deadline_kwargs,
             ),
             test_runner=SandboxedTestRunner(
@@ -1345,6 +1346,8 @@ def _build_controller(
             signing_key=config.runtime.signing_key,
             signing_environment=None,
             max_drafts=config.limits.max_prevention_drafts_per_run,
+            max_drafts_per_day=config.limits.max_prevention_drafts_per_day,
+            max_new_real_data_findings=config.limits.max_new_real_data_findings,
             reservation_usd=config.limits.model_call_reservation_usd,
             daily_limit_usd=config.limits.daily_cost_limit_usd,
             max_model_calls_per_day=config.limits.max_model_calls_per_day,

@@ -10715,3 +10715,74 @@ def test_remediation_source_authority_rejects_more_than_one_hundred_pulls(
                 },
                 phase="validated",
             )
+
+
+def test_daily_prevention_publication_slots_are_durable_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "guardian.sqlite3"
+    morning = datetime(2026, 9, 29, 8, 0, tzinfo=UTC)
+    with GuardianState(database) as state:
+        assert state.prevention_publication_slots_for_day(morning.date()) == 0
+        assert state.try_reserve_prevention_publication_slot(
+            draft_key="draft-1",
+            daily_limit=1,
+            reserved_at=morning,
+        )
+        # Retrying the same in-flight candidate never consumes a second slot.
+        assert state.try_reserve_prevention_publication_slot(
+            draft_key="draft-1",
+            daily_limit=1,
+            reserved_at=morning + timedelta(hours=1),
+        )
+        assert not state.try_reserve_prevention_publication_slot(
+            draft_key="draft-2",
+            daily_limit=1,
+            reserved_at=morning + timedelta(hours=2),
+        )
+
+    # A crash after reservation leaves the slot committed for that UTC day.
+    with GuardianState(database) as state:
+        assert state.prevention_publication_slots_for_day(morning.date()) == 1
+        assert not state.try_reserve_prevention_publication_slot(
+            draft_key="draft-2",
+            daily_limit=1,
+            reserved_at=morning + timedelta(hours=15, minutes=59),
+        )
+        next_day = morning + timedelta(days=1)
+        assert state.try_reserve_prevention_publication_slot(
+            draft_key="draft-2",
+            daily_limit=1,
+            reserved_at=next_day,
+        )
+        # A candidate reserved yesterday is recovered without counting today.
+        assert state.try_reserve_prevention_publication_slot(
+            draft_key="draft-1",
+            daily_limit=1,
+            reserved_at=next_day,
+        )
+        assert state.prevention_publication_slots_for_day(next_day.date()) == 1
+
+
+@pytest.mark.parametrize("limit", (0, -1, True))
+def test_daily_prevention_publication_zero_or_invalid_limit_never_reserves(
+    tmp_path: Path,
+    limit: int,
+) -> None:
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        if limit == 0 and limit is not True:
+            assert not state.try_reserve_prevention_publication_slot(
+                draft_key="draft-1",
+                daily_limit=limit,
+                reserved_at=datetime(2026, 9, 29, 8, 0, tzinfo=UTC),
+            )
+        else:
+            with pytest.raises(ValueError):
+                state.try_reserve_prevention_publication_slot(
+                    draft_key="draft-1",
+                    daily_limit=limit,
+                    reserved_at=datetime(2026, 9, 29, 8, 0, tzinfo=UTC),
+                )
+        assert (
+            state.prevention_publication_slots_for_day(date(2026, 9, 29)) == 0
+        )

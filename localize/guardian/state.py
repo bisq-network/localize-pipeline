@@ -1929,6 +1929,12 @@ class GuardianState:
                 FOREIGN KEY (run_id) REFERENCES runs(run_id)
             );
 
+            CREATE TABLE IF NOT EXISTS prevention_publication_slots (
+                slot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                draft_key TEXT NOT NULL UNIQUE CHECK (length(draft_key) > 0),
+                reserved_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS prevention_candidate_attestations (
                 draft_key TEXT PRIMARY KEY,
                 attestation_version INTEGER NOT NULL CHECK (
@@ -2537,6 +2543,8 @@ class GuardianState:
                 ON budget_reservations(reserved_at, status);
             CREATE INDEX IF NOT EXISTS model_call_reservations_reserved_at
                 ON model_call_reservations(reserved_at, status);
+            CREATE INDEX IF NOT EXISTS prevention_publication_slots_reserved_at
+                ON prevention_publication_slots(reserved_at);
             CREATE INDEX IF NOT EXISTS assessment_results_created_at
                 ON assessment_results(created_at);
             CREATE INDEX IF NOT EXISTS health_component_checked
@@ -9227,6 +9235,81 @@ class GuardianState:
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"Unknown or finalized model call {call_id}.")
+
+    def try_reserve_prevention_publication_slot(
+        self,
+        *,
+        draft_key: str,
+        daily_limit: int,
+        reserved_at: datetime | None = None,
+    ) -> bool:
+        """Durably charge one UTC-day prevention publication before a remote write.
+
+        A slot is never refunded: once reserved, the following push or pull
+        request creation may have succeeded even if its response is lost. The
+        same candidate may retry or be recovered under its existing slot.
+        """
+
+        if isinstance(daily_limit, bool) or not isinstance(daily_limit, int):
+            raise ValueError("Daily prevention publication limit must be an integer.")
+        if daily_limit < 0:
+            raise ValueError("Daily prevention publication limit must not be negative.")
+        if not isinstance(draft_key, str) or not draft_key or "\x00" in draft_key:
+            raise ValueError("Prevention draft key must be a non-empty string.")
+        if daily_limit == 0:
+            return False
+        timestamp = reserved_at or _now()
+        start = datetime.combine(
+            timestamp.astimezone(_UTC).date(), time.min, tzinfo=_UTC
+        )
+        end = start + timedelta(days=1)
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                "SELECT 1 FROM prevention_publication_slots WHERE draft_key = ?",
+                (draft_key,),
+            ).fetchone()
+            if existing is not None:
+                self._connection.commit()
+                return True
+            row = self._connection.execute(
+                """
+                SELECT COUNT(*) AS reserved
+                FROM prevention_publication_slots
+                WHERE reserved_at >= ? AND reserved_at < ?
+                """,
+                (_serialize_datetime(start), _serialize_datetime(end)),
+            ).fetchone()
+            if int(row["reserved"]) >= daily_limit:
+                self._connection.rollback()
+                return False
+            self._connection.execute(
+                """
+                INSERT INTO prevention_publication_slots (draft_key, reserved_at)
+                VALUES (?, ?)
+                """,
+                (draft_key, _serialize_datetime(timestamp)),
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+        return True
+
+    def prevention_publication_slots_for_day(self, day: date) -> int:
+        """Return prevention publication slots reserved during one UTC day."""
+
+        start = datetime.combine(day, time.min, tzinfo=_UTC)
+        end = start + timedelta(days=1)
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*) AS reserved
+            FROM prevention_publication_slots
+            WHERE reserved_at >= ? AND reserved_at < ?
+            """,
+            (_serialize_datetime(start), _serialize_datetime(end)),
+        ).fetchone()
+        return int(row["reserved"])
 
     def model_calls_committed_for_day(self, day: date) -> int:
         """Return completed, ambiguous, and in-flight calls for one UTC day."""

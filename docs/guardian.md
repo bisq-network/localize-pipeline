@@ -876,6 +876,27 @@ policy.
 The parent Guardian process must be allowed to create those local canaries; a
 host policy that blocks their creation also fails prevention closed.
 
+A regression proof only shows that the new rule fires on its own fixture. Before
+publication, the controller therefore also measures the candidate on real data.
+It copies the real target localization files of the source pull request (the
+exact head checkout used for assessment, the trusted base source files, the
+operator pipeline profile, and a controller-computed base-to-head diff) into two
+fresh snapshots of the prevention base: one with base code and one with the
+candidate. Inside the same sandbox wrapper, probe, and timeout as the focused
+tests, the Guardian's own Python runs each tree's
+`localize.translation_quality_gate` entry point on that data. Closed-PR
+prevention measures the current base's real files for the same paths without a
+diff. The candidate is rejected when it raises semantic plus source-identical
+findings by more than `limits.max_new_real_data_findings` (default 5), with or
+without a new blocking reason. A narrow rule that adds a blocking reason with at
+most that many new findings, such as one that catches the reported defect,
+passes, as do fewer or unchanged findings. A missing corpus, gate error, malformed report, or timeout also rejects
+the candidate. Rejections are recorded like failed regression proofs in the
+private failure ledger (stage `real-data-impact`, a reason code, and base and
+candidate finding counts) and never publish a branch. The sandbox policy must
+therefore also permit the Guardian's Python and its installed dependencies.
+The author prompt states this bound, so narrow rules are preferred.
+
 Exact Git checkouts do not contain ignored project virtual environments. Every
 `focused_test_argv` should therefore start with an operator-controlled absolute
 interpreter or test executable outside the repository. The sandbox policy must
@@ -892,10 +913,17 @@ defaults cap prevention at one draft publication workflow across the entire
 poll, shared by all repositories and feedback runs. Despite the configuration
 key's `max_prevention_drafts_per_run` name, the counter is not reset per feedback
 run.
+`limits.max_prevention_drafts_per_day` (default 1) adds a durable UTC-day cap,
+so frequent polling cannot open several prevention pull requests per day. The
+same boundary records a slot for the candidate in the local ledger before its
+push or POST. Slots are never refunded: an interrupted or ambiguous publication
+still counts for that day, while recovery of that same candidate reuses its
+slot. When the day's slots are used, new candidates defer before any model call.
 The report-only example pins the cap to zero. `propose-prevention` always requires
 an explicit `prevention` block for every monitored repository. A zero cap is a
-prevention-publication kill switch: recurrence candidates are skipped, although
-that mode still retains the translation-write authority described above.
+prevention-publication kill switch, per run or per day: recurrence candidates are
+skipped, although that mode still retains the translation-write authority
+described above.
 
 The prevention target may be a different repository from the monitored
 translation project. The prevention block pins target and push repositories by
@@ -1004,11 +1032,11 @@ max_model_calls_per_day >= max_attempts
 
 When `propose-prevention` has a positive draft cap, the cap must leave capacity
 for an assessment plus every allowed prevention authoring draft, at every
-allowed attempt:
+allowed attempt. Here `drafts_per_poll` is the smaller of
+`max_prevention_drafts_per_run` and `max_prevention_drafts_per_day`:
 
 ```text
-max_model_calls_per_day >= max_attempts *
-                          (1 + max_prevention_drafts_per_run)
+max_model_calls_per_day >= max_attempts * (1 + drafts_per_poll)
 ```
 
 This is a configuration-coherence minimum, not reserved capacity for the whole
@@ -1031,7 +1059,7 @@ retry shape:
 ```text
 daily_cost_limit_usd >= model_call_reservation_usd *
                         max_attempts *
-                        (1 + max_prevention_drafts_per_run)
+                        (1 + drafts_per_poll)
 ```
 
 For example, one draft, two attempts, and a `$5` reservation require a daily API

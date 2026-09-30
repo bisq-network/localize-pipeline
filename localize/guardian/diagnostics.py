@@ -37,6 +37,34 @@ def regression_proof_failure(error, *, base_outcome, patched_outcome, base_code,
     return error
 
 
+@dataclass(frozen=True)
+class RealDataImpactFailure:
+    reason: str
+    base_findings: int | None
+    candidate_findings: int | None
+    new_blocking_reasons: int
+
+
+_REAL_DATA_IMPACT_REASONS = frozenset(
+    {
+        "real_data_unavailable",
+        "impact_run_failed",
+        "new_blocking_reasons",
+        "findings_increase",
+    }
+)
+
+
+def real_data_impact_failure(
+    error, *, reason, base_findings, candidate_findings, new_blocking_reasons
+):
+    """Retain real-data impact counts before rejected candidate reports vanish."""
+    error.guardian_failure = RealDataImpactFailure(
+        reason, base_findings, candidate_findings, new_blocking_reasons,
+    )
+    return error
+
+
 _GIT_STAGES = {
     "commit": "sign",
     "verify-commit": "verify-signature",
@@ -232,6 +260,20 @@ def record_failure(error, **context):
             code = getattr(adapter, f"{phase}_exit_code")
             if type(code) is int and -255 <= code <= 255:
                 details[f"{phase}_exit_code"] = code
+    elif isinstance(adapter, RealDataImpactFailure):
+        details.update(
+            stage="real-data-impact",
+            operation="quality-gate",
+            reason=(
+                adapter.reason
+                if adapter.reason in _REAL_DATA_IMPACT_REASONS
+                else "unclassified"
+            ),
+        )
+        for key in ("base_findings", "candidate_findings", "new_blocking_reasons"):
+            count = getattr(adapter, key)
+            if type(count) is int and 0 <= count <= 10_000_000:
+                details[key] = count
     elif isinstance(adapter, AdapterFailure):
         details.update(
             stage=adapter.stage, operation=adapter.operation, reason=adapter.reason

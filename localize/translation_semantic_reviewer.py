@@ -108,6 +108,10 @@ def build_semantic_review_messages(
         "Do not infer or restore details, constraints, numbers, or behavior that are absent "
         "from source_value, even if they seem plausible from the key or product domain. "
         "A shorter or more generic target is correct when the source is equally generic. "
+        "For each change, compare who performs each action, what event triggers it, and "
+        "every condition or threshold attached to that event. Report an error if the target "
+        "omits or changes an action trigger, even when it preserves a numeric threshold. "
+        "Do not flag a paraphrase that preserves both the trigger and its conditions. "
         f"Keep suggested_value under {SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS} characters."
     )
     user_payload = {

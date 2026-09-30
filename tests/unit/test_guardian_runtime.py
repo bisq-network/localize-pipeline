@@ -1444,6 +1444,7 @@ def test_propose_mode_wires_credential_separated_prevention_coordinator(
         "executable": "/opt/bin/codex",
         "timeout_seconds": 120.0,
         "max_attempts": 2,
+        "max_new_real_data_findings": 5,
     }
     assert captured["test_runner"] == {"timeout_seconds": 120.0}
     coordinator_kwargs = captured["coordinator"]
@@ -1451,6 +1452,8 @@ def test_propose_mode_wires_credential_separated_prevention_coordinator(
     assert coordinator_kwargs["publish_credential_environment"] is git_environment
     assert coordinator_kwargs["signing_key"] == "A" * 40
     assert coordinator_kwargs["max_drafts"] == 1
+    assert coordinator_kwargs["max_drafts_per_day"] == 1
+    assert coordinator_kwargs["max_new_real_data_findings"] == 5
     assert coordinator_kwargs["max_model_calls_per_day"] == 2
     assert coordinator_kwargs["api_billed"] is True
     assert coordinator_kwargs["temporary_root"] == tmp_path

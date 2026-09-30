@@ -13,6 +13,7 @@ from localize.guardian.evidence import (
     EvidenceError, _localization_payload, _safe_relative_file, _yaml_mapping,
 )
 from localize.guardian.models import FeedbackEvent
+from localize.guardian.policy import _load_glossary
 from localize.guardian.quality_reports import (
     MARKER, build_report, deterministic_categories, finding, parse_report,
     render_report, value_digest,
@@ -57,6 +58,16 @@ are private events, never projections of arbitrary public text.
     ignored_patterns = compile_ignore_key_patterns(config.get("ignore_key_patterns"))
     if not scope.path_locales:
         raise EvidenceError("Evidence bundle requires at least one changed target locale file.")
+    glossary_relative = str(config.get("glossary_file_path", "glossary.json"))
+    glossary_path = scope.config_path.parent / glossary_relative
+    if "glossary_file_path" in config or glossary_path.exists() or glossary_path.is_symlink():
+        _safe_relative_file(
+            glossary_relative, repo_root=scope.config_path.parent,
+            max_bytes=MAX_PRIVATE_EVIDENCE_BYTES,
+        )
+    glossary = _load_glossary(
+        config, config_path=scope.config_path, trusted_root=scope.config_root,
+    )
     legacy_keys = set()
     for event in legacy_events:
         if event.body.startswith(MARKER):
@@ -92,6 +103,8 @@ are private events, never projections of arbitrary public text.
             categories = deterministic_categories(
                 key, source, target, config.get("brand_technical_glossary") or (),
             )
+            if glossary.get(locale, {}).get(source) == target:
+                categories = tuple(category for category in categories if category != "source_echo")
             if not categories:
                 continue
             report = build_report(

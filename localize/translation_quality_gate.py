@@ -38,6 +38,7 @@ from localize.localization_profiles import (
     LocalizationProfile,
     load_localization_profiles,
 )
+from localize.placeholder_rules import strip_placeholder_tokens
 from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
@@ -67,9 +68,13 @@ class QualityGateConfig:
     retained_source_word_allowlist: Dict[str, Tuple[str, ...]] = field(
         default_factory=dict
     )
+    source_identical_allowlist: Dict[str, Tuple[str, ...]] = field(
+        default_factory=dict
+    )
     ignore_key_patterns: List[Pattern[str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize gate policy, including reviewed source-value exemptions."""
         return {
             "source_identical_min_block_count": self.source_identical_min_block_count,
             "source_identical_max_count": self.source_identical_max_count,
@@ -79,6 +84,7 @@ class QualityGateConfig:
             "block_on_semantic_qa_warnings": self.block_on_semantic_qa_warnings,
             "semantic_qa_audit_scope": self.semantic_qa_audit_scope,
             "retained_source_word_allowlist": self.retained_source_word_allowlist,
+            "source_identical_allowlist": self.source_identical_allowlist,
             "ignore_key_patterns": [
                 pattern.pattern for pattern in self.ignore_key_patterns
             ],
@@ -93,6 +99,7 @@ class SourceIdenticalStats:
     expected_source_identical_count: int = 0
     unexpected_source_identical_count: int = 0
     localized_to_source_regression_count: int = 0
+    new_source_identical_prose_count: int = 0
     unexpected_source_identical_ratio: float = 0.0
     control_character_findings_count: int = 0
     examples: List[Dict[str, str]] = field(default_factory=list)
@@ -109,12 +116,24 @@ _TOKEN_PATTERNS = [
     re.compile(r"^[A-Z0-9_.:+/#-]{2,}$"),
 ]
 _ENUM_LIKE_KEY = re.compile(r"^[A-Z0-9_.$-]+$")
+_PROSE_WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _is_prose(value: str) -> bool:
+    """Separate sentences and longer copy from short shared-language terms."""
+    text = strip_placeholder_tokens(value).strip()
+    words = _PROSE_WORD.findall(text)
+    return len(words) >= 3 or (len(words) >= 2 and text.endswith((".", "!", "?")))
 
 
 def is_expected_source_identical(
-    key: str, value: str, brand_glossary: Iterable[str]
+    key: str,
+    value: str,
+    brand_glossary: Iterable[str],
+    locale_code: str = "",
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> bool:
-    """Return true for values that are commonly and legitimately untranslated."""
+    """Recognize shared values and exact locale/global exemptions, ignoring case."""
     normalized = normalize_value(value)
     if not normalized:
         return True
@@ -122,6 +141,17 @@ def is_expected_source_identical(
         return True
     glossary = {term.strip().casefold() for term in brand_glossary if str(term).strip()}
     if normalized.casefold() in glossary:
+        return True
+    allowlist = normalize_retained_source_word_allowlist(
+        source_identical_allowlist or {}
+    )
+    allowed_values = {
+        normalize_value(term).casefold()
+        for term in (*allowlist.get("*", ()), *allowlist.get(locale_code, ()))
+    }
+    if normalized.casefold() in allowed_values:
+        return True
+    if not strip_placeholder_tokens(normalized).strip():
         return True
     if not any(character.isalpha() for character in normalized):
         return True
@@ -138,6 +168,7 @@ def analyze_source_identical_changes(
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
     ignore_key_patterns: Sequence[Pattern[str] | str] = (),
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
     changes = iter_translation_changes_from_diff(
@@ -154,6 +185,7 @@ def analyze_source_identical_changes(
         brand_glossary=brand_glossary,
         examples_limit=examples_limit,
         ignore_key_patterns=_ensure_ignore_key_patterns(ignore_key_patterns),
+        source_identical_allowlist=source_identical_allowlist,
     )
 
 
@@ -178,7 +210,9 @@ def _analyze_source_identical_translation_changes(
     brand_glossary: Iterable[str],
     examples_limit: int,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
+    """Classify changes without exempting unrelated locales or partial phrases."""
     stats = SourceIdenticalStats()
 
     for change in _filter_ignored_changes(changes, ignore_key_patterns):
@@ -205,12 +239,20 @@ def _analyze_source_identical_translation_changes(
             continue
 
         stats.source_identical_count += 1
-        if is_expected_source_identical(change.key, source_value, brand_glossary):
+        if is_expected_source_identical(
+            change.key,
+            source_value,
+            brand_glossary,
+            change.locale_code,
+            source_identical_allowlist,
+        ):
             stats.expected_source_identical_count += 1
             continue
 
         stats.checked_entries_count += 1
         stats.unexpected_source_identical_count += 1
+        if not normalize_value(change.old_value or "") and _is_prose(source_value):
+            stats.new_source_identical_prose_count += 1
         if (
             change.old_value is not None
             and normalize_value(change.old_value)
@@ -290,6 +332,7 @@ def analyze_source_identical_changes_for_profiles(
     localization_profiles: Sequence[LocalizationProfile],
     examples_limit: int = 10,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
+    source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> SourceIdenticalStats:
     """Analyze suspicious source-identical changes across configured profiles."""
     return _analyze_source_identical_translation_changes(
@@ -305,6 +348,7 @@ def analyze_source_identical_changes_for_profiles(
         brand_glossary=brand_glossary,
         examples_limit=examples_limit,
         ignore_key_patterns=ignore_key_patterns,
+        source_identical_allowlist=source_identical_allowlist,
     )
 
 
@@ -405,6 +449,7 @@ def analyze_all_translation_entries_for_profiles(
 def load_quality_gate_config(
     config_path: str,
 ) -> Tuple[QualityGateConfig, List[str], List[str], List[SemanticRule]]:
+    """Load gate thresholds, locale-scoped exemptions and semantic rules."""
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
 
@@ -447,6 +492,9 @@ def load_quality_gate_config(
             semantic_qa_audit_scope=semantic_qa_audit_scope,
             retained_source_word_allowlist=normalize_retained_source_word_allowlist(
                 quality_gate.get("retained_source_word_allowlist", {})
+            ),
+            source_identical_allowlist=normalize_retained_source_word_allowlist(
+                quality_gate.get("source_identical_allowlist", {})
             ),
             ignore_key_patterns=compile_ignore_key_patterns(
                 raw_config.get("ignore_key_patterns", [])
@@ -706,11 +754,14 @@ def build_quality_gate_report(
         "remediated_ai_findings_count": remediated_ai_findings_count,
     }
 
-    # Never tolerate destruction of an existing localized value. Thresholds
-    # still govern new source-identical entries; do not silently ignore config.
+    # Never tolerate destruction of an existing localized value.
     if source_stats.localized_to_source_regression_count:
         blocking_reasons.append(
             "Existing localized values were replaced by unexpected source-identical text."
+        )
+    if source_stats.new_source_identical_prose_count:
+        blocking_reasons.append(
+            "New translations contain unexpected source-identical prose."
         )
     source_identical_blocking = (
         source_stats.unexpected_source_identical_count
@@ -1029,6 +1080,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Check staged translations using configured policy and write review reports."""
     args = _parse_args(argv)
     config, locale_codes, brand_glossary, semantic_rules = load_quality_gate_config(
         args.config
@@ -1043,6 +1095,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         brand_glossary=brand_glossary,
         localization_profiles=localization_profiles,
         ignore_key_patterns=config.ignore_key_patterns,
+        source_identical_allowlist=config.source_identical_allowlist,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
