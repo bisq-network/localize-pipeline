@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
   "aiolimiter",
   "aisuite==0.1.14",
+  "anyio>=4.14.2",
   "httpx",
   "jsonschema",
   "openai",
@@ -30,6 +31,7 @@ dependencies = [
   "requests",
   "tiktoken",
   "tqdm",
+  "urllib3>=2.8.0",
 ]
 
 [project.scripts]

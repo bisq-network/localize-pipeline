@@ -6,6 +6,7 @@ import unicodedata
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
 
 from localize.semantic_quality import (
     TranslationChange,
@@ -65,6 +66,29 @@ def test_runtime_requirements_are_hash_pinned():
     assert "--generate-hashes" in requirements_txt
     assert "--hash=sha256:" in requirements_txt
     assert not re.search(r"^[A-Za-z0-9_.-]+==[^\s\\]+$", requirements_txt, flags=re.MULTILINE)
+
+
+@pytest.mark.parametrize("name,vulnerable,fixed", [
+    ("anyio", ("4.10.0", "4.14.1"), "4.14.2"),
+    ("urllib3", ("2.6.0", "2.7.0"), "2.8.0"),
+])
+def test_dependency_security_floors_cover_package_and_locks(name, vulnerable, fixed):
+    """Both package installs and locked deployments must reject affected versions."""
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    declarations = [project["project"]["dependencies"]]
+    for filename in ("requirements.in", "requirements.txt", "requirements-dev.txt"):
+        declarations.append([
+            line.split("\\", 1)[0].strip()
+            for line in (PROJECT_ROOT / filename).read_text().splitlines()
+            if re.match(r"^[A-Za-z0-9_.-]+[<>=!~]", line)
+        ])
+    for requirements in declarations:
+        matches = [Requirement(value) for value in requirements
+                   if Requirement(value).name == name]
+        assert len(matches) == 1, f"Missing security floor for {name}"
+        specifier = matches[0].specifier
+        assert fixed in specifier
+        assert all(version not in specifier for version in vulnerable)
 
 
 def test_environment_variable_reference_covers_runtime_controls():
