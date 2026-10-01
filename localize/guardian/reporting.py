@@ -11,6 +11,71 @@ import json
 import re
 from collections import Counter
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from localize.guardian.models import FeedbackEvent
+
+
+def quiet_clean_review(event: FeedbackEvent, details: Mapping[str, object]) -> bool:
+    """Keep an assessed, clean CodeRabbit summary in the private audit only.
+
+    This is a publication filter, never an intake or assessment shortcut. A
+    recognized clean-review sentence alone cannot hide decisions or findings.
+    Unknown formats and summaries with additional findings remain reportable.
+    """
+    if (
+        event.kind != "issue_comment"
+        or event.author.casefold() != "coderabbitai[bot]"
+        or event.author_type != "Bot"
+        or details.get("verdict") != "reject"
+        or details.get("outcome") != "not_applicable"
+        or details.get("report_outcome", "not_applicable") != "not_applicable"
+        or details.get("report_reason") != "not_applicable"
+        or any(details.get(key) for key in (
+            "decision_required", "changed_keys", "commit_sha",
+            "held_value_edits", "deferred_value_edits",
+        ))
+    ):
+        return False
+    # Private prevention candidates can derive from the review's description
+    # of already-corrected strings. They do not turn it into a new suggestion.
+    body = event.body
+    prefix = "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->"
+    start, end = "<!-- recent_review_start -->", "<!-- recent_review_end -->"
+    if (
+        not body.startswith(prefix)
+        or body.count(start) != 1 or body.count(end) != 1
+        or body.index(start) >= body.index(end)
+    ):
+        return False
+    # Recognize the known wrapper, not arbitrary text quoting a clean verdict.
+    # New CodeRabbit sections remain visible until their format is supported.
+    section = re.compile(
+        r"<!-- (?P<name>review_stack_entry|recent_review|walkthrough|final_review_risk|"
+        r"architecture_review|pre_merge_checks_walkthrough|finishing_touch_checkbox|tips)_start -->"
+        r".*?<!-- (?P=name)_end -->|<!-- autopilot:start -->.*?<!-- autopilot:end -->",
+        re.DOTALL,
+    )
+    remaining = body[len(prefix):].strip()
+    seen = set()
+    while remaining:
+        match = section.match(remaining)
+        if match is None or match.group("name") in seen:
+            return False
+        seen.add(match.group("name"))
+        remaining = remaining[match.end():].strip()
+    recent = body.split(start, 1)[1].split(end, 1)[0].strip()
+    if not re.match(
+        r"No actionable comments were generated in the recent review\.(?: 🎉)?(?:\n\n|$)",
+        recent,
+    ):
+        return False
+    return not re.search(
+        r"nitpick|outside[ -]diff|additional (?:review )?comments|"
+        r"actionable comments posted|```suggestion|potential issue|⚠|❌",
+        body, re.IGNORECASE,
+    )
 
 REASONS = {
     "processing_failure": "Processing did not complete. Work remains deferred under the configured retry, quota, and authority limits.",
