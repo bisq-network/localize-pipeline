@@ -10286,6 +10286,7 @@ def test_historical_prevention_measures_current_base_real_data(
 def test_clean_review_reporting_does_not_recreate_noop_comments(
     tmp_path: Path, runtime, history: str, real_feedback: bool
 ) -> None:
+    """Suppress clean-review retries without losing real feedback or audit rows."""
     from tests.unit.test_guardian_reporting import (
         CLEAN_CODERABBIT_SUMMARY, _clean_review_details,
     )

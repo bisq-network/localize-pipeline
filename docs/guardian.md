@@ -153,6 +153,11 @@ retain normal reporting. Previously delivered
 clean-only summaries are not recreated after operator cleanup; withdrawal notices
 for other feedback remain enabled.
 
+An interrupted older write can leave a public comment whose delivery was never
+confirmed locally. Quiet-report retirement preserves that attempt's payload for
+audit but does not remove the remote comment; operators must inspect and clean
+up any such old comments separately.
+
 Public reasons are fixed templates selected by schema-validated codes, not raw
 model rationale, configuration paths, credentials, or replacement text. An
 alternative selected to respect the glossary still requires a terminology

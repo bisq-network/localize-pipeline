@@ -88,6 +88,7 @@ The translation now follows the glossary.
 
 
 def _clean_review_event(**overrides):
+    """Build an admitted CodeRabbit summary with controllable feedback fields."""
     from localize.guardian.models import FeedbackEvent
 
     values = dict(
@@ -100,6 +101,7 @@ def _clean_review_event(**overrides):
 
 
 def _clean_review_details(**overrides):
+    """Build a completed no-op assessment with optional reporting variations."""
     return dict(
         outcome="not_applicable", verdict="reject", report_reason="not_applicable",
         decision_required=False, changed_keys=0, commit_sha=None,
@@ -109,6 +111,7 @@ def _clean_review_details(**overrides):
 
 @pytest.mark.parametrize("prevention", [{}, {"recurrence_candidates": 1, "prevention_pending": True}])
 def test_clean_coderabbit_review_is_quiet_only_after_noop_assessment(prevention):
+    """Keep clean reviews private while independent prevention work continues."""
     from localize.guardian.reporting import quiet_clean_review
 
     assert quiet_clean_review(_clean_review_event(), _clean_review_details(**prevention))
@@ -121,6 +124,7 @@ def test_clean_coderabbit_review_is_quiet_only_after_noop_assessment(prevention)
     {"held_value_edits": 1}, {"deferred_value_edits": 1},
 ])
 def test_clean_summary_cannot_silence_actionable_assessment(changes):
+    """Require public reporting for decisions, corrections, and incomplete work."""
     from localize.guardian.reporting import quiet_clean_review
 
     assert not quiet_clean_review(_clean_review_event(), _clean_review_details(**changes))
@@ -140,6 +144,7 @@ def test_clean_summary_cannot_silence_actionable_assessment(changes):
     {"body": CLEAN_CODERABBIT_SUMMARY.replace("<!-- walkthrough_start -->", "<!-- walkthrough_start -->\nOutside diff range comments: 1")},
 ])
 def test_mixed_or_unrecognized_review_still_gets_public_accountability(changes):
+    """Preserve reporting for real findings and unsupported summary formats."""
     from localize.guardian.reporting import quiet_clean_review
 
     assert not quiet_clean_review(_clean_review_event(**changes), _clean_review_details())
