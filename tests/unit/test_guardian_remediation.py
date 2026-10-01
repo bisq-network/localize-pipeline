@@ -3333,6 +3333,44 @@ def test_coordinator_batches_origins_into_one_signed_human_review_draft(
     }
 
 
+def test_publish_revalidates_evidence_with_exact_repository_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep target-locale authority available at each publication boundary."""
+    order: list[str] = []
+    base = _base_snapshot()
+    policy = _policy()
+    state = _StateSpy(order=order)
+    broker = _BrokerSpy(base, order=order)
+    workspace = _WorkspaceSpy(base, order=order)
+    validation_positions: list[int] = []
+
+    def validate_current_evidence(**kwargs: object) -> str:
+        assert kwargs.get("repository_policy") is policy
+        assert kwargs["replacements"] == _replacements()
+        validation_positions.append(len(order))
+        return _StateSpy.validate_current_historical_remediation_evidence(
+            state, **kwargs,
+        )
+
+    monkeypatch.setattr(f"{__name__}._policy", lambda: policy)
+    monkeypatch.setattr(
+        state,
+        "validate_current_historical_remediation_evidence",
+        validate_current_evidence,
+    )
+
+    outcome = _publish(_coordinator(state, broker), workspace, base)
+
+    assert len(outcome.drafts) == 1
+    commit = order.index("workspace:commit")
+    push = order.index("remote:branch-push")
+    post = order.index("remote:draft-post")
+    assert validation_positions[0] < commit
+    assert any(commit < position < push for position in validation_positions)
+    assert any(push < position < post for position in validation_positions)
+
+
 def test_new_overlap_at_branch_push_boundary_blocks_all_remote_writes() -> None:
     order: list[str] = []
     base = _base_snapshot()

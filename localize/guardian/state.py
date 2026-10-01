@@ -23,9 +23,12 @@ from localize.guardian.models import (
     GuardianMode,
     HistoricalCheckScope,
     ProposedReplacement,
+    RepositoryPolicy,
 )
 from localize.guardian.json_safety import loads_bounded_json
 from localize.guardian.prevention import TestCommandResult, TestOutcome
+from localize.guardian.path_globs import matches_any_path_glob
+from localize.guardian.quality_reports import MARKER as QUALITY_REPORT_MARKER
 
 
 _UTC = timezone.utc
@@ -8205,6 +8208,7 @@ class GuardianState:
         event_revision_ids: Sequence[int],
         feedback_urls: Sequence[str] | None = None,
         replacements: Sequence[ProposedReplacement] | None = None,
+        repository_policy: RepositoryPolicy | None = None,
     ) -> str:
         """Validate and hash exact assessed evidence before remediation work."""
 
@@ -8402,10 +8406,46 @@ class GuardianState:
                 raise ValueError("replacements must contain proposed replacements.")
             for proposal in proposals:
                 event = feedback_by_id.get(proposal.feedback_id)
-                if event is None or event["locale"] != proposal.locale:
+                if event is None:
                     raise ValueError(
                         "replacement feedback_id does not match exact event evidence."
                     )
+                if event["locale"] != proposal.locale:
+                    # A consolidated review may cover several locales. Its anchor
+                    # locale is not authority for those targets: recheck the exact
+                    # stored actor against the current target-locale policy.
+                    source, _ = source_by_pair[
+                        (str(event["repository"]), int(event["pr_number"]))
+                    ]
+                    body_prefix = self._connection.execute(
+                        "SELECT substr(body, 1, ?) FROM event_raw_bodies "
+                        "WHERE event_revision_id = ?",
+                        (len(QUALITY_REPORT_MARKER), int(event["revision_id"])),
+                    ).fetchone()
+                    if (
+                        not isinstance(repository_policy, RepositoryPolicy)
+                        or (repository_policy.base_repo, repository_policy.base_repo_id)
+                        != (source.repository, source.repository_id)
+                        or body_prefix is None
+                        or body_prefix[0] == QUALITY_REPORT_MARKER
+                        or not matches_any_path_glob(
+                            proposal.path, repository_policy.allowed_path_globs,
+                        )
+                    ):
+                        raise ValueError("replacement target lacks exact locale authority.")
+                    actors = (
+                        repository_policy.trusted_reviewer_by_id(
+                            proposal.locale, int(event["author_id"]),
+                        ),
+                        repository_policy.trusted_bot_by_id(
+                            proposal.locale, int(event["author_id"]),
+                        ),
+                    )
+                    if not any(
+                        actor is not None and actor.type == event["author_type"]
+                        for actor in actors
+                    ):
+                        raise ValueError("replacement target lacks exact locale authority.")
         return _historical_remediation_evidence_hash(
             pulls,
             normalized_urls,
@@ -8418,6 +8458,7 @@ class GuardianState:
         event_revision_ids: Sequence[int],
         feedback_urls: Sequence[str] | None = None,
         replacements: Sequence[ProposedReplacement] | None = None,
+        repository_policy: RepositoryPolicy | None = None,
     ) -> str:
         """Validate exact evidence is still current in the durable ledger."""
 
@@ -8428,6 +8469,7 @@ class GuardianState:
             event_revision_ids=revision_ids,
             feedback_urls=feedback_urls,
             replacements=replacements,
+            repository_policy=repository_policy,
         )
         revision_rows: list[sqlite3.Row] = []
         for offset in range(0, len(revision_ids), _SQLITE_IN_QUERY_CHUNK):

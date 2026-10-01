@@ -2338,6 +2338,7 @@ class RemediationCoordinator:
             event_revision_ids=revision_ids,
             feedback_urls=urls,
             replacements=proposals,
+            repository_policy=policy,
         )
         if evidence_hash != _evidence_hash(pulls, urls):
             raise RemediationRuntimeError(
@@ -2354,6 +2355,7 @@ class RemediationCoordinator:
                 event_revision_ids=revision_ids,
                 feedback_urls=urls,
                 replacements=proposals,
+                repository_policy=policy,
             )
             if current_hash != evidence_hash:
                 raise RemediationRuntimeError(
