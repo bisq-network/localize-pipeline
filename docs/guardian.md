@@ -145,6 +145,14 @@ distinguish validated corrections, alternatives, already-addressed findings,
 inapplicable suggestions, deferred work, and maintainer decisions. Applied
 corrections link to the recorded commit. Threads are never automatically resolved.
 
+Clean CodeRabbit summaries remain in the private assessment audit without public
+replies when the assessment confirms no applicable correction or maintainer
+decision. Private prevention analysis continues independently. Unknown summary
+formats and summaries containing nitpick, outside-diff, or actionable findings
+retain normal reporting. Previously delivered
+clean-only summaries are not recreated after operator cleanup; withdrawal notices
+for other feedback remain enabled.
+
 Public reasons are fixed templates selected by schema-validated codes, not raw
 model rationale, configuration paths, credentials, or replacement text. An
 alternative selected to respect the glossary still requires a terminology

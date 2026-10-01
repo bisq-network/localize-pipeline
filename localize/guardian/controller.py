@@ -49,7 +49,7 @@ from localize.guardian.codex import (
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.diagnostics import record_failure
-from localize.guardian.reporting import held_report_reason, report_body, report_disposition, report_key, summary_body
+from localize.guardian.reporting import held_report_reason, quiet_clean_review, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
 from localize.guardian.real_data_impact import (
     RealDataCorpus,
@@ -7383,6 +7383,8 @@ class GuardianController:
         head = published_head or snapshot.pull_request.head_sha
         broker = self.write_broker_factory(policy)
         reports = []
+        quiet_reports = []
+        quiet_feedback_ids = set()
         machine_reports = {}
         posted = 0
         revision_ids = tuple(
@@ -7482,6 +7484,16 @@ class GuardianController:
                     "pr_number": event.pr_number,
                     "feedback_id": event.feedback_id,
                 }
+                if quiet_clean_review(event, details):
+                    quiet_feedback_ids.add(event.feedback_id)
+                    delivery = self.state.feedback_report_delivery(key)
+                    if delivery is not None and delivery["status"] == "posted":
+                        result = json.loads(delivery["result_json"])
+                        quiet_reports.append({
+                            "url": result["url"], "disposition": "not_applicable",
+                            "decision_required": False,
+                        })
+                    continue
                 self.state.queue_feedback_report(key, payload)
                 delivery = self.state.feedback_report_delivery(key)
                 assert delivery is not None
@@ -7512,9 +7524,41 @@ class GuardianController:
                         "decision_required": bool(details.get("decision_required")),
                     }
                 )
-            if reports or self.state.feedback_summary_bodies(
+            if quiet_feedback_ids:
+                # Retire delivery retries, preserving the assessments and all
+                # prior publication acknowledgements as audit evidence.
+                self.state.supersede_unavailable_feedback_reports(
+                    policy.base_repo_id, snapshot.pull_request.number,
+                    tuple(event.feedback_id for event, _revision in current
+                          if not event.deleted and event.feedback_id not in quiet_feedback_ids),
+                )
+            previous = self.state.feedback_summary_bodies(
                 policy.base_repo_id, snapshot.pull_request.number
-            ):
+            )
+            quiet_previous_body = (
+                summary_body(
+                    sorted(quiet_reports, key=lambda item: item["url"])[:100],
+                    repository=policy.base_repo,
+                    pull_number=snapshot.pull_request.number,
+                    web_base_url=broker.web_base_url,
+                ) if quiet_reports else None
+            )
+            # Do not recreate deleted clean-review noise as an empty withdrawal
+            # notice. Only an exact reconstruction proves the old summary was
+            # entirely quiet; any other history retains withdrawal reporting.
+            previous_requires_withdrawal = any(
+                body != quiet_previous_body for body in previous
+            )
+            if not reports and previous and not previous_requires_withdrawal:
+                quiet_summary_key = report_key(
+                    repository_id=policy.base_repo_id,
+                    pull_number=snapshot.pull_request.number,
+                    feedback_id="summary", body=quiet_previous_body,
+                )
+                delivery = self.state.feedback_report_delivery(quiet_summary_key)
+                if delivery is not None and delivery["status"] == "pending":
+                    self.state.finish_feedback_report(quiet_summary_key, superseded=True)
+            if reports or previous_requires_withdrawal:
                 reports = sorted(
                     reports,
                     key=lambda item: (not item["decision_required"], item["url"]),
@@ -7530,9 +7574,6 @@ class GuardianController:
                     pull_number=snapshot.pull_request.number,
                     feedback_id="summary",
                     body=body,
-                )
-                previous = self.state.feedback_summary_bodies(
-                    policy.base_repo_id, snapshot.pull_request.number
                 )
                 self.state.queue_feedback_report(
                     key,

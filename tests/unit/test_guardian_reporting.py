@@ -68,3 +68,78 @@ def test_public_metadata_is_allowlisted(field, value):
 def test_untrusted_feedback_identifiers_cannot_escape_into_public_text(feedback_id):
     with pytest.raises(ValueError):
         report_body({}, repository="acme/app", feedback_id=feedback_id)
+
+
+CLEAN_CODERABBIT_SUMMARY = """<!-- This is an auto-generated comment: summarize by coderabbit.ai -->
+<!-- recent_review_start -->
+
+No actionable comments were generated in the recent review. 🎉
+
+<details><summary>ℹ️ Recent review info</summary>
+<details><summary>📒 Files selected for processing (1)</summary>
+* `l10n/messages_ru.properties`
+</details>
+</details>
+<!-- recent_review_end -->
+<!-- walkthrough_start -->
+The translation now follows the glossary.
+<!-- walkthrough_end -->
+"""
+
+
+def _clean_review_event(**overrides):
+    from localize.guardian.models import FeedbackEvent
+
+    values = dict(
+        repository="acme/app", pr_number=12, kind="issue_comment", event_id="44",
+        author="coderabbitai[bot]", author_id=999, author_type="Bot",
+        body=CLEAN_CODERABBIT_SUMMARY, head_sha="a" * 40, base_sha="b" * 40,
+        locale="ru",
+    )
+    return FeedbackEvent(**(values | overrides))
+
+
+def _clean_review_details(**overrides):
+    return dict(
+        outcome="not_applicable", verdict="reject", report_reason="not_applicable",
+        decision_required=False, changed_keys=0, commit_sha=None,
+        recurrence_candidates=0,
+    ) | overrides
+
+
+@pytest.mark.parametrize("prevention", [{}, {"recurrence_candidates": 1, "prevention_pending": True}])
+def test_clean_coderabbit_review_is_quiet_only_after_noop_assessment(prevention):
+    from localize.guardian.reporting import quiet_clean_review
+
+    assert quiet_clean_review(_clean_review_event(), _clean_review_details(**prevention))
+
+
+@pytest.mark.parametrize("changes", [
+    {"verdict": "needs_human"}, {"decision_required": True},
+    {"report_reason": "glossary_conflict"}, {"outcome": "already_addressed"},
+    {"report_outcome": "failed"}, {"changed_keys": 1}, {"commit_sha": "a" * 40},
+    {"held_value_edits": 1}, {"deferred_value_edits": 1},
+])
+def test_clean_summary_cannot_silence_actionable_assessment(changes):
+    from localize.guardian.reporting import quiet_clean_review
+
+    assert not quiet_clean_review(_clean_review_event(), _clean_review_details(**changes))
+
+
+@pytest.mark.parametrize("changes", [
+    {"author": "reviewer"}, {"author_type": "User"}, {"kind": "review_comment"},
+    {"body": "No actionable comments were generated in the recent review."},
+    {"body": CLEAN_CODERABBIT_SUMMARY.replace("recent_review_end", "missing_end")},
+    {"body": CLEAN_CODERABBIT_SUMMARY + "<!-- recent_review_start -->"},
+    {"body": CLEAN_CODERABBIT_SUMMARY + "<summary>🧹 Nitpick comments (1)</summary>Fix the wording."},
+    {"body": CLEAN_CODERABBIT_SUMMARY + "<summary>⚠️ Outside diff range comments (1)</summary>Fix the wording."},
+    {"body": CLEAN_CODERABBIT_SUMMARY + "**Actionable comments posted: 1**"},
+    {"body": CLEAN_CODERABBIT_SUMMARY + "```suggestion\nFix the wording.\n```"},
+    {"body": CLEAN_CODERABBIT_SUMMARY + "Please replace word X with word Y."},
+    {"body": CLEAN_CODERABBIT_SUMMARY.replace("<!-- walkthrough_start -->", "<!-- walkthrough_start -->\n<summary>🧹 Nitpick comments (1)</summary>")},
+    {"body": CLEAN_CODERABBIT_SUMMARY.replace("<!-- walkthrough_start -->", "<!-- walkthrough_start -->\nOutside diff range comments: 1")},
+])
+def test_mixed_or_unrecognized_review_still_gets_public_accountability(changes):
+    from localize.guardian.reporting import quiet_clean_review
+
+    assert not quiet_clean_review(_clean_review_event(**changes), _clean_review_details())

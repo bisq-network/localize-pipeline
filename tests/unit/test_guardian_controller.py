@@ -10279,3 +10279,108 @@ def test_historical_prevention_measures_current_base_real_data(
     assert len(prevention.propose_calls) == 1
     assert observed["target"] == (base / TARGET_PATH).read_text(encoding="utf-8")
     assert observed["diff"] == ""
+
+
+@pytest.mark.parametrize("history", ["none", "quiet", "quiet_pending", "held"])
+@pytest.mark.parametrize("real_feedback", [False, True])
+def test_clean_review_reporting_does_not_recreate_noop_comments(
+    tmp_path: Path, runtime, history: str, real_feedback: bool
+) -> None:
+    from tests.unit.test_guardian_reporting import (
+        CLEAN_CODERABBIT_SUMMARY, _clean_review_details,
+    )
+    from localize.guardian.reporting import report_body, report_key, summary_body
+
+    _base, _head, checkout, _provider, broker, _sequence = runtime
+    policy = replace(_policy(), trusted_bots={
+        "ru": (TrustedActor("coderabbitai[bot]", 999, "Bot"),),
+    })
+    feedback = replace(
+        _feedback(body=CLEAN_CODERABBIT_SUMMARY), kind=FeedbackKind.ISSUE_COMMENT,
+        author_login="coderabbitai[bot]", author_id=999, author_type="Bot",
+        path=None, line=None,
+    )
+    snapshot = _snapshot(feedback=(feedback, _feedback(source_id="45")) if real_feedback else (feedback,))
+    authorized = authorize_feedback(
+        policy=policy, snapshot=snapshot,
+        path_locales={TARGET_PATH: "ru"}, changed_locales=("ru",),
+    )
+    source = GuardianController._open_pull_authority_reference(
+        policy=policy, snapshot=snapshot, authorized=authorized,
+    )
+    # Match #1913: a clean review can still seed private prevention analysis.
+    details = _clean_review_details(report_policy_digest="policy",
+                                   recurrence_candidates=1, prevention_pending=True)
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        event = authorized.events[0]
+        revision = state.record_feedback_event(event, observed_at=NOW)
+        run_id = state.start_run(repository=policy.base_repo, locale="ru",
+                                 mode=GuardianMode.APPLY_OWNED_TRANSLATIONS, started_at=NOW)
+        state.record_action(run_id=run_id, event_revision_id=revision.revision_id,
+                            action="assess", status="completed", details=details, occurred_at=NOW)
+        current = [(event, revision)]
+        if real_feedback:
+            human = authorized.events[1]
+            human_revision = state.record_feedback_event(human, observed_at=NOW)
+            state.record_action(
+                run_id=run_id, event_revision_id=human_revision.revision_id,
+                action="assess", status="completed", occurred_at=NOW,
+                details=details | {"outcome": "needs_human", "verdict": "needs_human",
+                                   "report_reason": "glossary_conflict", "decision_required": True},
+            )
+            current.append((human, human_revision))
+        assert state.acquire_lease(
+            name="guardian:poll", owner="test-owner", ttl_seconds=60, now=NOW
+        )
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=replace(_config(GuardianMode.APPLY_OWNED_TRANSLATIONS), repositories=(policy,)),
+            checkout=checkout, provider=FakeSnapshotProvider((snapshot,)),
+            driver=FakeCodexDriver(), broker=broker,
+        )
+        if history != "none":
+            body = report_body(details, repository=policy.base_repo,
+                               feedback_id=event.feedback_id, pull_number=12)
+            key = report_key(repository_id=42, pull_number=12,
+                             feedback_id=event.feedback_id, body=body)
+            state.queue_feedback_report(key, {
+                "body": body, "repository_id": 42, "pr_number": 12,
+                "feedback_id": event.feedback_id,
+            })
+            url = "https://github.com/acme/widgets/pull/12#issuecomment-700"
+            state.finish_feedback_report(key, result={"url": url, "body": body})
+            prior_body = summary_body([{
+                "url": url, "disposition": "needs_human" if history == "held" else "not_applicable",
+                "decision_required": history == "held",
+            }], repository=policy.base_repo, pull_number=12)
+            summary_key = report_key(repository_id=42, pull_number=12,
+                                     feedback_id="summary", body=prior_body)
+            state.queue_feedback_report(summary_key, {
+                "summary": True, "body": prior_body, "repository_id": 42, "pr_number": 12,
+            })
+            if history != "quiet_pending":
+                state.finish_feedback_report(summary_key, result={
+                    "url": "https://github.com/acme/widgets/pull/12#issuecomment-701", "body": prior_body,
+                })
+
+        for _ in range(2):
+            controller._flush_feedback_reports(
+                policy=policy, snapshot=snapshot, current=current,
+                open_source=source, lease_owner="test-owner", policy_digest="policy",
+            )
+        assert len(broker.feedback_reports) == int(real_feedback)
+        if real_feedback:
+            assert "1 needs human" in broker.feedback_summary.body
+            assert "not applicable" not in broker.feedback_summary.body
+        elif history == "held":
+            assert "withdrawal does not approve" in broker.feedback_summary.body
+        else:
+            assert broker.feedback_summary is None
+        assert state.latest_feedback_report(revision.revision_id) == details
+        assert state.latest_health("feedback-reporting").status == "ok"
+        if history in {"quiet", "quiet_pending"}:
+            assert state.feedback_report_delivery(key)["status"] == "posted"
+            assert prior_body in state.feedback_summary_bodies(42, 12)
+        if history == "quiet_pending":
+            assert state.feedback_report_delivery(summary_key)["status"] == "superseded"
+            assert state.feedback_reporting_counts()[0] == 0
