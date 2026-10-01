@@ -12,3 +12,7 @@ python-slugify
 requests
 aiolimiter
 jsonschema
+
+# Security floors for transitive HTTP dependencies, including package installs.
+anyio>=4.14.2
+urllib3>=2.8.0
