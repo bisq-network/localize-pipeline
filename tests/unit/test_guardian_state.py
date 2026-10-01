@@ -6905,6 +6905,92 @@ def test_current_evidence_requires_the_latest_assessment_for_the_policy(
         )
 
 
+@pytest.mark.parametrize("case", [
+    "bot", "reviewer", "no_policy", "wrong_id", "wrong_type", "wrong_locale",
+    "wrong_repository", "wrong_repository_id", "outside_path", "machine_report",
+    "missing_feedback", "stale_feedback", "deleted_feedback",
+])
+def test_historical_cross_locale_evidence_requires_exact_target_authority(
+    tmp_path: Path, case: str,
+) -> None:
+    """A multi-file comment authorizes another locale only under exact policy."""
+    from localize.guardian.models import (
+        AllowedHeadRepository, RepositoryPolicy, TrustedActor,
+    )
+    from localize.guardian.quality_reports import MARKER
+
+    actor = TrustedActor("reviewer", 202, "Bot")
+    author = TrustedActor("translator", 7, "User")
+    policy = RepositoryPolicy(
+        base_repo="acme/widgets", base_repo_id=42, base_branch="main",
+        allowed_pr_authors=(author,), allowed_head_owners=(author,),
+        allowed_head_repositories=(AllowedHeadRepository("translator/widgets", 84),),
+        allowed_branch_globs=("translation-*",),
+        allowed_path_globs=("l10n/*.properties",),
+        pipeline_config_path="config.yaml", source_locale="en",
+        trusted_reviewers={"ru": (author,), "hi": (author,)},
+        trusted_bots={"ru": (actor,), "hi": (actor,)},
+    )
+    event = _event(pr_number=12)
+    if case == "reviewer":
+        actor = replace(actor, type="User")
+        event = replace(event, author_type="User")
+        policy = replace(policy, trusted_reviewers={"hi": (actor,)}, trusted_bots={})
+    elif case == "wrong_id":
+        policy = replace(policy, trusted_bots={"hi": (replace(actor, id=203),)})
+    elif case == "wrong_type":
+        policy = replace(policy, trusted_reviewers={"hi": (replace(actor, type="User"),)}, trusted_bots={})
+    elif case == "wrong_locale":
+        policy = replace(policy, trusted_bots={"ru": (actor,)})
+    elif case == "wrong_repository":
+        policy = replace(policy, base_repo="other/widgets")
+    elif case == "wrong_repository_id":
+        policy = replace(policy, base_repo_id=43)
+    elif case == "machine_report":
+        event = replace(event, body=MARKER + "{}")
+        policy = replace(policy, quality_report_actor=actor)
+    elif case == "no_policy":
+        policy = None
+    proposal = ProposedReplacement(
+        feedback_id=event.feedback_id, path="l10n/messages_hi.properties", key="hello",
+        locale="hi", expected_value="old", proposed_value="new", confidence=0.99,
+        evidence=("The comment covers Russian and Hindi files.",), source_value="Hello",
+    )
+    if case == "outside_path":
+        proposal = replace(proposal, path="outside/messages_hi.properties")
+    elif case == "missing_feedback":
+        proposal = replace(proposal, feedback_id="review_comment:missing")
+    source = HistoricalPullReference(
+        repository="acme/widgets", repository_id=42, pull_id=500, pr_number=12,
+        pull_revision_digest="1" * 64, authority_digest="4" * 64,
+        policy_digest="2" * 64, head_sha="a" * 40, base_sha="b" * 40,
+    )
+    with GuardianState(tmp_path / "guardian.sqlite3") as state:
+        revision = state.record_feedback_event(event)
+        state.record_historical_pull_completion(
+            repository=source.repository, repository_id=source.repository_id,
+            pull_id=source.pull_id, pr_number=source.pr_number,
+            pull_revision_digest=source.pull_revision_digest,
+            policy_digest=source.policy_digest, head_sha=source.head_sha,
+            base_sha=source.base_sha, event_revision_ids=(revision.revision_id,),
+            authority_scope=HistoricalCheckScope.ASSESSMENT,
+        )
+        if case in {"stale_feedback", "deleted_feedback"}:
+            state.record_feedback_event(replace(
+                event, body="Changed review", deleted=case == "deleted_feedback",
+                updated_at="2026-08-31T08:00:00Z",
+            ))
+        kwargs = dict(
+            source_pulls=(source,), event_revision_ids=(revision.revision_id,),
+            replacements=(proposal,), repository_policy=policy,
+        )
+        if case in {"bot", "reviewer"}:
+            assert state.validate_current_historical_remediation_evidence(**kwargs)
+        else:
+            with pytest.raises(ValueError):
+                state.validate_current_historical_remediation_evidence(**kwargs)
+
+
 def test_remediation_evidence_binds_stored_urls_and_replacement_feedback_ids(
     tmp_path: Path,
 ) -> None:
