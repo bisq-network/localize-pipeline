@@ -111,6 +111,12 @@ def build_semantic_review_messages(
         "For each change, compare who performs each action, what event triggers it, and "
         "every condition or threshold attached to that event. Report an error if the target "
         "omits or changes an action trigger, even when it preserves a numeric threshold. "
+        "Check the polarity of choices and conditions: a choice to proceed without a "
+        "mediator must not become a choice to proceed with one. Distinguish an offer "
+        "that was not taken from an offer that was rejected. When the source names an "
+        "operation that failed, such as synchronization, the target must retain that "
+        "operation instead of reporting only a generic failure. Report these meaning "
+        "changes as errors. "
         "Do not flag a paraphrase that preserves both the trigger and its conditions. "
         f"Keep suggested_value under {SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS} characters."
     )

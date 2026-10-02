@@ -64,6 +64,46 @@ def test_semantic_reviewer_prompt_is_json_only_and_context_rich():
     assert "suggested_value" in combined
 
 
+def test_semantic_reviewer_covers_reversed_choice_offer_outcome_and_sync_failure():
+    # Representative source/target pairs for three distinct meaning losses.
+    cases = (
+        (
+            "am", "Amharic", "Continue without a mediator.",
+            "ከአስታራቂ ጋር ይቀጥሉ።",
+        ),
+        ("ha", "Hausa", "The offer was not taken.", "An ƙi tayin."),
+        ("sw", "Swahili", "Synchronization failed.", "Imeshindwa."),
+    )
+    for locale, language, source, target in cases:
+        change = TranslationChange(
+            file=f"messages_{locale}.properties",
+            locale_code=locale,
+            key="status.message",
+            source_value=source,
+            old_value=None,
+            new_value=target,
+        )
+        messages = build_semantic_review_messages(language, [change], [], [])
+        system_prompt = messages[0]["content"]
+        payload = json.loads(messages[1]["content"])
+
+        assert (
+            "without a mediator must not become a choice to proceed with one"
+            in system_prompt
+        )
+        assert "not taken from an offer that was rejected" in system_prompt
+        assert "such as synchronization" in system_prompt
+        assert "reporting only a generic failure" in system_prompt
+        assert "Report these meaning changes as errors" in system_prompt
+        assert payload["target_language"] == language
+        assert payload["changes"] == [{
+            "file": change.file,
+            "key": change.key,
+            "source_value": source,
+            "new_target_value": target,
+        }]
+
+
 def test_normalize_review_response_accepts_only_in_scope_findings():
     response = json.dumps(
         {
