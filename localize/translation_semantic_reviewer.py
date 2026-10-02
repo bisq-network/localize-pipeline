@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -54,6 +55,7 @@ from localize.translation_quality_gate import (
 SEMANTIC_REVIEW_BATCH_SIZE = 50
 SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS = 1000
 _CORRUPT_SUMMARY_SENTINEL = "__corrupt_summary__"
+_COUNT_PLACEHOLDER = re.compile(r"\{\{0\}\}|\{0\}")
 
 
 class SemanticReviewResponseError(ValueError):
@@ -84,21 +86,46 @@ SEMANTIC_REVIEW_SCHEMA = {
 }
 
 
+def _count_renders(change: TranslationChange) -> List[Dict[str, Any]]:
+    """Show the reviewer the counts supported by this template variant."""
+    if not change.source_value or not _COUNT_PLACEHOLDER.search(change.source_value):
+        return []
+    if not _COUNT_PLACEHOLDER.search(change.new_value):
+        return []
+    if change.key.endswith((".1", ".one", ".single")):
+        counts = (1,)
+    elif change.key.endswith((".*", ".other", ".plural")):
+        counts = (2,)
+    else:
+        counts = (1, 2)
+    return [
+        {
+            "count": count,
+            "source": _COUNT_PLACEHOLDER.sub(str(count), change.source_value),
+            "target": _COUNT_PLACEHOLDER.sub(str(count), change.new_value),
+        }
+        for count in counts
+    ]
+
+
 def build_semantic_review_messages(
     target_language: str,
     changes: Sequence[TranslationChange],
     style_rules: Sequence[str],
     brand_glossary: Sequence[str],
 ) -> List[Dict[str, str]]:
-    scoped_changes = [
-        {
+    scoped_changes: List[Dict[str, Any]] = []
+    for change in changes:
+        item: Dict[str, Any] = {
             "file": change.file,
             "key": change.key,
             "source_value": change.source_value or "",
             "new_target_value": change.new_value,
         }
-        for change in changes
-    ]
+        renders = _count_renders(change)
+        if renders:
+            item["count_renders"] = renders
+        scoped_changes.append(item)
     system_prompt = (
         "You are an independent semantic QA reviewer for software localization. "
         "Review only the provided changed keys. Return JSON only. Do not return markdown, "
@@ -112,6 +139,12 @@ def build_semantic_review_messages(
         "every condition or threshold attached to that event. Report an error if the target "
         "omits or changes an action trigger, even when it preserves a numeric threshold. "
         "Do not flag a paraphrase that preserves both the trigger and its conditions. "
+        "For count messages, read count_renders as the user sees them and check "
+        "number agreement at one and two. A `.1`, `.one`, or `.single` variant "
+        "applies to one; a `.*`, `.other`, or `.plural` variant applies to two "
+        "and other non-one counts. "
+        "Report incorrect count grammar as an error. Accept identical forms when "
+        "the target language permits them and count-neutral wording when it is grammatical. "
         f"Keep suggested_value under {SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS} characters."
     )
     user_payload = {
