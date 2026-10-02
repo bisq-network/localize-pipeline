@@ -38,7 +38,7 @@ from localize.localization_profiles import (
     LocalizationProfile,
     load_localization_profiles,
 )
-from localize.placeholder_rules import strip_placeholder_tokens
+from localize.placeholder_rules import extract_placeholder_tokens, strip_placeholder_tokens
 from localize.semantic_quality import (
     SemanticFinding,
     SemanticQAStats,
@@ -51,7 +51,11 @@ from localize.semantic_quality import (
     normalize_value,
     normalize_retained_source_word_allowlist,
 )
-from localize.translation_validator import find_disallowed_control_characters
+from localize.translation_validator import (
+    check_placeholder_parity,
+    find_disallowed_control_characters,
+    find_glossary_mismatches,
+)
 
 
 @dataclass
@@ -400,6 +404,7 @@ def analyze_semantic_qa_changes_for_profiles(
     localization_profiles: Sequence[LocalizationProfile] = (),
     examples_limit: int = 10,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
+    translation_glossary: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> SemanticQAStats:
     """Scan changed translations across all configured format/layout profiles."""
     changes = _deduplicate_translation_changes(
@@ -411,12 +416,16 @@ def analyze_semantic_qa_changes_for_profiles(
             localization_profiles=localization_profiles,
         )
     )
-    return analyze_translation_changes(
-        changes=list(_filter_ignored_changes(changes, ignore_key_patterns)),
+    checked_changes = list(_filter_ignored_changes(changes, ignore_key_patterns))
+    stats = analyze_translation_changes(
+        changes=checked_changes,
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
         retained_source_word_allowlist=retained_source_word_allowlist,
         examples_limit=examples_limit,
+    )
+    return _add_exact_glossary_findings(
+        checked_changes, stats, translation_glossary or {}, examples_limit
     )
 
 
@@ -430,6 +439,7 @@ def analyze_all_translation_entries_for_profiles(
     localization_profiles: Sequence[LocalizationProfile] = (),
     examples_limit: int = 10,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
+    translation_glossary: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> SemanticQAStats:
     """Scan all translations across all configured format/layout profiles."""
     changes = _deduplicate_translation_changes(
@@ -440,13 +450,64 @@ def analyze_all_translation_entries_for_profiles(
             localization_profiles=localization_profiles,
         )
     )
-    return analyze_translation_changes(
-        changes=list(_filter_ignored_changes(changes, ignore_key_patterns)),
+    checked_changes = list(_filter_ignored_changes(changes, ignore_key_patterns))
+    stats = analyze_translation_changes(
+        changes=checked_changes,
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
         retained_source_word_allowlist=retained_source_word_allowlist,
         examples_limit=examples_limit,
     )
+    return _add_exact_glossary_findings(
+        checked_changes, stats, translation_glossary or {}, examples_limit
+    )
+
+
+def _add_exact_glossary_findings(
+    changes: Sequence[TranslationChange],
+    stats: SemanticQAStats,
+    glossary_by_locale: Mapping[str, Mapping[str, str]],
+    examples_limit: int,
+) -> SemanticQAStats:
+    """Report missing configured terms once per translated key."""
+    findings: List[SemanticFinding] = []
+    for change in changes:
+        source = change.source_value
+        target = change.new_value
+        glossary = glossary_by_locale.get(change.locale_code, {})
+        if (
+            not source or not target or not glossary
+            or normalize_value(source) == normalize_value(target)
+            or not check_placeholder_parity(source, target)
+        ):
+            continue
+        source_text, target_text = source, target
+        for token in extract_placeholder_tokens(source):
+            source_text = source_text.replace(token, " ")
+        for token in extract_placeholder_tokens(target):
+            target_text = target_text.replace(token, " ")
+        mismatches = find_glossary_mismatches(source_text, target_text, glossary)
+        if mismatches:
+            required = ", ".join(
+                f"{source_term!r}→{target_term!r}"
+                for source_term, target_term in mismatches
+            )
+            findings.append(SemanticFinding(
+                file=change.file,
+                key=change.key,
+                value=target,
+                reason=f"Missing exact glossary term(s): {required}.",
+                severity="error",
+                rule_id="exact-glossary",
+                source="glossary",
+            ))
+    stats.findings_count += len(findings)
+    stats.errors_count += len(findings)
+    stats.examples = sorted(
+        [*stats.examples, *(finding.to_example() for finding in findings)],
+        key=lambda example: (example["file"], example["key"], example["rule_id"]),
+    )[:examples_limit]
+    return stats
 
 
 def load_quality_gate_config(
@@ -534,6 +595,28 @@ def load_quality_gate_localization_profiles(
     with open(config_path, "r", encoding="utf-8") as file:
         raw_config = yaml.safe_load(file) or {}
     return load_localization_profiles(raw_config)
+
+
+def _load_exact_glossary(config_path: str) -> Dict[str, Dict[str, str]]:
+    with open(config_path, "r", encoding="utf-8") as file:
+        config = yaml.safe_load(file) or {}
+    if config.get("translation_glossary_enforcement", "exact") != "exact":
+        return {}
+    glossary_path = Path(config_path).parent / str(
+        config.get("glossary_file_path") or "glossary.json"
+    )
+    if not glossary_path.is_file():
+        return {}
+    with open(glossary_path, "r", encoding="utf-8") as file:
+        raw_glossary = json.load(file)
+    if not isinstance(raw_glossary, dict):
+        return {}
+    return {
+        locale: {source: target for source, target in terms.items()
+                 if isinstance(source, str) and isinstance(target, str)}
+        for locale, terms in raw_glossary.items()
+        if isinstance(locale, str) and isinstance(terms, dict)
+    }
 
 
 def load_validation_summary(path: str) -> Dict[str, Any]:
@@ -1089,6 +1172,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.config
     )
     localization_profiles = load_quality_gate_localization_profiles(args.config)
+    translation_glossary = _load_exact_glossary(args.config)
     diff_text = get_staged_diff(args.repo_root, args.changed_files)
     source_stats = analyze_source_identical_changes_for_profiles(
         diff_text=diff_text,
@@ -1111,6 +1195,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             retained_source_word_allowlist=config.retained_source_word_allowlist,
             localization_profiles=localization_profiles,
             ignore_key_patterns=config.ignore_key_patterns,
+            translation_glossary=translation_glossary,
         )
     else:
         semantic_stats = analyze_semantic_qa_changes_for_profiles(
@@ -1123,6 +1208,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             retained_source_word_allowlist=config.retained_source_word_allowlist,
             localization_profiles=localization_profiles,
             ignore_key_patterns=config.ignore_key_patterns,
+            translation_glossary=translation_glossary,
         )
     report = build_quality_gate_report(
         source_stats=source_stats,

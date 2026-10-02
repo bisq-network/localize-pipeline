@@ -1,3 +1,6 @@
+import json
+
+import localize.translation_quality_gate as quality_gate
 from localize.translation_validator import find_glossary_mismatches
 from localize.translate_localization_files import (
     _build_holistic_review_system_prompt,
@@ -175,3 +178,77 @@ def test_load_glossary_excludes_metadata_and_quarantine_namespaces(tmp_path):
     )
 
     assert load_glossary(str(glossary_path)) == {"de": {"entry": "Eintrag"}}
+
+
+def test_quality_gate_audits_exact_glossary_across_keys_and_placeholders(tmp_path, monkeypatch):
+    glossary = {"trade": "scambio"}
+    assert find_glossary_mismatches(
+        "Trade {0} failed", "La transazione {0} non è riuscita", glossary
+    ) == [("trade", "scambio")]
+
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "messages.properties").write_text(
+        "failed=Trade {0} failed\n"
+        "cancel=Cancel trade {1}\n"
+        "twice=Trade {2} and trade {3}\n"
+        "correct=Trade {4} completed\n"
+        "placeholder=Trade {scambio} failed\n"
+        "placeholder_source=Open {trade}\n"
+        "token=<b>{0}</b>\n"
+        "brand=Bisq\n"
+        "technical=Trade ID\n",
+        encoding="utf-8",
+    )
+    (resources / "messages_it.properties").write_text(
+        "failed=La transazione {0} non è riuscita\n"
+        "cancel=Annulla il commercio {1}\n"
+        "twice=Scambio {2} e transazione {3}\n"
+        "correct=Scambio {4} completato\n"
+        "placeholder=La transazione {scambio} non è riuscita\n"
+        "placeholder_source=Apri {trade}\n"
+        "token=<b>{0}</b>\n"
+        "brand=Bisq\n"
+        "technical=Trade ID\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "glossary.json").write_text(
+        json.dumps({"it": glossary}), encoding="utf-8"
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "supported_locales:\n  - code: it\n"
+        "glossary_file_path: glossary.json\n"
+        "translation_glossary_enforcement: exact\n"
+        "quality_gate:\n  semantic_qa_audit_scope: all\n",
+        encoding="utf-8",
+    )
+    report_path = tmp_path / "report.json"
+    args = [
+        "--repo-root", str(tmp_path),
+        "--input-folder", str(resources),
+        "--config", str(config),
+        "--validation-summary", str(tmp_path / "missing-summary.json"),
+        "--output-json", str(report_path),
+        "--output-markdown", str(tmp_path / "report.md"),
+        "--changed-files", "resources/messages_it.properties",
+    ]
+    monkeypatch.setattr(quality_gate, "get_staged_diff", lambda *_: "")
+
+    assert quality_gate.main(args) == 1
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["semantic_qa"]["errors_count"] == 4
+    assert {item["key"] for item in report["semantic_qa"]["examples"]} == {
+        "failed", "cancel", "twice", "placeholder"
+    }
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "translation_glossary_enforcement: exact",
+            "translation_glossary_enforcement: prompt-only",
+        ),
+        encoding="utf-8",
+    )
+    assert quality_gate.main(args) == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["semantic_qa"]["errors_count"] == 0
