@@ -33,6 +33,7 @@ def test_default_max_files_per_pr_stays_under_coderabbit_review_limit():
 
 
 def test_publish_translation_changes_runs_under_set_u(tmp_path):
+    """An empty validated batch remains safe with undefined-variable checking."""
     (tmp_path / "resources").mkdir()
     (tmp_path / "localize").symlink_to(REPO_ROOT / "localize", target_is_directory=True)
     (tmp_path / "logs").mkdir()
@@ -312,6 +313,7 @@ def test_config_file_is_normalized_before_late_quality_gate_call():
 
 
 def test_validation_summary_is_reset_before_translation_script_runs():
+    """A run must replace an invalid sentinel before publication can proceed."""
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     reset_index = script.index("translation_validation_summary.json")

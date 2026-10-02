@@ -323,6 +323,7 @@ class FileReporterConnector:
         validation_files: Dict[str, Dict[str, object]],
         skipped_files: Dict[str, List[str]],
     ) -> None:
+        """Record validated files and explicit skips for the publication gate."""
         self._write_json(
             summary_path,
             {

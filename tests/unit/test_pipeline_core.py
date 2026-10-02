@@ -177,6 +177,7 @@ def pipeline_options(**overrides) -> TranslationPipelineOptions:
 
 @pytest.mark.asyncio
 async def test_pipeline_stops_after_detection_when_no_files_changed(pipeline_paths):
+    """An empty run replaces stale skip evidence with an explicit empty list."""
     fake = FakePipelineSteps(changed_files=[])
 
     result = await run_translation_pipeline(
