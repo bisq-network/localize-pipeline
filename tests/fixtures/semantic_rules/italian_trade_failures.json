@@ -1,0 +1,44 @@
+{
+  "provenance": "https://github.com/bisq-network/bisq-mobile/pull/1913",
+  "original_revision": "1f3539de70815bf2da48606f42f28e69d6406ec4",
+  "corrected_revision": "362e05c99222cfc0c4048d928b0c1a7e85e28344",
+  "note": "Source is unchanged by the PR. Original targets are from its parent; corrected targets and valid verb controls are from its head.",
+  "failures": [
+    {
+      "key": "bisqEasy.openTrades.failed",
+      "source": "The trade failed: ''{0}''",
+      "original": "La transazione è fallita: ''{0}''",
+      "corrected": "Lo scambio è fallito: ''{0}''"
+    },
+    {
+      "key": "bisqEasy.openTrades.failed.popup",
+      "source": "The trade failed: ''{0}''\\n\\nStack trace: {1}",
+      "original": "La transazione è fallita: ''{0}''\\n\\nTrace dello stack: {1}",
+      "corrected": "Lo scambio è fallito: ''{0}''\\n\\nTrace dello stack: {1}"
+    },
+    {
+      "key": "bisqEasy.openTrades.failedAtPeer",
+      "source": "The trade failed at your peer: ''{0}''",
+      "original": "La transazione è fallita presso il tuo peer: ''{0}''",
+      "corrected": "Lo scambio è fallito presso il tuo peer: ''{0}''"
+    },
+    {
+      "key": "bisqEasy.openTrades.failedAtPeer.popup",
+      "source": "The trade failed at your peer: ''{0}''\\n\\nStack trace: {1}",
+      "original": "La transazione è fallita presso il tuo peer: ''{0}''\\n\\nTraccia dello stack: {1}",
+      "corrected": "Lo scambio è fallito presso il tuo peer: ''{0}''\\n\\nTraccia dello stack: {1}"
+    }
+  ],
+  "valid_verbs": [
+    {
+      "key": "bisqEasy.tradeWizard.amount.description.fixed",
+      "source": "{0} amount to trade",
+      "target": "{0} importo da scambiare"
+    },
+    {
+      "key": "bisqEasy.tradeWizard.amount.description.range",
+      "source": "Range of {0} amount to trade",
+      "target": "Intervallo di {0} importo da scambiare"
+    }
+  ]
+}

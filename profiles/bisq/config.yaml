@@ -36,6 +36,20 @@ semantic_review:
   reasoning_effort: "none"
   auto_apply_error_suggestions: true
 semantic_quality_rules:
+  - id: "it-trade-failure-terminology"
+    message: "Use 'scambio', without 'transazione' or 'commercio', for 'trade' in these reviewed Italian failure messages."
+    locales: ["it"]
+    keys:
+      - "bisqEasy.openTrades.failed"
+      - "bisqEasy.openTrades.failed.popup"
+      - "bisqEasy.openTrades.failedAtPeer"
+      - "bisqEasy.openTrades.failedAtPeer.popup"
+    source_regex: '\btrade\b'
+    required_target_regex: '\bscambio\b'
+    forbidden_target_regex: '\b(?:transazione|commercio)\b'
+    regex_ignorecase: true
+    severity: "error"
+    source: "bisq-mobile#1913"
   - id: "trade-history-traders-label"
     message: "Fully localize the Trade Details traders/role label; do not retain the English term 'Traders'."
     locales: ["*"]
