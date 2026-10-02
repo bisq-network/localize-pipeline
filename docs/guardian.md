@@ -136,6 +136,12 @@ and published commit where applicable. State schema 12 also records public
 explanation delivery and held decisions. Back up the idle database before
 upgrading; do not downgrade a schema-12 database.
 
+Private deterministic quality findings retain a source-commit link in signed
+correction commits. This evidence is separate from reviewer comment links and
+must match the exact scanned head, or its recorded Guardian publication lineage,
+repository and GitHub host. Public feedback still requires an exact PR-comment
+link; a commit link in public feedback does not grant correction authority.
+
 ### Feedback explanations and maintainer decisions
 
 In the two publishing modes, completed open-PR assessments produce bot-labelled

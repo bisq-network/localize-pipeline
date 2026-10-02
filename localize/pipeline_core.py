@@ -137,6 +137,9 @@ async def run_translation_pipeline(
     )
     if not changed_files:
         logger.info("No translation files to process. Exiting.")
+        steps.write_translation_validation_summary(
+            paths.validation_summary_path, validation_files={}, skipped_files={}
+        )
         return TranslationPipelineResult(changed_files=[])
 
     logger.info("Detected %d translation file(s) to process.", len(changed_files))
@@ -215,7 +218,12 @@ async def run_translation_pipeline(
 
     steps.write_token_usage_summary(paths.token_usage_summary_path)
 
-    steps.copy_translated_files_back(paths.translated_queue_folder, paths.input_folder)
+    copy_kwargs = {}
+    if supports_keyword_argument(steps.copy_translated_files_back, "skipped_files"):
+        copy_kwargs["skipped_files"] = skipped_files
+    steps.copy_translated_files_back(
+        paths.translated_queue_folder, paths.input_folder, **copy_kwargs
+    )
     if processed_files_count > 0:
         logger.info("Copied translated files back to the input folder.")
 

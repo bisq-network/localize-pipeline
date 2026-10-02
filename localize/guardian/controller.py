@@ -88,7 +88,7 @@ from localize.guardian.models import (
     pipeline_config_bundle_digest,
 )
 from localize.guardian.quality_reports import (
-    MARKER as QUALITY_REPORT_MARKER, parse_report, verify_report_values,
+    MARKER as QUALITY_REPORT_MARKER, parse_report, report_matches_pull, verify_report_values, value_digest,
 )
 from localize.guardian.path_globs import matches_any_path_glob
 from localize.guardian.policy import PatchPolicyError, PatchResult, apply_replacements
@@ -7074,6 +7074,38 @@ class GuardianController:
         ):
             raise _LeaseLost("Guardian poll lease was lost.")
 
+    def _private_quality_commit_evidence(
+        self, *, policy: RepositoryPolicy, snapshot: PullRequestFeedbackSnapshot,
+        events: Sequence[FeedbackEvent],
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Keep locally derived evidence separate from public reviewer URLs."""
+        private_events = tuple(event for event in events if event.kind == "quality_finding")
+        if not private_events:
+            return (), None
+        pull = snapshot.pull_request
+        lineage = self._quality_report_publications(policy, pull.number, pull.head_sha)
+        anchor = lineage[-1].original_head_sha if lineage else pull.head_sha
+        actor = policy.quality_report_actor
+        expected_url = f"https://{self.github_host}/{policy.base_repo}/commit/{anchor}"
+        for event in private_events:
+            report = parse_report(event.body)
+            keys = {item["key"] for item in report["findings"]}
+            if (
+                actor is None or event.author_id != actor.id or event.author_type != actor.type
+                or event.deleted or event.repository != policy.base_repo
+                or event.pr_number != pull.number or event.head_sha != pull.head_sha
+                or event.base_sha != pull.base_sha or event.path != report["path"]
+                or event.locale != report["locale"] or report["head_sha"] != anchor
+                or not report_matches_pull(report, pull, expected_head_sha=anchor)
+                or len(keys) != 1
+                or event.event_id != "internal:quality:" + value_digest(
+                    report["path"] + "\x00" + next(iter(keys))
+                )
+                or event.html_url != expected_url
+            ):
+                raise ValueError("Private quality evidence no longer matches its authorized source")
+        return (expected_url,), anchor
+
     def _publish_translation_commit(
         self,
         *,
@@ -7140,8 +7172,11 @@ class GuardianController:
             dict.fromkeys(
                 event.html_url
                 for event, _revision in selected
-                if event.html_url is not None
+                if event.kind != "quality_finding" and event.html_url is not None
             )
+        )
+        quality_finding_urls, quality_finding_head_sha = self._private_quality_commit_evidence(
+            policy=policy, snapshot=snapshot, events=tuple(event for event, _revision in selected),
         )
         selected_revision_ids = tuple(
             revision.revision_id for _event, revision in selected
@@ -7154,6 +7189,8 @@ class GuardianController:
             pull_number=snapshot.pull_request.number,
             feedback_urls=feedback_urls,
             feedback_repository=policy.base_repo,
+            quality_finding_urls=quality_finding_urls,
+            quality_finding_head_sha=quality_finding_head_sha,
             sign=True,
             signing_key=self.signing_key,
             signing_environment=self.signing_environment,

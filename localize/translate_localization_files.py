@@ -2175,7 +2175,9 @@ def is_source_localization_file(
 
 def copy_translated_files_back(
         translated_queue_folder: str,
-        input_folder_path: str
+        input_folder_path: str,
+        *,
+        skipped_files: Optional[Dict[str, List[str]]] = None,
 ):
     """
     Copy translated translation files back to the input folder, overwriting existing ones and preserving subdirectories.
@@ -2183,10 +2185,13 @@ def copy_translated_files_back(
     Args:
         translated_queue_folder (str): The folder containing translated files.
         input_folder_path (str): The input folder path.
+        skipped_files: Inputs that must not be overwritten by stale queue output.
     """
     for root, _dirs, files in os.walk(translated_queue_folder):
         for name in files:
             rel_path = os.path.relpath(os.path.join(root, name), translated_queue_folder)
+            if rel_path.replace('\\', '/') in (skipped_files or {}):
+                continue
             if is_target_localization_file(rel_path):
                 translated_file_path = os.path.join(translated_queue_folder, rel_path)
                 dest_path = os.path.join(input_folder_path, rel_path)
@@ -2512,6 +2517,7 @@ async def process_translation_queue(
         Run metrics are attached to the result as ``result.run_metrics``.
     """
     localization_files: List[Tuple[str, LocalizationProfile]] = []
+    skipped_files: Dict[str, List[str]] = {}
     for root, dirs, files in os.walk(translation_queue_folder):
         dirs.sort()
         for name in files:
@@ -2522,6 +2528,11 @@ async def process_translation_queue(
             profile = find_target_localization_profile(relative_path)
             if profile:
                 localization_files.append((relative_path, profile))
+            elif not is_source_localization_file(relative_path) and any(
+                item.localization_format.is_supported_file(relative_path)
+                for item in _iter_localization_profiles()
+            ):
+                skipped_files[relative_path] = ["No supported target locale profile."]
     localization_files.sort(key=lambda item: item[0])
 
     # Load the glossary from the JSON file
@@ -2543,8 +2554,6 @@ async def process_translation_queue(
     processed_filenames: List[str] = []
     total_keys_translated = 0
     run_metrics = new_run_metrics()
-    skipped_files: Dict[str, List[str]] = {}
-
     for translation_file, localization_profile in localization_files:
         try:
             localization_format = localization_profile.localization_format
@@ -2558,11 +2567,13 @@ async def process_translation_queue(
             )
             if not language_code:
                 logger.warning(f"Skipping file {translation_file}: unable to extract language code.")
+                skipped_files[translation_file] = ["Unable to extract language code."]
                 continue
             # 4) Now we find the "friendly name" from the dictionary
             target_language = language_code_to_name(language_code)
             if not target_language:
                 logger.warning(f"Skipping file {translation_file}: unsupported language code '{language_code}'.")
+                skipped_files[translation_file] = [f"Unsupported language code: {language_code}."]
                 continue
             style_rules_text_for_review = PRECOMPUTED_STYLE_RULES_TEXT.get(language_code, "")
             raw_language_glossary = glossary.get(language_code, {})
@@ -2594,6 +2605,7 @@ async def process_translation_queue(
 
             if not os.path.exists(source_file_path):
                 logger.warning(f"Source file '{source_file_name}' not found in '{INPUT_FOLDER}'. Skipping.")
+                skipped_files[translation_file] = [f"Source file not found: {source_file_name}."]
                 continue
 
             logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
@@ -3290,6 +3302,7 @@ def write_translation_validation_summary(
     """Write structured validation data consumed by the PR quality gate."""
     summary = {
         "files": validation_files,
+        "skipped_files": sorted(skipped_files),
         "pipeline_warnings": [
             {"file": filename, "errors": errors}
             for filename, errors in sorted(skipped_files.items())
