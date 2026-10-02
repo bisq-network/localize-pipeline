@@ -1,7 +1,9 @@
 import importlib
+import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 # The session autouse fixture patches this module by name.
@@ -31,6 +33,10 @@ def test_default_max_files_per_pr_stays_under_coderabbit_review_limit():
 
 
 def test_publish_translation_changes_runs_under_set_u(tmp_path):
+    (tmp_path / "resources").mkdir()
+    (tmp_path / "localize").symlink_to(REPO_ROOT / "localize", target_is_directory=True)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs/translation_validation_summary.json").write_text(json.dumps({"skipped_files": []}))
     script = (REPO_ROOT / "update-translations.sh").read_text()
     start = script.index("publish_translation_changes() {")
     end = script.index("\npublish_translation_changes\n", start)
@@ -74,7 +80,8 @@ TRANSLATION_BRANCH_PREFIX=translation-updates
 publish_translation_changes
 """
 
-    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
+    env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
+    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True, env=env)
 
     assert result.returncode == 0, result.stderr
 
@@ -86,6 +93,10 @@ def test_every_published_batch_stays_within_coderabbit_review_limit(tmp_path):
     with no review at all, so assert on the emitted batch sizes rather than on
     the threshold constant alone.
     """
+    (tmp_path / "resources").mkdir()
+    (tmp_path / "localize").symlink_to(REPO_ROOT / "localize", target_is_directory=True)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs/translation_validation_summary.json").write_text(json.dumps({"skipped_files": []}))
     script = (REPO_ROOT / "update-translations.sh").read_text()
     start = script.index("publish_translation_changes() {")
     end = script.index("\npublish_translation_changes\n", start)
@@ -141,7 +152,8 @@ TRANSLATION_BRANCH_PREFIX=translation-updates
 publish_translation_changes
 """
 
-    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True)
+    env = dict(os.environ, PATH=f"{Path(sys.executable).parent}:{os.environ['PATH']}")
+    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True, env=env)
 
     assert result.returncode == 0, result.stderr
     batch_sizes = [
@@ -308,7 +320,7 @@ def test_validation_summary_is_reset_before_translation_script_runs():
     )
 
     assert reset_index < python_index
-    assert '{"files":{},"pipeline_warnings":[]}' in script
+    assert '{"files":{},"pipeline_warnings":[],"skipped_files":null}' in script
 
 
 def test_localize_dry_run_env_overrides_shell_dry_run_config():

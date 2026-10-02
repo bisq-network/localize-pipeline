@@ -42,7 +42,7 @@ class PipelineSourceConnector(Protocol):
     def copy_files_to_translation_queue(self, changed_files: List[str], input_folder: str, queue_folder: str) -> None:
         """Copy changed files into the processing queue."""
 
-    def copy_translated_files_back(self, translated_queue: str, input_folder: str) -> None:
+    def copy_translated_files_back(self, translated_queue: str, input_folder: str, *, skipped_files: Optional[Dict[str, List[str]]] = None) -> None:
         """Copy translated output back to the project localization folder."""
 
     def cleanup_queue_folders(self, translation_queue: str, translated_queue: str) -> None:
@@ -169,7 +169,8 @@ class FilesystemSourceConnector:
     def copy_files_to_translation_queue(self, changed_files: List[str], input_folder: str, queue_folder: str) -> None:
         self._copy_relative_files(changed_files, input_folder, queue_folder)
 
-    def copy_translated_files_back(self, translated_queue: str, input_folder: str) -> None:
+    def copy_translated_files_back(self, translated_queue: str, input_folder: str, *, skipped_files: Optional[Dict[str, List[str]]] = None) -> None:
+        """Copy successful outputs without overwriting explicitly skipped inputs."""
         translated_queue_path = Path(translated_queue).resolve()
         input_folder_path = Path(input_folder).resolve()
         if not translated_queue_path.exists():
@@ -185,6 +186,8 @@ class FilesystemSourceConnector:
                     "Skipping translated file outside queue: %s",
                     source_path,
                 )
+                continue
+            if safe_relative_path.as_posix() in (skipped_files or {}):
                 continue
             target_path = (input_folder_path / safe_relative_path).resolve()
             try:
@@ -324,7 +327,7 @@ class FileReporterConnector:
             summary_path,
             {
                 "files": validation_files,
-                "skipped_files": skipped_files,
+                "skipped_files": sorted(skipped_files),
                 "pipeline_warnings": [
                     {"file": filename, "errors": list(errors)}
                     for filename, errors in sorted(skipped_files.items())

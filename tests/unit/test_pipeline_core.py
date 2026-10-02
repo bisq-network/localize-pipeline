@@ -191,6 +191,7 @@ async def test_pipeline_stops_after_detection_when_no_files_changed(pipeline_pat
     assert fake.calls == [
         "validate:/repo/i18n:/app/translation_queue:/app/translated_queue:/repo",
         "detect:/repo/i18n:/repo:True",
+        "validation_summary:/app/logs/translation_validation_summary.json:[]:[]",
     ]
 
 

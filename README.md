@@ -406,6 +406,13 @@ Server guide: [docs/new-project-deployment.md](docs/new-project-deployment.md).
   `suffix`, `locale_directory`, or `locale_filename`.
 - **`Permission denied (publickey)` on push:** the deploy key is missing or does
   not have write access to the fork repository.
+- **Skipped translation inputs:** files explicitly skipped by validation or
+  processing are excluded before PR batching and semantic review. The publisher
+  preserves their imported contents and validation summary under
+  `logs/skipped-inputs-*/`. Other valid files can still be published, but the run
+  exits unsuccessfully, retains the git-source baseline, and withholds its
+  success heartbeat for that run. Fix the reported input
+  problem and rerun; the pipeline does not restore old translations automatically.
 - **Quality gate failed:** inspect the PR report. The pipeline reports skipped
   files, placeholder errors, semantic findings, and suspicious source-identical
   values.
