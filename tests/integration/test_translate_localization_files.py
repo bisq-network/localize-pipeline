@@ -24,6 +24,21 @@ from localize.translation_memory import (
 
 # All fixtures are now defined in conftest.py and are auto-discovered by pytest.
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["app_xx.properties", "missing_de.properties"])
+async def test_unprocessable_import_has_explicit_skip_record(integration_test_environment, name):
+    """Unknown locales and absent sources remain excluded from publication."""
+    env = integration_test_environment
+    with open(os.path.join(env["translation_queue_folder"], name), "w", encoding="utf-8") as handle:
+        handle.write("label=English import\n")
+    result = await localize.translate_localization_files.process_translation_queue(
+        translation_queue_folder=env["translation_queue_folder"],
+        translated_queue_folder=env["translated_queue_folder"],
+        glossary_file_path=env["mock_glossary_path_resolved"],
+    )
+    assert result[2][name]
+
 @pytest.mark.asyncio
 @patch('localize.translate_localization_files.get_changed_translation_files')
 @patch('localize.translate_localization_files.copy_files_to_translation_queue')

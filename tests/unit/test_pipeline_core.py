@@ -177,6 +177,7 @@ def pipeline_options(**overrides) -> TranslationPipelineOptions:
 
 @pytest.mark.asyncio
 async def test_pipeline_stops_after_detection_when_no_files_changed(pipeline_paths):
+    """An empty run replaces stale skip evidence with an explicit empty list."""
     fake = FakePipelineSteps(changed_files=[])
 
     result = await run_translation_pipeline(
@@ -191,6 +192,7 @@ async def test_pipeline_stops_after_detection_when_no_files_changed(pipeline_pat
     assert fake.calls == [
         "validate:/repo/i18n:/app/translation_queue:/app/translated_queue:/repo",
         "detect:/repo/i18n:/repo:True",
+        "validation_summary:/app/logs/translation_validation_summary.json:[]:[]",
     ]
 
 

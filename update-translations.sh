@@ -751,7 +751,7 @@ fi
 [ -n "$TRANSLATION_FILTER_GLOB" ] && [ "$TRANSLATION_FILTER_GLOB" != "null" ] && export TRANSLATION_FILTER_GLOB
 mkdir -p "$APP_ROOT/logs"
 VALIDATION_SUMMARY="$APP_ROOT/logs/translation_validation_summary.json"
-printf '%s\n' '{"files":{},"pipeline_warnings":[]}' > "$VALIDATION_SUMMARY"
+printf '%s\n' '{"files":{},"pipeline_warnings":[],"skipped_files":null}' > "$VALIDATION_SUMMARY"
 set +e
 python3 -u -m localize.cli run --config "$CONFIG_FILE"
 PY_EXIT=$?
@@ -1107,6 +1107,19 @@ fi
 
 # Collect only git-changed translation files (not the entire tree).
 mapfile -t ALL_FILES < <(collect_changed_translation_files "$REL_INPUT_FOLDER")
+local publication_plan
+if ! publication_plan=$(cd "$app_root" && python3 -m localize.translation_publication \
+    --summary "$app_root/logs/translation_validation_summary.json" \
+    --repo "$TARGET_PROJECT_ROOT" --input "$ABSOLUTE_INPUT_FOLDER" \
+    -- "${ALL_FILES[@]}"); then
+    log "Could not validate skipped translation inputs; refusing publication." "ERROR"
+    return 1
+fi
+SKIPPED_TRANSLATION_COUNT=$(printf '%s' "$publication_plan" | jq -r '.skipped_count')
+if [ "$SKIPPED_TRANSLATION_COUNT" -gt 0 ]; then
+    log "Excluded $SKIPPED_TRANSLATION_COUNT skipped translation file(s). Inputs preserved in $(printf '%s' "$publication_plan" | jq -r '.evidence_directory')." "WARNING"
+fi
+mapfile -t ALL_FILES < <(printf '%s' "$publication_plan" | jq -r '.files[]')
 TRANSLATION_CHANGES=$(printf '%s\n' "${ALL_FILES[@]}")
 
 if [ -n "$TRANSLATION_CHANGES" ]; then
@@ -1207,6 +1220,10 @@ fi
 }
 
 publish_translation_changes
+if [ "${SKIPPED_TRANSLATION_COUNT:-0}" -gt 0 ]; then
+    log "Skipped translation inputs remain unresolved; retaining the source baseline and withholding the success heartbeat." "ERROR"
+    exit 1
+fi
 update_git_source_baseline_if_safe "$TRANSLATION_SOURCE"
 
 # Go back to original branch
