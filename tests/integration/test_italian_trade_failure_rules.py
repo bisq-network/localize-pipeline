@@ -23,8 +23,9 @@ def _write_properties(path, values):
 
 @pytest.mark.parametrize("profile", ["bisq", "bisq-mobile"])
 @pytest.mark.parametrize("scope", ["changed", "all"])
-def test_reviewed_italian_failures_block_and_corrections_pass(tmp_path, profile, scope):
-    """Both profiles block four real defects and accept their reviewed corrections."""
+@pytest.mark.parametrize("mixed_term", [None, "transazione", "commercio"])
+def test_reviewed_italian_failures_block_and_corrections_pass(tmp_path, profile, scope, mixed_term):
+    """Block reviewed defects and mixed terminology, then accept clean corrections."""
     resources = tmp_path / "resources"
     resources.mkdir()
     source = {item["key"]: item["source"] for item in FIXTURE["failures"] + FIXTURE["valid_verbs"]}
@@ -41,7 +42,13 @@ def test_reviewed_italian_failures_block_and_corrections_pass(tmp_path, profile,
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
         "-c", "commit.gpgsign=false", "commit", "-qm", "Seed locale fixture")
     verbs = {item["key"]: item["target"] for item in FIXTURE["valid_verbs"]}
-    original = {item["key"]: item["original"] for item in FIXTURE["failures"]}
+    original = {
+        item["key"]: (
+            item["corrected"].replace("scambio", f"scambio ({mixed_term})")
+            if mixed_term else item["original"]
+        )
+        for item in FIXTURE["failures"]
+    }
     _write_properties(target, {**original, **verbs})
     git("add", "resources")
     report_path = tmp_path / "report.json"
