@@ -1652,3 +1652,68 @@ def test_commit_refuses_when_checkout_head_no_longer_matches_intake_sha(tmp_path
                 ),
                 sign=False,
             )
+
+
+@pytest.mark.parametrize("include_comment", [False, True])
+@pytest.mark.parametrize("historical_anchor", [False, True])
+def test_commit_accepts_separate_exact_private_quality_evidence(tmp_path, include_comment, historical_anchor):
+    """Private findings can authorize a real commit, alone or beside reviewer feedback."""
+    remote, base_sha, head_sha = _create_remote(tmp_path)
+    evidence_sha = base_sha if historical_anchor else head_sha
+    quality_url = f"https://github.example.com/acme/project/commit/{evidence_sha}"
+    comment_url = "https://github.example.com/acme/project/pull/7#discussion_r123"
+    with materialize_exact_checkout(
+        _revision(ref="refs/heads/translation-review", sha=head_sha),
+        remote_url=remote.as_uri(), allow_file_remote=True,
+    ) as workspace:
+        (workspace.path / "i18n/messages_ru.properties").write_text("hello=Здравствуйте\n")
+        result = workspace.commit_validated_changes(
+            expected_paths=("i18n/messages_ru.properties",), pull_number=7,
+            feedback_urls=(comment_url,) if include_comment else (),
+            quality_finding_urls=(quality_url,), quality_finding_head_sha=evidence_sha,
+            sign=False,
+        )
+        message = _git(workspace.path, "show", "-s", "--format=%B", result.commit_sha)
+        assert "Validated quality findings:" in message
+        assert quality_url in message
+        assert (comment_url in message) is include_comment
+        assert result.parent_sha == head_sha
+
+
+@pytest.mark.parametrize("suffix", [
+    "wrong-host", "wrong-repo", "wrong-sha", "short-sha", "query", "fragment",
+    "credentials", "port", "trailing-slash", "newline", "no-anchor",
+])
+def test_private_quality_commit_evidence_rejects_unbound_links(tmp_path, suffix):
+    """A separate evidence channel must still bind canonical URLs to the trusted anchor."""
+    from localize.guardian.workspace import _validate_quality_finding_urls
+
+    head_sha = "a" * 40
+    url = f"https://github.example.com/acme/project/commit/{head_sha}"
+    urls = {
+        "wrong-host": url.replace("github.example.com", "evil.example"),
+        "wrong-repo": url.replace("acme/project", "acme/other"),
+        "wrong-sha": url.replace(head_sha, "b" * 40),
+        "short-sha": url.replace(head_sha, "a" * 7),
+        "query": url + "?x=1", "fragment": url + "#diff-1",
+        "credentials": url.replace("https://", "https://token@"),
+        "port": url.replace("github.example.com", "github.example.com:443"),
+        "trailing-slash": url + "/", "newline": url + "\n", "no-anchor": url,
+    }
+    with pytest.raises(ValueError, match="quality"):
+        _validate_quality_finding_urls(
+            _revision(ref="refs/heads/translation-review", sha=head_sha),
+            7, (urls[suffix],), feedback_repository="acme/project",
+            quality_finding_head_sha=None if suffix == "no-anchor" else head_sha,
+        )
+
+
+def test_commit_link_cannot_enter_reviewer_feedback_channel():
+    """A public comment cannot gain private evidence authority by supplying a commit URL."""
+    from localize.guardian.workspace import _validate_feedback_urls
+
+    with pytest.raises(ValueError, match="exact pull request"):
+        _validate_feedback_urls(
+            _revision(ref="refs/heads/translation-review", sha="a" * 40), 7,
+            ("https://github.example.com/acme/project/commit/" + "a" * 40,),
+        )

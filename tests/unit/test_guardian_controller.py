@@ -6030,6 +6030,20 @@ def test_private_quality_uses_historical_original_head_after_guardian_push(
             policy=policy, snapshot=snapshot, scope=scope,
             evidence_head_sha=None if terminal_lineage else HEAD_SHA,
         )
+        if not published or terminal_lineage:
+            # The commit transport must preserve the same anchor, including
+            # the prior head bound by the durable completed publication above.
+            urls, evidence_sha = controller._private_quality_commit_evidence(
+                policy=policy, snapshot=snapshot, events=authorized.events,
+            )
+            assert urls == (f"https://github.com/acme/widgets/commit/{HEAD_SHA}",)
+            assert evidence_sha == HEAD_SHA
+        else:
+            # Merely supplying an old evidence head is not durable authority.
+            with pytest.raises(ValueError, match="quality"):
+                controller._private_quality_commit_evidence(
+                    policy=policy, snapshot=snapshot, events=authorized.events,
+                )
 
     assert len(revisions) == 1
     if published:
@@ -10385,3 +10399,138 @@ def test_clean_review_reporting_does_not_recreate_noop_comments(
         if history == "quiet_pending":
             assert state.feedback_report_delivery(summary_key)["status"] == "superseded"
             assert state.feedback_reporting_counts()[0] == 0
+
+
+def _private_commit_event(*, key="greeting", **overrides):
+    """Build the same identity-bound evidence as the private deterministic scanner."""
+    from localize.guardian.quality_reports import build_report, finding, render_report, value_digest
+
+    body = render_report(build_report(
+        _pull(), path=TARGET_PATH, locale="ru",
+        findings=[finding(key, "Hello world", "Hello world", "source_echo")],
+    ))
+    values = dict(
+        repository="acme/widgets", pr_number=12, kind="quality_finding",
+        event_id="internal:quality:" + value_digest(TARGET_PATH + "\x00" + key),
+        author="quality-reporter", author_id=202, author_type="User", body=body,
+        head_sha=HEAD_SHA, base_sha=BASE_SHA, locale="ru", path=TARGET_PATH,
+        html_url=f"https://github.com/acme/widgets/commit/{HEAD_SHA}",
+    )
+    values.update(overrides)
+    return FeedbackEvent(**values)
+
+
+def test_private_commit_evidence_deduplicates_anchor_without_losing_findings(tmp_path, runtime):
+    """Multiple authorized internal findings keep one source URL for their shared head."""
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    policy = replace(_policy(), quality_report_actor=TrustedActor("quality-reporter", 202, "User"))
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS, policies=(policy,)),
+            checkout=checkout, provider=provider, driver=FakeCodexDriver(), broker=broker,
+        )
+        event = _private_commit_event()
+        urls, anchor = controller._private_quality_commit_evidence(
+            policy=policy, snapshot=_snapshot(), events=(event, _private_commit_event(key="alpha")),
+        )
+    assert urls == (f"https://github.com/acme/widgets/commit/{HEAD_SHA}",)
+    assert anchor == HEAD_SHA
+
+
+@pytest.mark.parametrize("change", [
+    {"head_sha": "e" * 40}, {"base_sha": "e" * 40}, {"repository": "other/widgets"},
+    {"pr_number": 13}, {"author_id": 999}, {"author_type": "Bot"},
+    {"deleted": True}, {"path": "l10n/messages_de.properties"},
+    {"locale": "de"}, {"event_id": "forged-quality-event"},
+])
+def test_private_commit_evidence_rejects_stale_or_unbound_event(tmp_path, runtime, change):
+    """Only the current policy-bound local finding may supply private commit evidence."""
+    _base, _head, checkout, provider, broker, _sequence = runtime
+    policy = replace(_policy(), quality_report_actor=TrustedActor("quality-reporter", 202, "User"))
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS, policies=(policy,)),
+            checkout=checkout, provider=provider, driver=FakeCodexDriver(), broker=broker,
+        )
+        with pytest.raises(ValueError, match="quality"):
+            controller._private_quality_commit_evidence(
+                policy=policy, snapshot=_snapshot(), events=(_private_commit_event(**change),),
+            )
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_private_quality_publication_passes_separate_evidence_to_workspace(
+    tmp_path, runtime, monkeypatch, mixed,
+):
+    """Run the full publication flow with real URL validators for private and mixed input."""
+    from localize.guardian.workspace import _validate_feedback_urls, _validate_quality_finding_urls
+
+    base, head, checkout, provider, broker, _sequence = runtime
+    source = "Push to %0 was rejected (%1). %2 %3"
+    (head / TARGET_PATH).write_text(f"greeting={source}\nalpha=Старый альфа\n", encoding="utf-8")
+    source_path = base / "l10n/messages_en.properties"
+    source_path.write_text(source_path.read_text() + "alpha=Alpha message\n", encoding="utf-8")
+    policy = replace(_policy(), quality_report_actor=TrustedActor("quality-reporter", 202, "User"))
+    if not mixed:
+        provider.snapshots = (replace(_snapshot(), feedback=()),)
+
+    class QualityDriver(FakeCodexDriver):
+        def run(self, task, *, success_observer=None, **kwargs):
+            """Correct the exact source echo while preserving normal result persistence."""
+            def corrected(result):
+                """Return one correction per item without duplicate target keys."""
+                feedback_ids = json.loads((task.evidence_dir / "manifest.json").read_text())["feedback_ids"]
+                decision = result.feedback[0]
+                return replace(result, feedback=tuple(
+                    replace(decision, feedback_id=feedback_id, replacements=tuple(
+                        replace(replacement, expected_value=source)
+                        if feedback_id.startswith("quality_finding:") else
+                        replace(replacement, key="alpha", expected_value="Старый альфа",
+                                proposed_value="Исправленный альфа")
+                        for replacement in decision.replacements
+                    )) for feedback_id in feedback_ids
+                ))
+            def persist(attempt, usage, result):
+                """Persist the same corrected response returned to the controller."""
+                if success_observer is not None:
+                    success_observer(attempt, usage, corrected(result))
+            return corrected(super().run(task, success_observer=persist, **kwargs))
+
+    commit_calls = []
+    original_commit = FakeWorkspace.commit_validated_changes
+
+    def checked_commit(workspace, **kwargs):
+        """Enforce the real boundary rather than silently accepting arbitrary fake kwargs."""
+        commit_calls.append(kwargs)
+        revision = ExactRevision(
+            host="github.com", owner="contributor", repository="widgets",
+            ref="refs/heads/localize/russian", sha=workspace.original_sha,
+        )
+        assert kwargs["quality_finding_head_sha"] == HEAD_SHA
+        assert _validate_quality_finding_urls(
+            revision, kwargs["pull_number"], kwargs["quality_finding_urls"],
+            feedback_repository=kwargs["feedback_repository"],
+            quality_finding_head_sha=kwargs["quality_finding_head_sha"],
+        ) == (f"https://github.com/acme/widgets/commit/{HEAD_SHA}",)
+        if mixed:
+            assert _validate_feedback_urls(
+                revision, kwargs["pull_number"], kwargs["feedback_urls"],
+                feedback_repository=kwargs["feedback_repository"],
+            ) == ("https://github.com/acme/widgets/pull/12#discussion_r44",)
+        else:
+            assert kwargs["feedback_urls"] == ()
+        return original_commit(workspace, **kwargs)
+
+    monkeypatch.setattr(FakeWorkspace, "commit_validated_changes", checked_commit)
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        outcome = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.APPLY_OWNED_TRANSLATIONS, policies=(policy,)),
+            checkout=checkout, provider=provider, driver=QualityDriver(), broker=broker,
+        ).poll_once()
+        assert outcome.failures == ()
+        assert outcome.applied_commits == (COMMIT_SHA,)
+        assert state.pending_publications() == ()
+    assert len(commit_calls) == 1
