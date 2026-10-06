@@ -151,6 +151,7 @@ def test_mixed_or_unrecognized_review_still_gets_public_accountability(changes):
 
 
 def test_5059_withdrawal_replay_and_actionable_controls():
+    """Replay real withdrawals while preserving root and actionable controls."""
     import json
     from pathlib import Path
     from dataclasses import replace

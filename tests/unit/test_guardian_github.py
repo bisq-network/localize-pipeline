@@ -4030,6 +4030,7 @@ def test_github_rate_limit_403_is_not_an_authentication_failure(
 
 
 def test_review_reply_parent_is_retained_for_reporting():
+    """Distinguish normalized review replies from root comments."""
     from localize.guardian.github import _parse_feedback, FeedbackKind
 
     payload = {"id": 4166280194, "in_reply_to_id": 4162550637,

@@ -319,10 +319,12 @@ class FeedbackRevision:
 
     @property
     def object_key(self) -> tuple[str, int, FeedbackKind, str]:
+        """Identify the GitHub object independently of its observed revision."""
         return (self.repository, self.pull_number, self.kind, self.source_id)
 
     @property
     def revision_id(self) -> str:
+        """Hash the current feedback body and assessment-relevant metadata."""
         payload = json.dumps(
             {
                 "body": self.body,
@@ -616,6 +618,7 @@ def _parse_feedback(
     kind: FeedbackKind,
     payload: Mapping[str, Any],
 ) -> FeedbackRevision:
+    """Normalize GitHub feedback and retain its optional review-reply parent."""
     user = _as_mapping(payload.get("user") or {}, label="feedback author")
     source_id = str(_as_int(payload.get("id"), label="feedback id"))
     created_at = str(payload.get("created_at") or payload.get("submitted_at") or "")
