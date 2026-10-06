@@ -96,6 +96,19 @@ class SemanticQAStats:
         return asdict(self)
 
 
+_KNOWN_LOCALE_SPELLING_RULES = (
+    SemanticRule(
+        id="pcm-private-spelling",
+        message="Use 'Private' instead of 'Privet' in Nigerian Pidgin labels.",
+        locales=("pcm",),
+        source_regex=r"(?i)\bprivate\b",
+        forbidden_target_regex=r"(?i)\bprivet\b",
+        severity="error",
+        source="builtin-spelling",
+    ),
+)
+
+
 _SOURCE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]{6,}")
 _SOURCE_WORD_ALLOWLIST = {
     "clearnet",
@@ -645,7 +658,9 @@ def analyze_translation_changes(
     retained_source_word_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     examples_limit: int = 10,
 ) -> SemanticQAStats:
-    findings = evaluate_semantic_rules(changes, semantic_rules)
+    findings = evaluate_semantic_rules(
+        changes, (*semantic_rules, *_KNOWN_LOCALE_SPELLING_RULES)
+    )
     findings.extend(
         evaluate_retained_source_words(
             changes,
