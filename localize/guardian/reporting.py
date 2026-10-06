@@ -77,6 +77,39 @@ def quiet_clean_review(event: FeedbackEvent, details: Mapping[str, object]) -> b
         body, re.IGNORECASE,
     )
 
+def quiet_reviewer_reply(event: FeedbackEvent, details: Mapping[str, object], *, is_reply: bool) -> bool:
+    """Keep resolved CodeRabbit acknowledgements private after assessment.
+
+    Intake and assessment still process every revision, including edits and new
+    findings. Only known resolved replies with a completed no-op are quiet.
+    """
+    reason = details.get("report_reason")
+    if (not is_reply or event.kind != "review_comment"
+            or event.author.casefold() != "coderabbitai[bot]" or event.author_type != "Bot"
+            or reason not in {"not_applicable", "already_addressed"}
+            or details.get("verdict") != "reject" or details.get("outcome") != reason
+            or details.get("report_outcome", reason) != reason
+            or any(details.get(key) for key in (
+                "decision_required", "changed_keys", "commit_sha", "held_value_edits",
+                "deferred_value_edits",
+            ))):
+        return False
+    suffix = "\n\n✅ Review thread resolved.\n\n_You are interacting with an AI system._\n\n<!-- This is an auto-generated reply by CodeRabbit -->"
+    if not event.body.endswith(suffix):
+        return False
+    text = event.body[:-len(suffix)]
+    # The entire reply must be the known acknowledgement paragraph. Extra
+    # sections, suggestions, questions, or requests remain publicly reportable.
+    return bool(re.fullmatch(
+        r"`@[A-Za-z0-9_-]+` (?:Agreed\. )?The supplied revision (?:already )?uses "
+        r"`[^`\n]+`(?:, (?:with no|without) `threshold`(?: in the label)?)?\. "
+        r"(?:(?:This finding no longer applies|The finding does not apply)\. |"
+        r"The finding does not apply, so I withdraw it\. )?"
+        r"(?:I withdraw (?:it|(?:this |the )?finding)\. )?"
+        r"No (?:code change|further change) is needed\.", text,
+    ))
+
+
 REASONS = {
     "processing_failure": "Processing did not complete. Work remains deferred under the configured retry, quota, and authority limits.",
     "unspecified": "The assessment did not establish a more specific public reason.",

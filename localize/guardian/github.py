@@ -315,13 +315,16 @@ class FeedbackRevision:
     line: int | None = None
     commit_id: str | None = None
     deleted: bool = False
+    in_reply_to_id: int | None = None
 
     @property
     def object_key(self) -> tuple[str, int, FeedbackKind, str]:
+        """Identify the GitHub object independently of its observed revision."""
         return (self.repository, self.pull_number, self.kind, self.source_id)
 
     @property
     def revision_id(self) -> str:
+        """Hash the current feedback body and assessment-relevant metadata."""
         payload = json.dumps(
             {
                 "body": self.body,
@@ -615,6 +618,7 @@ def _parse_feedback(
     kind: FeedbackKind,
     payload: Mapping[str, Any],
 ) -> FeedbackRevision:
+    """Normalize GitHub feedback and retain its optional review-reply parent."""
     user = _as_mapping(payload.get("user") or {}, label="feedback author")
     source_id = str(_as_int(payload.get("id"), label="feedback id"))
     created_at = str(payload.get("created_at") or payload.get("submitted_at") or "")
@@ -648,6 +652,7 @@ def _parse_feedback(
         else None,
         path=str(payload.get("path")) if payload.get("path") is not None else None,
         line=line,
+        in_reply_to_id=_optional_int(payload.get("in_reply_to_id"), label="reply parent id"),
         commit_id=str(payload.get("commit_id"))
         if payload.get("commit_id") is not None
         else None,

@@ -148,3 +148,34 @@ def test_mixed_or_unrecognized_review_still_gets_public_accountability(changes):
     from localize.guardian.reporting import quiet_clean_review
 
     assert not quiet_clean_review(_clean_review_event(**changes), _clean_review_details())
+
+
+def test_5059_withdrawal_replay_and_actionable_controls():
+    """Replay real withdrawals while preserving root and actionable controls."""
+    import json
+    from pathlib import Path
+    from dataclasses import replace
+    from localize.guardian.reporting import quiet_reviewer_reply
+
+    replies = json.loads((Path(__file__).parent / "fixtures/guardian_5059_withdrawals.json").read_text())
+    assert len(replies) == 9
+    for reply in replies:
+        event = _clean_review_event(kind="review_comment", body=reply["body"])
+        for reason in ("not_applicable", "already_addressed"):
+            details = _clean_review_details(outcome=reason, report_reason=reason)
+            assert quiet_reviewer_reply(event, details, is_reply=True)
+            assert not quiet_reviewer_reply(event, details, is_reply=False)
+            assert not quiet_reviewer_reply(event, details | {"verdict": "apply"}, is_reply=True)
+            assert not quiet_reviewer_reply(event, details | {"decision_required": True}, is_reply=True)
+        mixed = replace(event, body=event.body + "\nPlease replace the other label.\n```suggestion\nNew wording\n```")
+        assert not quiet_reviewer_reply(mixed, _clean_review_details(), is_reply=True)
+        interior = replace(event, body=event.body.replace(
+            "No ", "Please replace the other label. No "))
+        assert not quiet_reviewer_reply(interior, _clean_review_details(), is_reply=True)
+        interior = replace(event, body=event.body.replace(
+            "I withdraw", "Please replace the other label with `New wording`. I withdraw"))
+        if interior.body != event.body:
+            assert not quiet_reviewer_reply(interior, _clean_review_details(), is_reply=True)
+    # Editing a formerly actionable reply is evaluated using its current body.
+    actionable = replace(event, body="Please change this label.")
+    assert not quiet_reviewer_reply(actionable, _clean_review_details(), is_reply=True)
