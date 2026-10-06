@@ -10295,10 +10295,11 @@ def test_historical_prevention_measures_current_base_real_data(
     assert observed["diff"] == ""
 
 
+@pytest.mark.parametrize("withdrawal", [None, *range(9)])
 @pytest.mark.parametrize("history", ["none", "quiet", "quiet_pending", "held"])
 @pytest.mark.parametrize("real_feedback", [False, True])
 def test_clean_review_reporting_does_not_recreate_noop_comments(
-    tmp_path: Path, runtime, history: str, real_feedback: bool
+    tmp_path: Path, runtime, history: str, real_feedback: bool, withdrawal: int | None
 ) -> None:
     """Suppress clean-review retries without losing real feedback or audit rows."""
     from tests.unit.test_guardian_reporting import (
@@ -10315,6 +10316,11 @@ def test_clean_review_reporting_does_not_recreate_noop_comments(
         author_login="coderabbitai[bot]", author_id=999, author_type="Bot",
         path=None, line=None,
     )
+    if withdrawal is not None:
+        replies = json.loads((Path(__file__).parent / "fixtures/guardian_5059_withdrawals.json").read_text())
+        feedback = replace(feedback, body=replies[withdrawal]["body"],
+                           kind=FeedbackKind.REVIEW_COMMENT, path=TARGET_PATH,
+                           in_reply_to_id=4162550637)
     snapshot = _snapshot(feedback=(feedback, _feedback(source_id="45")) if real_feedback else (feedback,))
     authorized = authorize_feedback(
         policy=policy, snapshot=snapshot,

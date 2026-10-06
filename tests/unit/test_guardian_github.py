@@ -4027,3 +4027,16 @@ def test_github_rate_limit_403_is_not_an_authentication_failure(
             )
 
     assert not isinstance(raised.value, GitHubAuthenticationError)
+
+
+def test_review_reply_parent_is_retained_for_reporting():
+    from localize.guardian.github import _parse_feedback, FeedbackKind
+
+    payload = {"id": 4166280194, "in_reply_to_id": 4162550637,
+               "user": {"id": 999, "login": "coderabbitai[bot]", "type": "Bot"},
+               "body": "I withdraw the finding."}
+    reply = _parse_feedback("acme/widgets", 12, FeedbackKind.REVIEW_COMMENT, payload)
+    assert reply.in_reply_to_id == 4162550637
+    root = _parse_feedback("acme/widgets", 12, FeedbackKind.REVIEW_COMMENT,
+                           {key: value for key, value in payload.items() if key != "in_reply_to_id"})
+    assert root.in_reply_to_id is None

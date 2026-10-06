@@ -49,7 +49,7 @@ from localize.guardian.codex import (
 )
 from localize.guardian.deadline import PollDeadline, PollDeadlineExceeded
 from localize.guardian.diagnostics import record_failure
-from localize.guardian.reporting import held_report_reason, quiet_clean_review, report_body, report_disposition, report_key, summary_body
+from localize.guardian.reporting import held_report_reason, quiet_clean_review, quiet_reviewer_reply, report_body, report_disposition, report_key, summary_body
 from localize.guardian.evidence import EVIDENCE_CONTRACT_VERSION, EvidenceBundle, build_evidence_bundle
 from localize.guardian.real_data_impact import (
     RealDataCorpus,
@@ -7521,7 +7521,12 @@ class GuardianController:
                     "pr_number": event.pr_number,
                     "feedback_id": event.feedback_id,
                 }
-                if quiet_clean_review(event, details):
+                is_reply = any(
+                    item.kind.value == event.kind and item.source_id == event.event_id
+                    and item.body == event.body and item.in_reply_to_id is not None
+                    for item in snapshot.feedback
+                )
+                if quiet_clean_review(event, details) or quiet_reviewer_reply(event, details, is_reply=is_reply):
                     quiet_feedback_ids.add(event.feedback_id)
                     delivery = self.state.feedback_report_delivery(key)
                     if delivery is not None and delivery["status"] == "posted":
