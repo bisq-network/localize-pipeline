@@ -84,6 +84,52 @@ def test_declarative_semantic_rule_blocks_forbidden_target_text(tmp_path):
     assert report["blocking"] is True
 
 
+def test_pidgin_private_labels_reject_privet_but_accept_private(tmp_path):
+    input_folder = tmp_path / "resources"
+    _write_properties(
+        input_folder / "messages.properties",
+        {
+            "chat.privateMessage": "Private message",
+            "chat.privateChat": "Private chat",
+            "chat.privateKey": "Private key",
+        },
+    )
+    diff_text = """diff --git a/resources/messages_pcm.properties b/resources/messages_pcm.properties
++++ b/resources/messages_pcm.properties
++chat.privateMessage=Privet mesaj
++chat.privateChat=Privet chat
++chat.privateKey=Private key
+"""
+
+    semantic_stats = analyze_semantic_qa_changes(
+        diff_text=diff_text,
+        repo_root=str(tmp_path),
+        input_folder=str(input_folder),
+        locale_codes=["pcm"],
+    )
+    report = build_quality_gate_report(
+        source_stats=analyze_source_identical_changes(
+            diff_text="",
+            repo_root=str(tmp_path),
+            input_folder=str(input_folder),
+            locale_codes=["pcm"],
+            brand_glossary=[],
+        ),
+        semantic_stats=semantic_stats,
+        validation_summary={"files": {}, "pipeline_warnings": []},
+        changed_files=["resources/messages_pcm.properties"],
+        input_folder=str(input_folder),
+        config=QualityGateConfig(),
+    )
+
+    assert semantic_stats.errors_count == 2
+    assert {example["key"] for example in semantic_stats.examples} == {
+        "chat.privateMessage",
+        "chat.privateChat",
+    }
+    assert report["blocking"] is True
+
+
 def test_retained_source_word_findings_are_warning_only_by_default():
     change = TranslationChange(
         file="resources/mobile_es.properties",
