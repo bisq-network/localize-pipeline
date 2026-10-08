@@ -61,6 +61,7 @@ from localize.pipeline_core import (
     run_translation_pipeline,
 )
 from localize.translation_prompts import build_translation_system_prompt
+from localize.source_identical_acceptance import is_accepted_source_identical
 from localize.translation_memory import (
     TranslationMemory,
     load_translation_memory,
@@ -110,6 +111,7 @@ RATE_LIMIT_PER_MINUTE = config.rate_limit_per_minute
 LANGUAGE_CODES = config.language_codes
 NAME_TO_CODE = config.name_to_code
 RETRANSLATE_IDENTICAL_SOURCE_STRINGS = config.retranslate_identical_source_strings
+ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS = config.accepted_source_identical_translations
 STYLE_RULES = config.style_rules
 PRECOMPUTED_STYLE_RULES_TEXT = config.precomputed_style_rules_text
 BRAND_GLOSSARY = config.brand_glossary
@@ -473,6 +475,10 @@ def apply_translation_memory(
             format_id=format_id,
             context_fingerprint=context_fingerprint,
         )
+        if cached is not None and is_accepted_source_identical(
+            locale, key, text, text, ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
+        ) and cached != text:
+            cached = None
         if cached is not None:
             if normalize_value(cached) == normalize_value(text):
                 logger.warning("Ignoring source-identical translation memory entry for key '%s'.", key)
@@ -512,7 +518,11 @@ def update_translation_memory(
         target_value = final_translations.get(key)
         if source_value is None or target_value is None:
             continue
-        if not target_value.strip() or normalize_value(source_value) == normalize_value(target_value):
+        if not target_value.strip():
+            continue
+        if normalize_value(source_value) == normalize_value(target_value) and not is_accepted_source_identical(
+            locale, key, source_value, target_value, ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
+        ):
             continue
         memory.record(
             source_value,
@@ -532,6 +542,7 @@ def extract_texts_to_translate(
         retranslate_identical_existing: bool = False,
         ignore_key_patterns: Optional[List[Pattern[str]]] = None,
         selection_metrics: Optional[Dict[str, int]] = None,
+        accepted_source_identical_keys: Optional[Set[str]] = None,
 ) -> Tuple[List[str], List[int], List[str]]:
     """
     Identifies which texts need to be translated. A text needs translation if:
@@ -570,6 +581,8 @@ def extract_texts_to_translate(
         if line['type'] == 'entry':
             key = line['key']
             if is_ignored_key(key, ignore_key_patterns):
+                continue
+            if key in (accepted_source_identical_keys or set()):
                 continue
             target_value = line.get('value', '')
             source_value = source_translations.get(key)
@@ -1323,6 +1336,8 @@ def run_per_key_validation_with_summary(
         existing_translations: Optional[Mapping[str, str]] = None,
         file_ledger_entries: Optional[Mapping[str, Mapping[str, str]]] = None,
         selected_keys: Optional[Set[str]] = None,
+        locale: str = "",
+        accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Tuple[Dict[str, str], Dict[str, object]]:
     """
     Validates each translation key individually and selectively reverts failed keys.
@@ -1382,6 +1397,10 @@ def run_per_key_validation_with_summary(
         if (
                 source_value.strip()
                 and normalize_value(source_value) == normalize_value(target_value)
+                and not is_accepted_source_identical(
+                    locale, key, source_value, target_value,
+                    accepted_source_identical_translations or {},
+                )
                 and (
                     key in selected_keys
                     or (
@@ -2661,13 +2680,33 @@ async def process_translation_queue(
                 key for key in newly_added_keys if is_ignored_key(key, IGNORE_KEY_PATTERNS)
             )
 
+            accepted_keys = {
+                key for key, source in source_translations.items()
+                if file_ledger_entries.get(key, {}).get("status") != "failed"
+                and is_accepted_source_identical(
+                    language_code, key, source, target_translations.get(key, ""),
+                    ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
+                )
+            }
+            if translation_memory is not None and not DRY_RUN:
+                for key in accepted_keys:
+                    # Conflict-safe recording quarantines an obsolete cached
+                    # alternative rather than promoting this value globally.
+                    translation_memory.record(
+                        source_translations[key], target_translations[key],
+                        locale=language_code, format_id=localization_format.id,
+                        context_fingerprint=memory_context_fingerprint,
+                    )
+                if accepted_keys:
+                    save_translation_memory(TRANSLATION_MEMORY_FILE_PATH, translation_memory)
+
             # Extract texts to translate
             git_changed_keys = raw_git_changed_keys
             # Only re-translate git-dirty keys if their English source actually changed.
             # This prevents an infinite cycle where Transifex community translations
             # are overwritten by AI, then Transifex re-serves the community version.
             git_changed_keys = filter_git_changed_keys_by_source(
-                git_changed_keys,
+                git_changed_keys - accepted_keys,
                 source_translations,
                 file_ledger_entries,
                 target_translations=target_translations
@@ -2675,7 +2714,7 @@ async def process_translation_queue(
             newly_synchronized_keys = newly_added_keys.union(git_changed_keys)
             if git_changed_keys:
                 logger.info(
-                    "Detected %d git-diff key updates in '%s' with changed source; treating them as newly synchronized.",
+                    "Detected %d eligible git-diff key updates in '%s'; treating them as newly synchronized.",
                     len(git_changed_keys),
                     translation_file
                 )
@@ -2688,6 +2727,7 @@ async def process_translation_queue(
                 retranslate_identical_existing=RETRANSLATE_IDENTICAL_SOURCE_STRINGS,
                 ignore_key_patterns=IGNORE_KEY_PATTERNS,
                 selection_metrics=run_metrics,
+                accepted_source_identical_keys=accepted_keys,
             )
             if not texts_to_translate:
                 # Refresh ledger baseline even when no translation was required.
@@ -3073,6 +3113,8 @@ async def process_translation_queue(
                 existing_translations=original_target_translations,
                 file_ledger_entries=file_ledger_entries,
                 selected_keys=set(keys_to_translate),
+                locale=language_code,
+                accepted_source_identical_translations=ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
             )
             failed_keys = set(per_key_summary["failed_keys"]).union(model_failed_keys)
             increment_run_metric(run_metrics, "model_translation_failed_count", len(failed_keys))

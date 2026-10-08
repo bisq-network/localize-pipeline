@@ -34,6 +34,7 @@ from localize.model_provider import (
     normalize_model_provider_name,
     requires_openai_credentials,
 )
+from localize.source_identical_acceptance import normalize_acceptances
 from localize.semantic_quality import normalize_retained_source_word_allowlist
 
 
@@ -133,6 +134,7 @@ class AppConfig:
     api_base_url: Optional[str] = None
 
     # Project/format profile
+    accepted_source_identical_translations: Dict[str, Dict[str, str]] = field(default_factory=dict)
     project_context: str = ""
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT
@@ -1003,6 +1005,7 @@ def load_app_config() -> AppConfig:
         model_provider_name=model_provider_name,
         quality_gate=quality_gate,
         api_base_url=api_base_url,
+        accepted_source_identical_translations=normalize_acceptances(config.get("accepted_source_identical_translations")),
         project_context=project_context,
         localization_format=localization_format,
         localization_layout=localization_layout,

@@ -15,6 +15,11 @@ translation_queue_folder: "translation_queue"
 translated_queue_folder: "translated_queue"
 dry_run: false
 retranslate_identical_source_strings: false
+# Reviewed corrections in bisq-mobile#1919; later source changes revoke acceptance.
+accepted_source_identical_translations:
+  pcm:
+    mobile.client.topic.private_chat_channels.title: "Private chats"
+    mobile.community.contacts.reason.privateChat: "Private chat"
 translation_key_ledger_file_path: "/app/logs/translation_key_ledger.json"
 quality_gate:
   source_identical_min_block_count: 5
