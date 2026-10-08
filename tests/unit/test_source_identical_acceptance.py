@@ -67,3 +67,16 @@ def test_gate_config_and_app_config_use_the_same_exact_policy(tmp_path, monkeypa
         load_app_config()
     with pytest.raises(ValueError):
         load_quality_gate_config(str(config_path))
+
+
+@pytest.mark.parametrize("target", ["Private chat ", " Private chat", "Private  chat", "Private chat\t"])
+def test_gate_does_not_normalize_exact_target_acceptance(target):
+    """Whitespace-equivalent echoes cannot inherit an exact reviewed exemption."""
+    from localize.semantic_quality import TranslationChange
+    from localize.translation_quality_gate import _analyze_source_identical_translation_changes
+    change = TranslationChange("app_pcm.properties", "pcm", "chat.private",
+                               "Private chat", "Privet chat", target)
+    stats = _analyze_source_identical_translation_changes(
+        [change], [], 10, accepted_source_identical_translations=POLICY)
+    assert stats.expected_source_identical_count == 0
+    assert stats.checked_entries_count == 1

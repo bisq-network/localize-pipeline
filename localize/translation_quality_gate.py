@@ -139,10 +139,11 @@ def is_expected_source_identical(
     locale_code: str = "",
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
+    target_value: Optional[str] = None,
 ) -> bool:
-    """Recognize shared values and exact locale/global exemptions, ignoring case."""
+    """Recognize exact reviewed targets and legacy normalized shared values."""
     if is_accepted_source_identical(
-        locale_code, key, value, value, accepted_source_identical_translations or {},
+        locale_code, key, value, target_value, accepted_source_identical_translations or {},
     ):
         return True
     normalized = normalize_value(value)
@@ -260,6 +261,7 @@ def _analyze_source_identical_translation_changes(
             change.locale_code,
             source_identical_allowlist,
             accepted_source_identical_translations,
+            target_value=change.new_value,
         ):
             stats.expected_source_identical_count += 1
             continue
