@@ -51,6 +51,7 @@ from localize.semantic_quality import (
     normalize_value,
     normalize_retained_source_word_allowlist,
 )
+from localize.source_identical_acceptance import is_accepted_source_identical, normalize_acceptances
 from localize.translation_validator import find_disallowed_control_characters
 
 
@@ -71,6 +72,7 @@ class QualityGateConfig:
     source_identical_allowlist: Dict[str, Tuple[str, ...]] = field(
         default_factory=dict
     )
+    accepted_source_identical_translations: Dict[str, Dict[str, str]] = field(default_factory=dict)
     ignore_key_patterns: List[Pattern[str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -85,6 +87,7 @@ class QualityGateConfig:
             "semantic_qa_audit_scope": self.semantic_qa_audit_scope,
             "retained_source_word_allowlist": self.retained_source_word_allowlist,
             "source_identical_allowlist": self.source_identical_allowlist,
+            "accepted_source_identical_translations": self.accepted_source_identical_translations,
             "ignore_key_patterns": [
                 pattern.pattern for pattern in self.ignore_key_patterns
             ],
@@ -135,8 +138,14 @@ def is_expected_source_identical(
     brand_glossary: Iterable[str],
     locale_code: str = "",
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
+    accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
+    target_value: Optional[str] = None,
 ) -> bool:
-    """Recognize shared values and exact locale/global exemptions, ignoring case."""
+    """Recognize exact reviewed targets and legacy normalized shared values."""
+    if is_accepted_source_identical(
+        locale_code, key, value, target_value, accepted_source_identical_translations or {},
+    ):
+        return True
     normalized = normalize_value(value)
     if not normalized:
         return True
@@ -172,6 +181,7 @@ def analyze_source_identical_changes(
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
     ignore_key_patterns: Sequence[Pattern[str] | str] = (),
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
+    accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> SourceIdenticalStats:
     """Analyze staged translation changes for suspicious English-source fallbacks."""
     changes = iter_translation_changes_from_diff(
@@ -189,6 +199,7 @@ def analyze_source_identical_changes(
         examples_limit=examples_limit,
         ignore_key_patterns=_ensure_ignore_key_patterns(ignore_key_patterns),
         source_identical_allowlist=source_identical_allowlist,
+        accepted_source_identical_translations=accepted_source_identical_translations,
     )
 
 
@@ -214,6 +225,7 @@ def _analyze_source_identical_translation_changes(
     examples_limit: int,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
+    accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> SourceIdenticalStats:
     """Classify changes without exempting unrelated locales or partial phrases."""
     stats = SourceIdenticalStats()
@@ -248,6 +260,8 @@ def _analyze_source_identical_translation_changes(
             brand_glossary,
             change.locale_code,
             source_identical_allowlist,
+            accepted_source_identical_translations,
+            target_value=change.new_value,
         ):
             stats.expected_source_identical_count += 1
             continue
@@ -336,6 +350,7 @@ def analyze_source_identical_changes_for_profiles(
     examples_limit: int = 10,
     ignore_key_patterns: Sequence[Pattern[str]] = (),
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
+    accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> SourceIdenticalStats:
     """Analyze suspicious source-identical changes across configured profiles."""
     return _analyze_source_identical_translation_changes(
@@ -352,6 +367,7 @@ def analyze_source_identical_changes_for_profiles(
         examples_limit=examples_limit,
         ignore_key_patterns=ignore_key_patterns,
         source_identical_allowlist=source_identical_allowlist,
+        accepted_source_identical_translations=accepted_source_identical_translations,
     )
 
 
@@ -496,6 +512,7 @@ def load_quality_gate_config(
             retained_source_word_allowlist=normalize_retained_source_word_allowlist(
                 quality_gate.get("retained_source_word_allowlist", {})
             ),
+            accepted_source_identical_translations=normalize_acceptances(raw_config.get("accepted_source_identical_translations")),
             source_identical_allowlist=normalize_retained_source_word_allowlist(
                 quality_gate.get("source_identical_allowlist", {})
             ),
@@ -1099,6 +1116,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         localization_profiles=localization_profiles,
         ignore_key_patterns=config.ignore_key_patterns,
         source_identical_allowlist=config.source_identical_allowlist,
+        accepted_source_identical_translations=config.accepted_source_identical_translations,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
