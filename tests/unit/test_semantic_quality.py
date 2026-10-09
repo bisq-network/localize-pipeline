@@ -1,12 +1,14 @@
 from pathlib import Path
 import json
 
-from localize.localization_formats import JSON_FORMAT
-from localize.localization_layouts import LocalizationLayout
+from localize.localization_formats import JAVA_PROPERTIES_FORMAT, JSON_FORMAT
+from localize.localization_layouts import SUFFIX_LAYOUT, LocalizationLayout
+from localize.localization_profiles import LocalizationProfile
 from localize.semantic_quality import (
     SemanticRule,
     TranslationChange,
     analyze_all_translation_entries,
+    analyze_translation_changes,
     evaluate_retained_source_words,
     evaluate_semantic_rules,
     iter_translation_changes_from_diff,
@@ -15,6 +17,7 @@ from localize.semantic_quality import (
 from localize.translation_quality_gate import (
     QualityGateConfig,
     analyze_semantic_qa_changes,
+    analyze_semantic_qa_changes_for_profiles,
     analyze_source_identical_changes,
     build_quality_gate_report,
     load_quality_gate_config,
@@ -22,6 +25,87 @@ from localize.translation_quality_gate import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_log_file_privacy_copy_requires_limited_sharing_and_redaction_across_locales(tmp_path):
+    source = (
+        "Log files are only shared with the support team when you send a report. "
+        "Personal identifiers are replaced before sharing."
+    )
+    translations = {
+        "es": (
+            "Revise los archivos de registro antes de compartirlos: pueden contener datos sensibles.",
+            "Los archivos de registro solo se comparten con el equipo de soporte al enviar un informe.",
+            "Los identificadores personales se reemplazan antes de compartirlos.",
+        ),
+        "fr": (
+            "Vérifiez les fichiers journaux avant de les partager : ils peuvent contenir des données sensibles.",
+            "Les fichiers journaux sont uniquement partagés avec l'équipe d'assistance lors de l'envoi d'un rapport.",
+            "Les identifiants personnels sont remplacés avant le partage.",
+        ),
+        "hi": (
+            "लॉग फ़ाइलें साझा करने से पहले उनकी जाँच करें; उनमें संवेदनशील जानकारी हो सकती है।",
+            "रिपोर्ट भेजने पर ही लॉग फ़ाइलें सहायता दल के साथ साझा की जाती हैं।",
+            "साझा करने से पहले व्यक्तिगत पहचानकर्ता बदल दिए जाते हैं।",
+        ),
+        "pt_BR": (
+            "Compartilhe os arquivos de log somente após verificar se contêm dados sensíveis.",
+            "Os arquivos de log são compartilhados apenas com a equipe de suporte ao enviar um relatório.",
+            "Os identificadores pessoais são substituídos antes do compartilhamento.",
+        ),
+    }
+
+    for locale, (stale, limited_sharing, redaction) in translations.items():
+        def check(value):
+            return analyze_translation_changes(
+                changes=[TranslationChange(
+                    file=f"messages_{locale}.properties",
+                    locale_code=locale,
+                    key="support.logFileDisclosure",
+                    source_value=source,
+                    old_value=None,
+                    new_value=value,
+                )],
+                semantic_rules=[],
+                brand_glossary=[],
+            )
+
+        for incomplete in (stale, limited_sharing, redaction):
+            result = check(incomplete)
+            assert result.errors_count == 1, locale
+            assert result.examples[0]["rule_id"] == "log-file-privacy-claims"
+        assert check(f"{limited_sharing} {redaction}").errors_count == 0, locale
+
+    token = TranslationChange(
+        file="messages_es.properties", locale_code="es", key="support.token",
+        source_value="{logFile}", old_value=None, new_value="{logFile}",
+    )
+    assert analyze_translation_changes([token], [], []).errors_count == 0
+
+    input_folder = tmp_path / "resources"
+    _write_properties(input_folder / "messages.properties", {"support.logFileDisclosure": source})
+    for locale, (stale, _, _) in translations.items():
+        _write_properties(
+            input_folder / f"messages_{locale}.properties",
+            {"support.logFileDisclosure": stale},
+        )
+    source_only_diff = (
+        "diff --git a/resources/messages.properties b/resources/messages.properties\n"
+        "+++ b/resources/messages.properties\n"
+        "-support.logFileDisclosure=Review log files before sharing.\n"
+        f"+support.logFileDisclosure={source}\n"
+    )
+    stats = analyze_semantic_qa_changes_for_profiles(
+        diff_text=source_only_diff,
+        repo_root=str(tmp_path),
+        input_folder=str(input_folder),
+        locale_codes=list(translations),
+        localization_profiles=(LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),),
+    )
+    assert stats.errors_count == 4
+    assert {example["file"] for example in stats.examples} == {
+        f"messages_{locale}.properties" for locale in translations
+    }
 
 
 def _write_properties(path: Path, entries: dict[str, str]) -> None:
