@@ -45,6 +45,7 @@ from localize.semantic_quality import (
     SemanticRule,
     TranslationChange,
     analyze_translation_changes,
+    evaluate_log_file_privacy_claims,
     iter_all_translation_entries,
     iter_translation_changes_from_diff,
     load_semantic_rules,
@@ -427,12 +428,58 @@ def analyze_semantic_qa_changes_for_profiles(
             localization_profiles=localization_profiles,
         )
     )
-    return analyze_translation_changes(
+    stats = analyze_translation_changes(
         changes=list(_filter_ignored_changes(changes, ignore_key_patterns)),
         semantic_rules=semantic_rules,
         brand_glossary=brand_glossary,
         retained_source_word_allowlist=retained_source_word_allowlist,
         examples_limit=examples_limit,
+    )
+    # Source-only edits have no changed target lines. Check their existing targets
+    # for the privacy promise without reauditing unrelated translation rules.
+    source_changed_targets: List[TranslationChange] = []
+    changed_target_keys = {(change.file, change.key) for change in changes}
+    for profile in localization_profiles:
+        source_keys = {
+            (change.file, change.key)
+            for change in iter_translation_changes_from_diff(
+                diff_text=diff_text,
+                repo_root=repo_root,
+                input_folder=input_folder,
+                locale_codes=(),
+                localization_format=profile.localization_format,
+                localization_layout=profile.localization_layout,
+                hydrate_source=False,
+            )
+            if not profile.localization_layout.is_target_file(
+                change.file, locale_codes, profile.localization_format
+            )
+        }
+        if not source_keys:
+            continue
+        for entry in iter_all_translation_entries(
+            repo_root=repo_root,
+            input_folder=input_folder,
+            locale_codes=locale_codes,
+            localization_format=profile.localization_format,
+            localization_layout=profile.localization_layout,
+        ):
+            source_path = profile.localization_layout.source_path_for_target(
+                entry.file, locale_codes, profile.localization_format
+            )
+            if (source_path, entry.key) in source_keys and (
+                entry.file, entry.key
+            ) not in changed_target_keys:
+                source_changed_targets.append(entry)
+    source_findings = evaluate_log_file_privacy_claims(
+        _filter_ignored_changes(
+            _deduplicate_translation_changes(source_changed_targets),
+            ignore_key_patterns,
+        )
+    )
+    return _merge_semantic_stats(
+        stats, SemanticQAStats.from_findings(source_findings, examples_limit),
+        examples_limit,
     )
 
 

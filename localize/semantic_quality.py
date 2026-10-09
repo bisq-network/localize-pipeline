@@ -569,6 +569,71 @@ def evaluate_retained_source_words(
     return findings
 
 
+# This claim is security relevant: an older generic warning about inspecting logs
+# must not stand in for the current promises about sharing and identifier removal.
+_LOG_DISCLOSURE_SOURCE = (
+    re.compile(r"\blog[ -]?files?\b", re.IGNORECASE),
+    re.compile(r"\b(?:only|solely|limited)\b", re.IGNORECASE),
+    re.compile(r"\b(?:shar\w*|sent|send)\b", re.IGNORECASE),
+    re.compile(r"\bidentif\w*\b", re.IGNORECASE),
+    re.compile(r"\b(?:replac\w*|redact\w*|remov\w*|mask\w*)\b", re.IGNORECASE),
+)
+_LOG_DISCLOSURE_TARGET = {
+    "es": (
+        r"\b(?:solo|solamente|únicamente)\b",
+        r"\b(?:compart\w*|envia\w*)\b",
+        r"\bidentificador\w*\b",
+        r"\b(?:reemplaz\w*|sustitu\w*|elimin\w*|ocult\w*)\b",
+    ),
+    "fr": (
+        r"\b(?:uniquement|seulement)\b|\bne\b.*\bque\b",
+        r"\b(?:partag\w*|envoy\w*)\b",
+        r"\bidentifiant\w*\b",
+        r"\b(?:remplac\w*|supprim\w*|masqu\w*)\b",
+    ),
+    "hi": (
+        r"केवल|सिर्फ|मात्र|पर ही",
+        r"साझा|भेज",
+        r"पहचान|आईडी",
+        r"बदल|प्रतिस्थापित|हटा|छिपा",
+    ),
+    "pt": (
+        r"\b(?:apenas|somente|só)\b",
+        r"\b(?:compartilh\w*|envi\w*)\b",
+        r"\bidentificador\w*\b",
+        r"\b(?:substitu\w*|troc\w*|remov\w*|ocult\w*)\b",
+    ),
+}
+
+
+def evaluate_log_file_privacy_claims(
+    changes: Iterable[TranslationChange],
+) -> List[SemanticFinding]:
+    """Find translations that omit either promise in log-file disclosure copy."""
+    findings: List[SemanticFinding] = []
+    for change in changes:
+        patterns = _LOG_DISCLOSURE_TARGET.get(_locale_language_code(change.locale_code))
+        if not patterns or not change.source_value:
+            continue
+        source = change.source_value
+        if normalize_value(source) == normalize_value(change.new_value):
+            continue
+        if not all(pattern.search(source) for pattern in _LOG_DISCLOSURE_SOURCE):
+            continue
+        if all(re.search(pattern, change.new_value, re.IGNORECASE) for pattern in patterns):
+            continue
+        findings.append(SemanticFinding(
+            file=change.file,
+            key=change.key,
+            value=change.new_value,
+            reason="Log-file disclosure must preserve limited sharing and identifier replacement.",
+            severity="error",
+            rule_id="log-file-privacy-claims",
+            source="heuristic",
+        ))
+    return findings
+
+
 def _contains_word(value: str, word: str) -> bool:
     return re.search(rf"(?<![A-Za-z]){re.escape(word)}(?![A-Za-z])", value, re.IGNORECASE) is not None
 
@@ -646,6 +711,7 @@ def analyze_translation_changes(
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     findings = evaluate_semantic_rules(changes, semantic_rules)
+    findings.extend(evaluate_log_file_privacy_claims(changes))
     findings.extend(
         evaluate_retained_source_words(
             changes,
