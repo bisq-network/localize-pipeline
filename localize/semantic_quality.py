@@ -525,6 +525,58 @@ def evaluate_semantic_rules(
     return findings
 
 
+_SWEDISH_UNLOCK_RE = re.compile(r"\b(?:lås(?:a|er|t)?\s+upp|upplås\w*)\b", re.IGNORECASE)
+_SWEDISH_LOCK_RE = re.compile(r"\b(?:lås|låsa|låser|låst|låsning(?:en)?)\b", re.IGNORECASE)
+_UNSAVED_NOTE_TARGET_RE = {
+    "lt": re.compile(r"\b(?:neišsaug\w*|neįraš\w*|unsaved)\b", re.IGNORECASE),
+    "sk": re.compile(r"\b(?:neulož\w*|neuklad\w*|nezapís\w*|nie\s+(?:je|sú|sme)?\s*ulož\w*|unsaved)\b", re.IGNORECASE),
+}
+
+
+def evaluate_action_and_state_meaning(changes: Iterable[TranslationChange]) -> List[SemanticFinding]:
+    """Catch a few unambiguous action reversals and omitted warning states."""
+    findings: List[SemanticFinding] = []
+    for change in changes:
+        source_value = change.source_value or ""
+        target_value = change.new_value
+        if not source_value or normalize_value(source_value) == normalize_value(target_value):
+            continue
+        language = _locale_language_code(change.locale_code)
+        rule_id = reason = ""
+
+        if language == "sv" and re.search(r"\bbonds?\b", source_value, re.IGNORECASE):
+            source_unlocks = re.search(r"\bunlock(?:s|ed|ing)?\b", source_value, re.IGNORECASE)
+            source_locks = re.search(r"\block(?:s|ed|ing)?\b", source_value, re.IGNORECASE)
+            target_unlocks = _SWEDISH_UNLOCK_RE.search(target_value)
+            if source_locks and not source_unlocks and target_unlocks:
+                rule_id = "reversed-bond-lock-action"
+                reason = "Swedish bond text says to unlock a bond that the source says to lock."
+            elif source_unlocks and not target_unlocks and _SWEDISH_LOCK_RE.search(target_value):
+                rule_id = "reversed-bond-lock-action"
+                reason = "Swedish bond text says to lock a bond that the source says to unlock."
+
+        unsaved_note = (
+            re.search(r"\b(?:unsaved|not\s+saved)\b", source_value, re.IGNORECASE)
+            and re.search(r"\bnotes?\b", source_value, re.IGNORECASE)
+        )
+        if language in _UNSAVED_NOTE_TARGET_RE and unsaved_note:
+            if not _UNSAVED_NOTE_TARGET_RE[language].search(target_value):
+                rule_id = "missing-unsaved-note-state"
+                reason = "The translated note warning omits that the note is unsaved."
+
+        if rule_id:
+            findings.append(SemanticFinding(
+                file=change.file,
+                key=change.key,
+                value=target_value,
+                reason=reason,
+                severity="error",
+                rule_id=rule_id,
+                source="heuristic",
+            ))
+    return findings
+
+
 def evaluate_retained_source_words(
     changes: Iterable[TranslationChange],
     brand_glossary: Iterable[str],
@@ -646,6 +698,7 @@ def analyze_translation_changes(
     examples_limit: int = 10,
 ) -> SemanticQAStats:
     findings = evaluate_semantic_rules(changes, semantic_rules)
+    findings.extend(evaluate_action_and_state_meaning(changes))
     findings.extend(
         evaluate_retained_source_words(
             changes,
