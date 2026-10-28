@@ -656,6 +656,7 @@ async def test_semantic_reviewer_chunks_and_survives_failed_batch():
         for i in range(55)
     ]
 
+    failed_batches = []
     findings = await review_translation_changes(
         client=object(),
         model="gpt-4o",
@@ -664,9 +665,11 @@ async def test_semantic_reviewer_chunks_and_survives_failed_batch():
         style_rules=[],
         brand_glossary=[],
         model_provider=provider,
+        failed_batches=failed_batches,
     )
 
     assert findings == []
+    assert failed_batches == ["provider unavailable"]
     assert provider.create_chat_completion.await_count == 2
 
 

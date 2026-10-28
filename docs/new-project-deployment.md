@@ -251,3 +251,19 @@ This does not add new semantic policy: configure rules for the invariants your
 project needs. Empty rule configurations skip source enumeration. The standalone
 `localize quality-gate --source-diff-base` interface and format/layout behavior are
 described in [the Action guide](github-action.md).
+
+### Semantic-review failures
+
+A nonempty semantic review receives one confirmation pass against the original
+source and target before its findings can block processing or authorize a
+correction. Both candidate and confirmed findings are retained in the application
+log. Clean reviews use `{"findings": []}` and need no confirmation request.
+Genuine defects remain findings, and invalid, truncated or out-of-scope responses
+remain failures. Confirmation is bounded to one extra provider request per
+flagged batch; it never retries until a clean result appears.
+
+When investigating a repeated stop, compare the running image and its source
+revision with the intended release. A merged fix is not deployed until the image
+contains it. Preserve the failed report, validate the candidate, retain a rollback
+image, then verify an ordinary run's exit and heartbeat. A pending-PR skip does
+not demonstrate that translation processing succeeded.
