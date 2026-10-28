@@ -273,3 +273,9 @@ Confirmation uses a separate `decisions` schema with an explicit `confirmed` or
 invalid verdicts and blank reasons fail closed; severity labels are not accepted
 as confirmation decisions. Rejected claims remain in diagnostics and are never
 removed by matching prose such as "no issue".
+
+Malformed, truncated or out-of-scope semantic responses receive at most one
+contract-repair request per review phase, with unchanged source and target
+values. A second invalid response leaves the batch unvalidated. Valid findings
+are never retried for a cleaner verdict; confirmed defects still block. Every
+repair uses the same provider and counts against any configured request budget.

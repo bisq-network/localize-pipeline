@@ -71,11 +71,11 @@ async def test_confirmed_real_defect_remains_blocking_without_retry_until_pass()
 ])
 async def test_invalid_confirmation_cannot_become_clean(confirmation):
     provider = MagicMock(create_chat_completion=AsyncMock(
-        side_effect=[response([FALSE_FINDING]), confirmation]))
+        side_effect=[response([FALSE_FINDING]), confirmation, confirmation]))
     failed = []
     await run(provider, failed)
     assert len(failed) == 1
-    assert provider.create_chat_completion.await_count == 2
+    assert provider.create_chat_completion.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -85,6 +85,8 @@ async def test_clean_review_needs_no_confirmation():
     assert await run(provider, failed) == []
     assert not failed
     assert provider.create_chat_completion.await_count == 1
+
+
 
 
 @pytest.mark.asyncio
@@ -149,3 +151,68 @@ def test_mixed_confirmation_preserves_real_error_and_source_identity():
     assert result[0]["key"] == "real" and result[0]["severity"] == "error"
     assert result[0]["value"] == "wrong target" and result[0]["suggested_value"] == "corrected"
     assert result[0]["reason"] == decisions[0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_primary_response_is_repaired_once():
+    invalid = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"wrong": []}'), finish_reason="stop")])
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[invalid, response([])]))
+    failed = []
+    assert await run(provider, failed) == [] and not failed
+    assert provider.create_chat_completion.await_count == 2
+    assert "response_contract_error" in provider.create_chat_completion.call_args.kwargs['messages'][1]['content']
+
+
+@pytest.mark.asyncio
+async def test_malformed_confirmation_response_is_repaired_once():
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[
+        response([FALSE_FINDING]), response([]), confirmation(["rejected"]),
+    ]))
+    failed = []
+    assert await run(provider, failed) == [] and not failed
+    assert provider.create_chat_completion.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_repeated_malformed_primary_still_fails_without_confirmation():
+    provider = MagicMock(create_chat_completion=AsyncMock(return_value=response([], "length")))
+    failed = []
+    await run(provider, failed)
+    assert len(failed) == 1
+    assert provider.create_chat_completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_repaired_primary_real_finding_still_requires_confirmation():
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[
+        response([], "length"), response([FALSE_FINDING]), confirmation(["confirmed"]),
+    ]))
+    failed = []
+    findings = await run(provider, failed)
+    assert len(findings) == 1 and findings[0]["severity"] == "error"
+    assert not failed
+    assert provider.create_chat_completion.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_initial_scope_failure_is_reported_after_one_repair():
+    provider = MagicMock(create_chat_completion=AsyncMock(
+        return_value=response([dict(FALSE_FINDING, key="unknown")]),
+    ))
+    failed = []
+    assert await run(provider, failed) == []
+    assert failed == ["Semantic review response contained 1 invalid or out-of-scope finding(s)."]
+    assert provider.create_chat_completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_candidates_survive_confirmation_failure_in_log(caplog):
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[
+        response([FALSE_FINDING]), ValueError("provider unavailable"),
+    ]))
+    failed = []
+    with caplog.at_level("INFO", logger="localize.translation_semantic_reviewer"):
+        await run(provider, failed)
+    assert failed == ["provider unavailable"]
+    assert "Semantic review candidates:" in caplog.text
+    assert FALSE_FINDING["reason"] in caplog.text

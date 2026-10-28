@@ -221,7 +221,8 @@ def normalize_review_response(
     if dropped_count:
         if strict_scope:
             raise SemanticReviewResponseError(
-                "Semantic confirmation contained invalid or out-of-scope findings."
+                f"Semantic review response contained {dropped_count} invalid or "
+                "out-of-scope finding(s)."
             )
         logging.getLogger(__name__).info(
             "Dropped %d out-of-scope semantic review finding(s).", dropped_count
@@ -425,19 +426,53 @@ async def _review_translation_change_batch(
         # Confirm once against the unchanged source and target. This is not a
         # retry-until-clean loop, nor does prose matching dismiss any finding.
         candidates = findings
-        confirmation_messages = build_semantic_confirmation_messages(messages, candidates)
-        response_text = await _request_semantic_response(
-            provider, model, confirmation_messages, reasoning_effort,
+        logging.getLogger(__name__).info(
+            "Semantic review candidates: %s", json.dumps(candidates, ensure_ascii=False),
         )
-        findings = normalize_confirmation_response(response_text, candidates)
+        confirmation_messages = build_semantic_confirmation_messages(messages, candidates)
+        findings = await _request_validated_semantic_response(
+            provider, model, confirmation_messages, reasoning_effort,
+            lambda text: normalize_confirmation_response(text, candidates),
+        )
     return findings
 
 
 async def _request_semantic_findings(
     provider, model, messages, changes, reasoning_effort, *, strict_scope=False,
 ):
-    response_text = await _request_semantic_response(provider, model, messages, reasoning_effort)
-    return normalize_review_response(response_text, changes, strict_scope=strict_scope)
+    return await _request_validated_semantic_response(
+        provider, model, messages, reasoning_effort,
+        lambda text: normalize_review_response(text, changes, strict_scope=strict_scope),
+    )
+
+
+
+async def _request_validated_semantic_response(
+    provider, model, messages, reasoning_effort, normalize,
+):
+    for attempt in range(2):
+        try:
+            response_text = await _request_semantic_response(
+                provider, model, messages, reasoning_effort,
+            )
+            return normalize(response_text)
+        except SemanticReviewResponseError as exc:
+            if attempt:
+                raise
+            logging.getLogger(__name__).warning(
+                "Invalid semantic response; requesting one contract repair: %s", exc,
+            )
+            payload = json.loads(messages[1]["content"])
+            payload["response_contract_error"] = str(exc)
+            payload["response_contract_repair"] = (
+                "Return a complete response matching response_schema exactly, using only "
+                "the supplied source, target and candidate identities. Preserve genuine "
+                "findings and decisions; an invalid response does not mean no issues. "
+                "Do not add fields, null values, markdown or text outside the JSON object."
+            )
+            messages = [dict(messages[0]), {
+                "role": "user", "content": json.dumps(payload, ensure_ascii=False),
+            }]
 
 
 
