@@ -1014,6 +1014,15 @@ async def test_semantic_reviewer_auto_applies_safe_error_suggestions(tmp_path):
         )
     )
 
+    first_response = provider.create_chat_completion.return_value
+    rows = json.loads(first_response.choices[0].message.content)["findings"]
+    provider.create_chat_completion.side_effect = [first_response, SimpleNamespace(choices=[
+        SimpleNamespace(message=SimpleNamespace(content=json.dumps({"decisions": [
+            {"id": f"finding_{i}", "verdict": "confirmed", "reason": row["reason"]}
+            for i, row in enumerate(rows)
+        ]})), finish_reason="stop")
+    ])]
+
     with (
         patch(
             "localize.translation_semantic_reviewer.get_staged_diff",

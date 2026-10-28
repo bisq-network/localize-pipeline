@@ -16,6 +16,12 @@ def response(findings, finish_reason="stop"):
     )])
 
 
+def confirmation(verdicts, reason="Source-grounded decision."):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+        "decisions": [{"id": f"finding_{i}", "verdict": v, "reason": reason} for i, v in enumerate(verdicts)],
+    })), finish_reason="stop")])
+
+
 CHANGE = TranslationChange("mobile_af_ZA.properties", "af_ZA", "logFile",
                            "For logs up to 2 MiB, the entire log is included.",
                            None, "Vir loglêers tot 2 MiB word die hele log ingesluit.")
@@ -34,7 +40,7 @@ async def run(provider, failed):
 @pytest.mark.asyncio
 async def test_contradictory_finding_requires_fresh_source_grounded_confirmation():
     provider = MagicMock(create_chat_completion=AsyncMock(
-        side_effect=[response([FALSE_FINDING]), response([])]))
+        side_effect=[response([FALSE_FINDING]), confirmation(["rejected"])]))
     failed = []
     assert await run(provider, failed) == []
     assert failed == []
@@ -48,7 +54,7 @@ async def test_contradictory_finding_requires_fresh_source_grounded_confirmation
 @pytest.mark.asyncio
 async def test_confirmed_real_defect_remains_blocking_without_retry_until_pass():
     finding = dict(FALSE_FINDING, reason="The target reverses the threshold.")
-    provider = MagicMock(create_chat_completion=AsyncMock(return_value=response([finding])))
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[response([finding]), confirmation(["confirmed"], finding["reason"])]))
     failed = []
     findings = await run(provider, failed)
     assert findings[0]["severity"] == "error"
@@ -91,7 +97,7 @@ async def test_failure_cannot_look_clean_without_failure_collector():
 @pytest.mark.asyncio
 async def test_warning_is_confirmed_and_not_silently_downgraded():
     finding = dict(FALSE_FINDING, severity="warning", reason="Ambiguous referent.")
-    provider = MagicMock(create_chat_completion=AsyncMock(return_value=response([finding])))
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[response([finding]), confirmation(["confirmed"], finding["reason"])]))
     findings = await run(provider, [])
     assert findings[0]["severity"] == "warning"
     assert provider.create_chat_completion.await_count == 2
@@ -103,7 +109,7 @@ async def test_exact_production_findings_are_confirmed_against_both_original_val
     data = json.loads((Path(__file__).parents[1] / "fixtures/semantic_review/mobile_20261028.json").read_text())
     cases = data["cases"]
     provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[
-        response([c["original_finding"] for c in cases]), response([]),
+        response([c["original_finding"] for c in cases]), confirmation(["rejected", "rejected"]),
     ]))
     changes = [TranslationChange(c["file"], "af_ZA", c["key"], c["source"], None, c["target"]) for c in cases]
     failed = []
@@ -115,3 +121,31 @@ async def test_exact_production_findings_are_confirmed_against_both_original_val
     payload = json.loads(provider.create_chat_completion.call_args.kwargs["messages"][1]["content"])
     assert len(payload["candidate_findings"]) == 2
     assert {c["key"]: c["source_value"] for c in payload["changes"]} == {c["key"]: c["source"] for c in cases}
+
+
+@pytest.mark.parametrize("decisions", [
+    [],
+    [{"id": "other", "verdict": "rejected", "reason": "Correct"}],
+    [{"id": "finding_0", "verdict": "rejected", "reason": "Correct"}] * 2,
+    [{"id": "finding_0", "verdict": "rejected", "reason": " "}],
+    [{"id": "finding_0", "verdict": "maybe", "reason": "Unsure"}],
+    [{"id": "finding_0", "verdict": "rejected", "reason": "Correct", "severity": "error"}],
+])
+def test_confirmation_requires_complete_unambiguous_decisions(decisions):
+    from localize.translation_semantic_reviewer import normalize_confirmation_response, SemanticReviewResponseError
+    with pytest.raises(SemanticReviewResponseError):
+        normalize_confirmation_response(json.dumps({"decisions": decisions}), [FALSE_FINDING])
+
+
+def test_mixed_confirmation_preserves_real_error_and_source_identity():
+    from localize.translation_semantic_reviewer import normalize_confirmation_response
+    real = dict(FALSE_FINDING, key="real", value="wrong target", suggested_value="corrected")
+    decisions = [
+        {"id": "finding_1", "verdict": "confirmed", "reason": "The target reverses the source condition."},
+        {"id": "finding_0", "verdict": "rejected", "reason": "Faithful paraphrase."},
+    ]
+    result = normalize_confirmation_response(json.dumps({"decisions": decisions}), [FALSE_FINDING, real])
+    assert len(result) == 1
+    assert result[0]["key"] == "real" and result[0]["severity"] == "error"
+    assert result[0]["value"] == "wrong target" and result[0]["suggested_value"] == "corrected"
+    assert result[0]["reason"] == decisions[0]["reason"]

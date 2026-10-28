@@ -267,3 +267,9 @@ revision with the intended release. A merged fix is not deployed until the image
 contains it. Preserve the failed report, validate the candidate, retain a rollback
 image, then verify an ordinary run's exit and heartbeat. A pending-PR skip does
 not demonstrate that translation processing succeeded.
+
+Confirmation uses a separate `decisions` schema with an explicit `confirmed` or
+`rejected` verdict for every candidate id. Missing, duplicate or unknown ids,
+invalid verdicts and blank reasons fail closed; severity labels are not accepted
+as confirmation decisions. Rejected claims remain in diagnostics and are never
+removed by matching prose such as "no issue".
