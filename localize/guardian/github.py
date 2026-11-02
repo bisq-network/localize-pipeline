@@ -1448,7 +1448,11 @@ class GitHubReader:
         previous_feedback_for_pull: Callable[[int], Iterable[FeedbackRevision]]
         | None = None,
     ) -> ClosedPullScanResult:
-        """Restart at page one and hydrate bounded unseen pulls in one window."""
+        """Hydrate bounded unseen pulls without relying on mutable API ordering.
+
+        Timestamps filter individual pulls only. Completion requires reaching
+        the actual listing end and confirming no eligible identity was missed.
+        """
 
         for value, label in ((cutoff, "cutoff"), (upper_bound, "upper_bound")):
             if (
@@ -1649,7 +1653,6 @@ class GitHubReader:
         def listing_is_confirmed_complete() -> bool:
             """Re-scan identities before declaring a mutable listing complete."""
 
-            previous_updated_at: datetime | None = None
             pull_numbers_by_id: dict[int, int] = {}
             pull_ids_by_number: dict[int, int] = {}
             observed: set[tuple[int, int]] = set()
@@ -1698,22 +1701,13 @@ class GitHubReader:
                         raise GitHubAPIError(
                             "GitHub closed pulls contained an identity collision"
                         )
-                    if (
-                        previous_updated_at is not None
-                        and updated_at > previous_updated_at
-                    ):
-                        raise GitHubAPIError(
-                            "GitHub closed pulls were not in descending "
-                            "updated_at order"
-                        )
                     observed.add(identity)
                     pull_numbers_by_id[pull.pull_id] = pull.number
                     pull_ids_by_number[pull.number] = pull.pull_id
-                    previous_updated_at = updated_at
                     if updated_at > upper_bound:
                         continue
                     if updated_at < cutoff:
-                        return True
+                        continue
                     if (
                         self.policy.permits(pull)
                         and identity not in covered_identities
@@ -1820,7 +1814,6 @@ class GitHubReader:
                     cycle_complete=False,
                 )
 
-        previous_updated_at: datetime | None = None
         pull_numbers_by_id: dict[int, int] = {}
         pull_ids_by_number: dict[int, int] = {}
         seen_pull_identities: set[tuple[int, int]] = set()
@@ -1876,11 +1869,6 @@ class GitHubReader:
                 seen_pull_identities.add(identity)
                 pull_numbers_by_id[pull.pull_id] = pull.number
                 pull_ids_by_number[pull.number] = pull.pull_id
-                if previous_updated_at is not None and updated_at > previous_updated_at:
-                    raise GitHubAPIError(
-                        "GitHub closed pulls were not in descending updated_at order"
-                    )
-                previous_updated_at = updated_at
                 parsed_page.append((offset, pull, updated_at))
 
             for offset, pull, updated_at in parsed_page:
@@ -1888,11 +1876,7 @@ class GitHubReader:
                 if updated_at > upper_bound:
                     continue
                 if updated_at < cutoff:
-                    return ClosedPullScanResult(
-                        items=tuple(items),
-                        hydration_attempts=hydration_attempts,
-                        cycle_complete=listing_is_confirmed_complete(),
-                    )
+                    continue
                 if (
                     identity in priority_set
                     or identity in seen
