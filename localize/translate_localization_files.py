@@ -1631,6 +1631,7 @@ Provide the translation **of the Value only**, following the instructions above.
 
         max_retries = 5
         base_delay = 1
+        source_echo_feedback = ""
 
         for attempt in range(1, max_retries + 1):  # type: ignore[arg-type]
             try:
@@ -1643,10 +1644,10 @@ Provide the translation **of the Value only**, following the instructions above.
                             ChatCompletionUserMessageParam(role="user", content=prompt.format(
                                 brand_glossary_text=brand_glossary_text,
                                 glossary_text=glossary_text,
-                                context_examples_text=context_examples_text,
+                                context_examples_text=("" if source_echo_feedback else context_examples_text),
                                 key=_display_translation_key(key),
                                 processed_text=processed_text
-                            ))
+                            ) + source_echo_feedback)
                         ],
                         temperature=0.3,
                         timeout=60.0,
@@ -1663,6 +1664,27 @@ Provide the translation **of the Value only**, following the instructions above.
 
                 # Clean the translated text
                 translated_text = clean_translated_text(translated_text, text)
+
+                if (
+                    text.strip()
+                    and normalize_value(translated_text) == normalize_value(text)
+                    and not is_accepted_source_identical(
+                        language_code, key, text, translated_text,
+                        ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
+                    )
+                ):
+                    logger.warning("Translation echoed the source for key '%s'; retrying within the model attempt budget.", key)
+                    source_echo_feedback = (
+                        "\nThe previous response repeated the English source. "
+                        f"Rephrase it naturally in {target_language}, preserving exactly "
+                        "the source meaning and placeholders. Use the supplied preferred "
+                        "terminology where appropriate. Do not create a difference merely "
+                        "by changing capitalization, punctuation, or whitespace, and do "
+                        "not add or remove information. Return only the translated value."
+                    )
+                    if await _handle_retry(attempt, max_retries, base_delay, key):
+                        continue
+                    return index, text, False
 
                 logger.debug(f"Translated key '{key}' successfully.")
                 return index, translated_text, True
@@ -1858,6 +1880,7 @@ async def holistic_review_async(
         localization_format: Optional[LocalizationFormat] = None,
         translation_glossary: Optional[Mapping[str, str]] = None,
         translation_glossary_enforcement: str = "exact",
+        source_translations: Optional[Mapping[str, str]] = None,
 ) -> Optional[Dict[str, str]]:
     """Review a bounded localization excerpt and return scoped corrections.
 
@@ -1866,6 +1889,8 @@ async def holistic_review_async(
         translated_content (str): Draft content for requested and context keys.
         target_language (str): The target language of the translation.
         keys_to_review (List[str]): The specific list of keys to review and return.
+        source_translations: Authoritative source values for rejecting source echoes
+            within the existing review retry budget.
         semaphore (asyncio.Semaphore): For concurrency control.
         rate_limiter (AsyncLimiter): For rate limiting.
 
@@ -1962,6 +1987,31 @@ async def holistic_review_async(
                     restored_json[review_items[item_id]] = restore_placeholders_in_properties(
                         value,
                         review_placeholder_map,
+                    )
+
+                locale = language_name_to_code(target_language) or ""
+                source_echo_keys = [
+                    key for key, value in restored_json.items()
+                    if (source_translations or {}).get(key, "").strip()
+                    and normalize_value(value) == normalize_value(source_translations[key])
+                    and not is_accepted_source_identical(
+                        locale, key, source_translations[key], value,
+                        ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
+                    )
+                ]
+                if source_echo_keys:
+                    review_user_prompt += (
+                        "\nThe previous review repeated the English source for "
+                        + ", ".join(_display_translation_key(key) for key in source_echo_keys)
+                        + f". Rephrase those values naturally in {target_language}, preserving "
+                        "exactly the source meaning and placeholders. Use the supplied preferred "
+                        "terminology where appropriate. Do not create a difference merely by "
+                        "changing capitalization, punctuation, or whitespace, and do not add "
+                        "or remove information. Return translations for every requested item."
+                    )
+                    raise jsonschema.ValidationError(
+                        "Holistic review echoed source text for requested key(s): "
+                        + ", ".join(source_echo_keys)
                     )
 
                 # Debug: Check restoration results
@@ -2939,14 +2989,17 @@ async def process_translation_queue(
 
             final_corrected_translations = {}
             # --- Holistic Review Step ---
-            # Instead of one large review, we chunk the keys to avoid token limits.
-            logger.info(f"Performing holistic review for {len(keys_to_translate)} keys in '{translation_file}'...")
+            # Exhausted drafts remain failed and retryable. Sending their source
+            # fallbacks to review cannot clear that failure, and one rejected
+            # fallback would invalidate the review of the entire healthy chunk.
+            keys_to_review = [key for key in keys_to_translate if key not in model_failed_keys]
+            logger.info(f"Performing holistic review for {len(keys_to_review)} keys in '{translation_file}'...")
 
             # Create chunks of keys. Translation-memory hits stay in scope so they
             # receive the same review/glossary scrutiny as fresh model output.
             key_chunks = [
-                keys_to_translate[i:i + HOLISTIC_REVIEW_CHUNK_SIZE]
-                for i in range(0, len(keys_to_translate), HOLISTIC_REVIEW_CHUNK_SIZE)
+                keys_to_review[i:i + HOLISTIC_REVIEW_CHUNK_SIZE]
+                for i in range(0, len(keys_to_review), HOLISTIC_REVIEW_CHUNK_SIZE)
             ]
 
             review_inputs = []
@@ -2980,6 +3033,7 @@ async def process_translation_queue(
                     localization_format=localization_format,
                     translation_glossary=language_glossary,
                     translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
+                    source_translations=source_translations,
                 ) for key_chunk, review_content_keys in review_inputs],
                 return_exceptions=True,
             )

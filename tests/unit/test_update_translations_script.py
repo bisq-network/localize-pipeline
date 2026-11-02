@@ -604,10 +604,11 @@ def test_pr_body_includes_translation_run_summary_metrics():
 
 
 def test_pending_pr_gate_does_not_swallow_gh_failures():
+    """Both blocking-PR queries fail closed if GitHub cannot be read."""
     script = (REPO_ROOT / "update-translations.sh").read_text()
 
     assert "if ! MANUAL_BLOCK_PR=$(gh pr list" in script
-    assert "if ! existing_pr_branches=$(gh pr list" in script
+    assert "if ! existing_prs=$(gh pr list" in script
     assert (
         'gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --search "in:title $BLOCKING_KEYWORD" --json number -q \'.[0].number\' || true'
         not in script

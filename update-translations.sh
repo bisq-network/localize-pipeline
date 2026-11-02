@@ -383,14 +383,18 @@ send_heartbeat_if_configured() {
 }
 
 # Helper function to check for blocking PRs and exit if found.
-# It also pings a health check URL on a successful skip.
+# Only a verified quality-successful pending PR is a healthy skip.
 # Arguments:
 #   $1: The reason for skipping (e.g., "Found manually-blocking PR #123").
+#   $2: Whether every pending translation PR has verified successful quality.
 check_and_exit_if_blocked() {
     log "BLOCKING CONDITION DETECTED: $1" "ERROR"
     log "Aborting translation run. Please resolve the blocking issue." "ERROR"
     record_pipeline_event "pending_pr_guard" "reason=$1"
-    # Send heartbeat ping before exiting to indicate successful (expected) skip
+    if [ "${2:-false}" != "true" ]; then
+        log "Pending output quality is blocked or unverified; withholding the success heartbeat." "ERROR"
+        exit 1
+    fi
     send_heartbeat_if_configured "pending_pr_guard"
     exit 0 # Exit cleanly to prevent cron from flagging it as a failure
 }
@@ -481,13 +485,49 @@ fi
 if command_exists gh && [ -n "${GITHUB_TOKEN:-}" ]; then
   log "Checking for existing open translation PRs on repo '$UPSTREAM_REPO_NAME'..."
   # Note: The 'gh pr list' command requires GITHUB_TOKEN to be in the environment.
-  if ! existing_pr_branches=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --json headRefName -q '.[].headRefName'); then
+  if ! existing_prs=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --limit 100 --json number,headRefName,headRefOid,headRepository); then
       log "Failed to query existing translation PRs on repo '$UPSTREAM_REPO_NAME'." "ERROR"
       exit 1
   fi
-  EXISTING_PR_BRANCH=$(printf '%s\n' "$existing_pr_branches" | grep "^${TRANSLATION_BRANCH_PREFIX}" | head -n 1 || true)
-  if [ -n "$EXISTING_PR_BRANCH" ]; then
-      check_and_exit_if_blocked "Found existing open translation PR from branch: $EXISTING_PR_BRANCH"
+  if ! translation_prs=$(printf '%s' "$existing_prs" | jq -ce --arg prefix "$TRANSLATION_BRANCH_PREFIX" '
+      if type != "array" then error("Expected PR array")
+      elif length >= 100 then error("Pending PR scan reached its bound") else
+        [.[] | select(.headRefName | startswith($prefix))]
+      end'); then
+      log "Invalid pending translation PR response; withholding the success heartbeat." "ERROR"
+      exit 1
+  fi
+  if [ "$(printf '%s' "$translation_prs" | jq length)" -gt 0 ]; then
+      pending_quality_ok=true
+      # The gate is published on the configured fork, not necessarily exposed
+      # by the upstream PR rollup. Inspect its exact current head instead.
+      if ! pending_heads=$(printf '%s' "$translation_prs" | jq -er '.[] | [.number, .headRefOid, .headRepository.nameWithOwner] | @tsv'); then
+          pending_quality_ok=false
+      fi
+      while IFS=$'\t' read -r pending_number pending_head pending_repo; do
+          if [[ ! "$pending_number" =~ ^[1-9][0-9]*$ ]] ||
+             [[ ! "$pending_head" =~ ^[0-9a-f]{40}$ ]] ||
+             [ -z "${FORK_REPO_NAME:-}" ] || [ "$pending_repo" != "$FORK_REPO_NAME" ]; then
+              pending_quality_ok=false
+              break
+          fi
+          if ! pending_quality_state=$(gh api "repos/$pending_repo/commits/$pending_head/status" \
+              --jq '[(.statuses[] | select(.context == "translation-quality-gate"))][0].state // ""') ||
+             [ "$pending_quality_state" != "success" ]; then
+              pending_quality_ok=false
+              break
+          fi
+      done <<< "$pending_heads"
+      if [ "$pending_quality_ok" = true ]; then
+          # A force-push/new batch during status reads invalidates the snapshot.
+          if ! current_prs=$(gh pr list --state open --author "@me" --repo "$UPSTREAM_REPO_NAME" --limit 100 --json number,headRefName,headRefOid,headRepository) ||
+             ! printf '%s' "$current_prs" | jq -e --arg prefix "$TRANSLATION_BRANCH_PREFIX" --argjson previous "$translation_prs" '
+                 type == "array" and length < 100 and
+                 ([.[] | select(.headRefName | startswith($prefix))] | sort_by(.number)) == ($previous | sort_by(.number))' >/dev/null; then
+              pending_quality_ok=false
+          fi
+      fi
+      check_and_exit_if_blocked "Found existing open translation PRs" "$pending_quality_ok"
   fi
   log "No pending translation PRs found. Proceeding with translation check."
 else
@@ -1085,6 +1125,10 @@ PY
         return 1
     fi
     log "Published translation-quality-gate status on $status_repo: $quality_state"
+    if [ "$quality_state" != "success" ] || jq -e '.blocking == true' "$QUALITY_REPORT_JSON" >/dev/null; then
+        QUALITY_BLOCKED_BATCHES=$((${QUALITY_BLOCKED_BATCHES:-0} + 1))
+        record_pipeline_event "quality_blocked" "url=$PR_URL" "branch=$branch"
+    fi
     # Strict machine evidence is separate from reviewer authority. Guardian
     # consumes it only when the operator explicitly pins this producer actor.
     local quality_pr_number="${PR_URL##*/}"
@@ -1099,6 +1143,7 @@ PY
 
 publish_translation_changes() {
 local app_root="${APP_ROOT:-/app}"
+QUALITY_BLOCKED_BATCHES=0
 TRANSLATION_CHANGES_CREATED=false
 target_root_prefix="${TARGET_PROJECT_ROOT%/}"
 REL_INPUT_FOLDER="${ABSOLUTE_INPUT_FOLDER#"$target_root_prefix"/}"
@@ -1235,6 +1280,10 @@ fi
 }
 
 publish_translation_changes
+if [ "${QUALITY_BLOCKED_BATCHES:-0}" -gt 0 ]; then
+    log "$QUALITY_BLOCKED_BATCHES published translation PR batch(es) remain quality-blocked; retaining the source baseline and withholding the success heartbeat." "ERROR"
+    exit 1
+fi
 if [ "${SKIPPED_TRANSLATION_COUNT:-0}" -gt 0 ]; then
     log "Skipped translation inputs remain unresolved; retaining the source baseline and withholding the success heartbeat." "ERROR"
     exit 1
