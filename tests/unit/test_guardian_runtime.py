@@ -2459,7 +2459,10 @@ def test_hourly_history_retry_preserves_interval_cap_and_auth_circuit(
                     authentication_circuit_open=authentication_failure,
                     failures=("GitHubAPIError",),
                 )
-            return PollOutcome(lease_acquired=True)
+            return PollOutcome(
+                lease_acquired=True,
+                historical_repositories_polled=int(include_history),
+            )
 
     @contextmanager
     def credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
@@ -2484,3 +2487,56 @@ def test_hourly_history_retry_preserves_interval_cap_and_auth_circuit(
     clock[0] += timedelta(hours=1)
     assert runtime.run_once(config_path=config_path, scheduled=True) == 0
     assert calls == [True, True, False]
+
+
+@pytest.mark.parametrize("completed_repositories", [-1, 0, 1])
+def test_pending_history_retry_survives_intervening_open_poll_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, completed_repositories: int,
+) -> None:
+    """An incomplete intervening poll cannot discard pending history discovery."""
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    config_path.write_text(
+        "schedule: {poll_interval_seconds: 3600, max_polls_per_day: 4}\n"
+        + config_path.read_text(), encoding="utf-8",
+    )
+    clock = [NOW]
+    calls = []
+
+    class Controller:
+        def poll_once(self, *, include_history: bool) -> PollOutcome:
+            """Model discovery failure, partial/open failure, then recovery."""
+            calls.append(include_history)
+            if len(calls) == 1:
+                return PollOutcome(
+                    lease_acquired=True, historical_scan_retryable=True,
+                    failures=("GitHubAPIError",),
+                )
+            if len(calls) == 2:
+                if completed_repositories == -1:
+                    raise RuntimeError("Poll interrupted before bounded outcome")
+                return PollOutcome(
+                    lease_acquired=True, failures=("GitHubAPIError",),
+                    historical_repositories_polled=completed_repositories,
+                )
+            return PollOutcome(
+                lease_acquired=True,
+                historical_repositories_polled=int(include_history),
+            )
+
+    @contextmanager
+    def credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        """Keep the schedule test independent of live credentials."""
+        yield lambda: {}
+
+    monkeypatch.setattr(runtime, "_local_now", lambda: clock[0])
+    monkeypatch.setattr(runtime, "git_credential_environment", credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_: Controller())
+    for index, expected_exit in enumerate((1, 1, 0, 0)):
+        if index == 1 and completed_repositories == -1:
+            with pytest.raises(runtime.GuardianRuntimeError):
+                runtime.run_once(config_path=config_path, scheduled=True)
+        else:
+            assert runtime.run_once(config_path=config_path, scheduled=True) == expected_exit
+        clock[0] += timedelta(hours=1)
+    assert calls == [True, True, True, False]
