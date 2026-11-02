@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "file": "mobile_af_ZA.properties",
+      "key": "mobile.genericError.reportInfo.logFile",
+      "source": "It will make debugging easier if you attach the log file to your bug report. For logs up to 2 MiB, the entire log is included. For larger logs, only the most recent portion is included. Network addresses, profile and trade identifiers are replaced with placeholders before the shared copy leaves the device.",
+      "target": "Dit sal foutopsporing makliker maak as jy die loglêer by jou foutverslag aanheg. Vir loglêers tot 2 MiB word die hele log ingesluit. Vir groter loglêers word slegs die mees onlangse gedeelte ingesluit. Netwerkadresse, profiel- en handel-ID's word met plekhouers vervang voordat die gedeelde kopie die toestel verlaat.",
+      "original_finding": {
+        "file": "mobile_af_ZA.properties",
+        "key": "mobile.genericError.reportInfo.logFile",
+        "severity": "error",
+        "reason": "The source says that for logs up to 2 MiB the entire log is included, and only larger logs are truncated. The target changes this to 'Vir loglêers tot 2 MiB word die hele log ingesluit', which preserves the condition and meaning, so no issue. However, 'handel-ID's' correctly matches trade identifiers. No semantic issue found."
+      }
+    },
+    {
+      "file": "mobile_af_ZA.properties",
+      "key": "mobile.trustedNodeSetup.previousNodePushRelease.failed",
+      "source": "Your previous trusted node could not be reached to stop its push notifications. Ask its operator to remove this device, or you may keep receiving them.",
+      "target": "Jou vorige vertroude nodus kon nie bereik word om sy stootkennisgewings te stop nie. Vra sy operateur om hierdie toestel te verwyder, anders kan jy dit steeds ontvang.",
+      "original_finding": {
+        "file": "mobile_af_ZA.properties",
+        "key": "mobile.trustedNodeSetup.previousNodePushRelease.failed",
+        "severity": "error",
+        "reason": "The source says the operator should remove this device, or you may keep receiving notifications. The target changes the second clause to 'anders kan jy dit steeds ontvang', which omits that the received item is the push notifications and weakens the cause/effect. It should preserve that you may keep receiving them.",
+        "suggested_value": "Jou vorige vertroude nodus kon nie bereik word om sy stootkennisgewings te stop nie. Vra sy operateur om hierdie toestel te verwyder, anders kan jy dit steeds ontvang."
+      }
+    }
+  ]
+}
