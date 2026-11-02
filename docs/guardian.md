@@ -1321,8 +1321,12 @@ and the existing per-run timeouts, bounded model retries, and no-fallback
 authentication policy remain unchanged. A run with unfinished feedback can retry
 that work, but completed publications retain their existing idempotency checks.
 
-Responsive scheduled polls attempt the closed-PR backlog only once per local day;
-later polls concentrate on open PRs and their prevention follow-up. This also means
+Responsive scheduled polls normally attempt the closed-PR backlog once per local
+day; later polls concentrate on open PRs and their prevention follow-up. A
+non-authentication GitHub error while discovering that backlog leaves its frozen
+discovery window unchanged and retries at the next scheduled poll, within the
+configured interval and daily poll limit. Authentication circuits still stop
+scheduled retries. This also means
 a failed historical publication waits until the next daily history attempt unless
 the operator explicitly runs `guardian run` without `--scheduled` after repair.
 Manual polls include historical work and count toward the day's poll checkpoint,

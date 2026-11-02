@@ -1690,6 +1690,7 @@ def _poll_with_locked_state(
                             previous_history = state.latest_health(_HISTORY_ATTEMPT_COMPONENT)
                             include_history = (
                                 not scheduled or previous_history is None
+                                or previous_history.status == "retryable"
                                 or previous_history.details.get("local_date")
                                 != attempted_at.date().isoformat()
                             )
@@ -1701,6 +1702,17 @@ def _poll_with_locked_state(
                                     checked_at=attempted_at,
                                 )
                             outcome = controller.poll_once(include_history=include_history)
+                            if include_history:
+                                history_status = "failed" if _exit_code(outcome) else "ok"
+                                if outcome.historical_scan_retryable:
+                                    history_status = "retryable"
+                                state.record_health(
+                                    component=_HISTORY_ATTEMPT_COMPONENT,
+                                    status=history_status,
+                                    message="Historical backfill attempt finished.",
+                                    details={"local_date": attempted_at.date().isoformat()},
+                                    checked_at=attempted_at,
+                                )
                             state.record_health(
                                 component=_RESPONSIVE_SCHEDULE_COMPONENT,
                                 status="failed" if _exit_code(outcome) else "ok",

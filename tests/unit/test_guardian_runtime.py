@@ -2434,3 +2434,53 @@ def test_run_once_rejects_symlinked_or_non_private_state_paths(
     os.chmod(tmp_path / ".guardian", 0o755)
     with pytest.raises(runtime.GuardianRuntimeError, match="private"):
         runtime.run_once(config_path=config_path)
+
+
+@pytest.mark.parametrize("authentication_failure", [False, True])
+def test_hourly_history_retry_preserves_interval_cap_and_auth_circuit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, authentication_failure: bool,
+) -> None:
+    """A failed discovery retries hourly, while genuine auth still stops calls."""
+    config_path = tmp_path / "guardian.yaml"
+    _write_minimal_config(config_path)
+    config_path.write_text(
+        "schedule: {poll_interval_seconds: 3600, max_polls_per_day: 3}\n"
+        + config_path.read_text(), encoding="utf-8",
+    )
+    clock = [NOW]
+    calls = []
+
+    class Controller:
+        def poll_once(self, *, include_history: bool) -> PollOutcome:
+            calls.append(include_history)
+            if len(calls) == 1:
+                return PollOutcome(
+                    lease_acquired=True, historical_scan_retryable=True,
+                    authentication_circuit_open=authentication_failure,
+                    failures=("GitHubAPIError",),
+                )
+            return PollOutcome(lease_acquired=True)
+
+    @contextmanager
+    def credentials(*_args: object, **_kwargs: object) -> Iterator[object]:
+        yield lambda: {}
+
+    monkeypatch.setattr(runtime, "_local_now", lambda: clock[0])
+    monkeypatch.setattr(runtime, "git_credential_environment", credentials)
+    monkeypatch.setattr(runtime, "_build_controller", lambda **_: Controller())
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 1
+    clock[0] += timedelta(seconds=3599)
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    assert calls == [True]
+    clock[0] += timedelta(seconds=1)
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    if authentication_failure:
+        assert calls == [True]
+        return
+    assert calls == [True, True]
+    clock[0] += timedelta(hours=1)
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    assert calls == [True, True, False]
+    clock[0] += timedelta(hours=1)
+    assert runtime.run_once(config_path=config_path, scheduled=True) == 0
+    assert calls == [True, True, False]
