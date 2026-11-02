@@ -2073,91 +2073,67 @@ def test_reader_rejects_unsafe_closed_pull_batch_bound(
             )
 
 
-@pytest.mark.parametrize(
-    ("pulls", "match"),
-    [
-        (
-            [
-                _pr_payload(
-                    2,
-                    state="closed",
-                    updated_at="2026-08-30T10:00:00Z",
-                ),
-                _pr_payload(
-                    1,
-                    state="closed",
-                    updated_at="2026-08-30T11:00:00Z",
-                ),
-            ],
-            "descending updated_at order",
-        ),
-    ],
-)
-def test_reader_fails_closed_for_malformed_or_misordered_closed_listing(
-    pulls: list[dict],
-    match: str,
-) -> None:
+@pytest.mark.parametrize("across_pages", [False, True])
+def test_closed_reader_finds_eligible_pull_after_older_cutoff_item(across_pages: bool) -> None:
+    """API order cannot hide an in-window pull behind older items or pages."""
+    pages = []
+    old_pulls = [
+        _pr_payload(number, state="closed", author_id=999,
+                    updated_at="2026-07-01T10:00:00Z")
+        for number in range(200, 100, -1)
+    ]
+    eligible = _pr_payload(1, state="closed", updated_at="2026-08-30T11:00:00Z")
+
     def handler(request: httpx.Request) -> httpx.Response:
+        """Return a stable but deliberately unordered public listing."""
         if request.url.path == "/repos/acme/app":
             return _json_response(request, _repo_payload())
         if request.url.path == "/repos/acme/app/pulls":
-            return _json_response(request, pulls)
-        if "/issues/" in request.url.path or "/pulls/" in request.url.path:
+            page = int(request.url.params["page"])
+            pages.append(page)
+            if across_pages:
+                return _json_response(request, old_pulls if page == 1 else [eligible])
+            return _json_response(request, [old_pulls[0], eligible])
+        if request.url.path == "/repos/acme/app/pulls/1":
+            return _json_response(request, eligible)
+        if "/issues/1/" in request.url.path or "/pulls/1/" in request.url.path:
             return _json_response(request, [])
         raise AssertionError(request.url.path)
 
-    with httpx.Client(
-        base_url="https://api.github.test",
-        transport=httpx.MockTransport(handler),
-    ) as client:
-        with pytest.raises(GitHubAPIError, match=match):
-            GitHubReader(client, _policy()).collect_closed_pull_requests(
-                cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
-                upper_bound=CLOSED_UPPER,
-                max_prs_per_poll=10,
-            )
+    with httpx.Client(base_url="https://api.github.test", transport=httpx.MockTransport(handler)) as client:
+        result = GitHubReader(client, _policy()).collect_closed_pull_requests(
+            cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            upper_bound=CLOSED_UPPER, max_prs_per_poll=10,
+        )
+    assert [snapshot.pull_request.number for snapshot in result.snapshots] == [1]
+    assert result.hydration_attempts == 1
+    assert result.cycle_complete is True
+    assert pages == ([1, 2, 1, 2] if across_pages else [1, 1])
 
 
-def test_reader_fails_closed_for_order_inversion_across_pages() -> None:
+def test_closed_confirmation_checks_unseen_pull_after_old_item() -> None:
+    """The confirmation scan must not falsely complete at an old timestamp."""
+    listing_calls = 0
+    old = _pr_payload(3, state="closed", updated_at="2026-07-01T10:00:00Z")
+    unseen = _pr_payload(1, state="closed", updated_at="2026-08-30T11:00:00Z")
+
     def handler(request: httpx.Request) -> httpx.Response:
+        """Introduce an eligible pull only during confirmation, after an old one."""
+        nonlocal listing_calls
         if request.url.path == "/repos/acme/app":
             return _json_response(request, _repo_payload())
-        page = int(request.url.params["page"])
-        if page == 1:
-            return _json_response(
-                request,
-                [
-                    _pr_payload(
-                        number,
-                        state="closed",
-                        author_id=999,
-                        updated_at="2026-08-30T10:00:00Z",
-                    )
-                    for number in range(200, 100, -1)
-                ],
-            )
-        return _json_response(
-            request,
-            [
-                _pr_payload(
-                    100,
-                    state="closed",
-                    author_id=999,
-                    updated_at="2026-08-30T11:00:00Z",
-                )
-            ],
-        )
+        assert request.url.path == "/repos/acme/app/pulls"
+        listing_calls += 1
+        return _json_response(request, [old] if listing_calls == 1 else [old, unseen])
 
-    with httpx.Client(
-        base_url="https://api.github.test",
-        transport=httpx.MockTransport(handler),
-    ) as client:
-        with pytest.raises(GitHubAPIError, match="descending updated_at order"):
-            GitHubReader(client, _policy()).collect_closed_pull_requests(
-                cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
-                upper_bound=CLOSED_UPPER,
-                max_prs_per_poll=1,
-            )
+    with httpx.Client(base_url="https://api.github.test", transport=httpx.MockTransport(handler)) as client:
+        result = GitHubReader(client, _policy()).collect_closed_pull_requests(
+            cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            upper_bound=CLOSED_UPPER, max_prs_per_poll=10,
+        )
+    assert result.items == ()
+    assert result.cycle_complete is False
+    assert listing_calls == 2
 
 
 def test_reader_fails_closed_on_malformed_listing_item() -> None:
@@ -2404,9 +2380,11 @@ def test_closed_reader_advances_through_a_page_with_no_eligible_pulls() -> None:
     assert observed_pages == [1, 2, 1, 2]
 
 
+@pytest.mark.parametrize("updated_at", ["2026-08-30T09:00:00Z", "2026-07-01T09:00:00Z"])
 def test_closed_reader_fails_visibly_when_last_allowed_page_is_full(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, updated_at: str,
 ) -> None:
+    """Even pages older than cutoff must reach a real end within the bound."""
     monkeypatch.setattr(
         guardian_github,
         "_MAX_CLOSED_PULL_LIST_PAGES_PER_POLL",
@@ -2429,7 +2407,7 @@ def test_closed_reader_fails_visibly_when_last_allowed_page_is_full(
                     number,
                     state="closed",
                     author_id=999,
-                    updated_at="2026-08-30T09:00:00Z",
+                    updated_at=updated_at,
                 )
                 for number in range(start + 99, start - 1, -1)
             ],
@@ -4045,7 +4023,7 @@ def test_review_reply_parent_is_retained_for_reporting():
 
 @pytest.mark.parametrize("status", [200, 401])
 def test_runtime_history_adapter_preserves_listing_and_auth_failure(status: int) -> None:
-    """The credential adapter must not reclassify an inconsistent API listing."""
+    """The credential adapter must not reclassify a malformed API listing."""
     from localize.guardian.models import RepositoryPolicy
     from localize.guardian.runtime import AuthenticatedGitHubSnapshotProvider
 
@@ -4069,8 +4047,7 @@ def test_runtime_history_adapter_preserves_listing_and_auth_failure(status: int)
             return _json_response(request, _repo_payload())
         assert request.url.path == "/repos/acme/app/pulls"
         return httpx.Response(status, json=[
-            _pr_payload(2, state="closed", updated_at="2026-08-30T10:00:00Z"),
-            _pr_payload(1, state="closed", updated_at="2026-08-30T11:00:00Z"),
+            _pr_payload(2, state="closed", updated_at="not-a-timestamp"),
         ])
 
     class Credential:
@@ -4088,6 +4065,38 @@ def test_runtime_history_adapter_preserves_listing_and_auth_failure(status: int)
         )
     assert isinstance(caught.value, GitHubAuthenticationError) is (status == 401)
     if status == 200:
-        assert "descending updated_at order" in str(caught.value)
+        assert "malformed" in str(caught.value)
     assert requests == ["/repos/acme/app", "/repos/acme/app/pulls"]
     assert TOKEN not in str(caught.value)
+
+
+def test_closed_confirmation_refuses_old_full_pages_at_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A growing listing cannot turn confirmation's safety limit into success."""
+    monkeypatch.setattr(guardian_github, "_MAX_CLOSED_PULL_LIST_PAGES_PER_POLL", 2)
+    listing_calls = 0
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Make discovery empty, then fill every bounded confirmation page."""
+        nonlocal listing_calls
+        if request.url.path == "/repos/acme/app":
+            return _json_response(request, _repo_payload())
+        assert request.url.path == "/repos/acme/app/pulls"
+        listing_calls += 1
+        if listing_calls == 1:
+            return _json_response(request, [])
+        page = int(request.url.params["page"])
+        pages.append(page)
+        return _json_response(request, [
+            _pr_payload(page * 100 + offset, state="closed", author_id=999,
+                        updated_at="2026-07-01T10:00:00Z")
+            for offset in range(100)
+        ])
+
+    with httpx.Client(base_url="https://api.github.test", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(GitHubAPIError, match="confirmation exceeded the 200-item safety bound"):
+            GitHubReader(client, _policy()).collect_closed_pull_requests(
+                cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                upper_bound=CLOSED_UPPER, max_prs_per_poll=10,
+            )
+    assert pages == [1, 2]

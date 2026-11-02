@@ -398,7 +398,7 @@ def test_guardian_guide_documents_audit_cost_retention_and_safe_prevention():
 
 
 def test_guardian_guide_documents_bounded_closed_pr_history_without_legacy_writes():
-    """Distinguish bounded historical intake from new ready correction PRs."""
+    """Document full-list bounds and separate historical intake from new PRs."""
     guide = _guide_text()
     normalized = _normalized_guide()
 
@@ -416,7 +416,9 @@ def test_guardian_guide_documents_bounded_closed_pr_history_without_legacy_write
     assert "100 numeric pages" in normalized
     assert "10,000 list entries" in normalized
     assert "poll fails visibly and keeps the cycle incomplete" in normalized
-    assert "narrow `lookback_days`" in normalized
+    assert "reducing `lookback_days` does not reduce this listing requirement" in normalized
+    assert "an older entry never ends discovery" in normalized
+    assert "actual end of the list" in normalized
     assert "quiescent long enough for confirmation" in normalized
     assert "retried up to three times immediately" in normalized
     assert "skipped for the rest of the current cycle" in normalized

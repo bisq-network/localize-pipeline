@@ -748,8 +748,8 @@ deterministic checks and confirmed commit establish.
 
 Closed-PR processing is disabled unless a repository has an explicit
 `closed_pr_backfill` block. Each poll finishes the open-PR phase across the
-configured repositories first. Closed history is then traversed newest first in
-durable scan cycles. A cycle freezes both its UTC start as an upper bound and
+configured repositories first. Closed history is then traversed in durable scan
+cycles. The API is asked for newest updates first, but its order is not trusted. A cycle freezes both its UTC start as an upper bound and
 its `lookback_days` cutoff as a lower bound. Every later poll restarts at GitHub
 page 1 and skips exact pull ID/number pairs in an append-only per-cycle seen set;
 it does not persist a mutable pagination position as discovery progress. Before
@@ -764,9 +764,12 @@ concurrent mutation could occur outside the two observed traversals. A later
 cycle rechecks the window and can discover such a change.
 
 Each discovery or confirmation traversal is limited to 100 numeric pages and
-10,000 list entries. If either traversal cannot reach the frozen cutoff or the
-end of the list within that ceiling, the poll fails visibly and keeps the cycle
-incomplete; narrow `lookback_days` before retrying such a high-volume window.
+10,000 list entries. Timestamps filter each pull independently; an older entry
+never ends discovery because a later item or page may still be in the window.
+If either traversal cannot reach the actual end of the list within that ceiling,
+the poll fails visibly and keeps the cycle incomplete. Reducing `lookback_days`
+does not reduce this listing requirement; repositories beyond the ceiling need
+a separately bounded discovery strategy.
 Within that ceiling, while its dependencies succeed, and once the listing is
 quiescent long enough for confirmation, repeated polls cover the full frozen
 window even when earlier entries are ineligible or already complete. Hydration
