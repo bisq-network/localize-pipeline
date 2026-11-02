@@ -412,6 +412,52 @@ async def test_failed_model_translation_marks_ledger_and_skips_memory(integratio
 
 
 @pytest.mark.asyncio
+async def test_exhausted_draft_does_not_poison_healthy_holistic_review(
+    integration_test_environment, monkeypatch,
+):
+    """One failed draft stays failed while its healthy sibling finishes review."""
+    env = integration_test_environment
+    pipeline = localize.translate_localization_files
+    source = {"payment.title": "Payment data for trade {0}", "payment.open": "Open wallet"}
+    with open(os.path.join(env["input_folder"], "app.properties"), "w") as stream:
+        stream.write("".join(f"{key}={value}\n" for key, value in source.items()))
+    with open(os.path.join(env["translation_queue_folder"], "app_de.properties"), "w") as stream:
+        stream.write("")
+    ledger_path = os.path.join(env["input_folder"], "failed-draft-ledger.json")
+    memory_path = os.path.join(env["input_folder"], "failed-draft-memory.json")
+
+    async def translate(text, key, *args, **kwargs):
+        return (args[6], text, False) if key == "payment.title" else (
+            args[6], "Wallet öffnen", True,
+        )
+
+    async def review(**kwargs):
+        assert kwargs["keys_to_review"] == ["payment.open"]
+        assert "payment.title" not in kwargs["source_content"]
+        return {"payment.open": "Wallet öffnen"}
+
+    monkeypatch.setattr(pipeline, "translate_text_async", AsyncMock(side_effect=translate))
+    monkeypatch.setattr(pipeline, "holistic_review_async", AsyncMock(side_effect=review))
+    monkeypatch.setattr(pipeline, "get_working_tree_changed_keys", lambda *a: set())
+    monkeypatch.setattr(pipeline, "TRANSLATION_KEY_LEDGER_FILE_PATH", ledger_path)
+    monkeypatch.setattr(pipeline, "TRANSLATION_MEMORY_ENABLED", True)
+    monkeypatch.setattr(pipeline, "TRANSLATION_MEMORY_FILE_PATH", memory_path)
+    summary = {}
+    await pipeline.process_translation_queue(
+        env["translation_queue_folder"], env["translated_queue_folder"],
+        env["mock_glossary_path_resolved"], validation_summary=summary,
+    )
+    pipeline.holistic_review_async.assert_awaited_once()
+    assert summary["app_de.properties"]["model_translation_failed_keys"] == ["payment.title"]
+    ledger = pipeline.load_translation_key_ledger(ledger_path)["app_de.properties"]
+    assert ledger["payment.title"]["status"] == "failed"
+    assert ledger["payment.open"].get("status") != "failed"
+    memory = load_translation_memory(memory_path)
+    assert memory.lookup(source["payment.title"], locale="de", format_id=JAVA_PROPERTIES_FORMAT.id) is None
+    assert memory.lookup(source["payment.open"], locale="de", format_id=JAVA_PROPERTIES_FORMAT.id) == "Wallet öffnen"
+
+
+@pytest.mark.asyncio
 async def test_failed_model_translation_preserves_ledger_verified_target(
     integration_test_environment,
 ):
@@ -1097,3 +1143,90 @@ async def test_process_translation_queue_routes_mixed_format_profiles(integratio
         "nested": {"title": "JSON-Titel {0}"},
         "metadata": {"version": 1},
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,recover", [
+    ("draft", True), ("draft", False), ("review", True), ("review", False),
+])
+async def test_source_echo_content_retry_preserves_mixed_batch_and_failure_evidence(
+    integration_test_environment, monkeypatch, stage, recover,
+):
+    """Real model stages retry echoes without accepting unverified old text."""
+    env = integration_test_environment
+    pipeline = localize.translate_localization_files
+    sources = {"conversation.open": "Open conversation", "conversation.close": "Close conversation"}
+    targets = {"conversation.open": "Gespräch öffnen", "conversation.close": "Gespräch schließen"}
+    source_path = os.path.join(env['input_folder'], 'app.properties')
+    target_path = os.path.join(env['translation_queue_folder'], 'app_de.properties')
+    for path, values in [(source_path, sources), (target_path, targets)]:
+        with open(path, 'w', encoding='utf-8') as stream:
+            stream.write(''.join(f'{key}={value}\n' for key, value in values.items()))
+    ledger_path = os.path.join(env['input_folder'], 'content-retry-ledger.json')
+    memory_path = os.path.join(env['input_folder'], 'content-retry-memory.json')
+    pipeline.save_translation_key_ledger(ledger_path, {
+        'app_de.properties': pipeline.build_file_key_ledger(sources, sources, failed_keys=set(sources)),
+    })
+    calls = {"draft_echo": 0, "review": 0}
+
+    async def completion(**kwargs):
+        if kwargs['model'] == 'content-test-draft':
+            prompt = kwargs['messages'][1]['content']
+            value = targets['conversation.close']
+            if 'Key: conversation.open\n' in prompt:
+                calls['draft_echo'] += 1
+                value = (sources['conversation.open'] if stage == 'draft' and
+                         (not recover or calls['draft_echo'] == 1) else targets['conversation.open'])
+        else:
+            calls['review'] += 1
+            values = dict(targets)
+            if stage == 'draft' and not recover:
+                values = {}  # No correction keeps the exhausted draft's failure visible.
+            elif stage == 'review' and (not recover or calls['review'] == 1):
+                values['conversation.open'] = sources['conversation.open']
+            value = json.dumps({f'review_item_{i:04d}': values[key]
+                                for i, key in enumerate(sources, 1) if key in values})
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=value))])
+
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(side_effect=completion)
+    provider.count_tokens.return_value = 1
+    provider.is_retryable_error.return_value = False
+    provider.format_estimate.return_value = 'estimate'
+    monkeypatch.setattr(pipeline, 'MODEL_PROVIDER', provider)
+    monkeypatch.setattr(pipeline, 'MODEL_NAME', 'content-test-draft')
+    monkeypatch.setattr(pipeline, 'REVIEW_MODEL_NAME', 'content-test-review')
+    monkeypatch.setattr(pipeline, '_handle_retry', AsyncMock(side_effect=lambda attempt, max_retries, *a: attempt < max_retries))
+    monkeypatch.setattr(pipeline, 'get_working_tree_changed_keys', lambda *a: set())
+    monkeypatch.setattr(pipeline, 'TRANSLATION_KEY_LEDGER_FILE_PATH', ledger_path)
+    monkeypatch.setattr(pipeline, 'TRANSLATION_MEMORY_ENABLED', True)
+    monkeypatch.setattr(pipeline, 'TRANSLATION_MEMORY_FILE_PATH', memory_path)
+    summary = {}
+    result = await pipeline.process_translation_queue(
+        env['translation_queue_folder'], env['translated_queue_folder'],
+        env['mock_glossary_path_resolved'], validation_summary=summary,
+    )
+    output_path = os.path.join(env['translated_queue_folder'], 'app_de.properties')
+    ledger = pipeline.load_translation_key_ledger(ledger_path)['app_de.properties']
+    if not recover and stage == 'draft':
+        assert not os.path.exists(output_path)
+        assert result[2]['app_de.properties']
+        assert summary['app_de.properties']['blocked_source_regression_keys'] == ['conversation.open']
+        # A blocked publication must not turn the original English baseline into localized acceptance.
+        assert ledger['conversation.open']['target_hash'] == pipeline.compute_ledger_hash(sources['conversation.open'])
+    else:
+        assert parse_properties_file(output_path)[1] == targets
+    if recover:
+        assert not summary['app_de.properties']['failed_keys']
+        assert not summary['app_de.properties']['model_translation_failed_keys']
+        assert all(entry.get('status') != 'failed' for entry in ledger.values())
+    else:
+        assert ledger['conversation.open']['status'] == 'failed'
+        assert 'conversation.open' in summary['app_de.properties']['model_translation_failed_keys']
+        assert load_translation_memory(memory_path).lookup(
+            sources['conversation.open'], locale='de', format_id=JAVA_PROPERTIES_FORMAT.id,
+        ) is None
+    expected_draft_calls = (2 if recover else 5) if stage == 'draft' else 1
+    expected_review_calls = (2 if recover else 3) if stage == 'review' else 1
+    assert calls['draft_echo'] == expected_draft_calls
+    assert calls['review'] == expected_review_calls
