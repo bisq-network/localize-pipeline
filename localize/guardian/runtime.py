@@ -1690,17 +1690,46 @@ def _poll_with_locked_state(
                             previous_history = state.latest_health(_HISTORY_ATTEMPT_COMPONENT)
                             include_history = (
                                 not scheduled or previous_history is None
+                                or previous_history.status == "retryable"
                                 or previous_history.details.get("local_date")
                                 != attempted_at.date().isoformat()
                             )
                             if include_history:
                                 state.record_health(
-                                    component=_HISTORY_ATTEMPT_COMPONENT, status="attempted",
+                                    component=_HISTORY_ATTEMPT_COMPONENT,
+                                    status=(
+                                        "retryable" if previous_history is not None
+                                        and previous_history.status == "retryable"
+                                        else "attempted"
+                                    ),
                                     message="Daily historical backfill attempt started.",
                                     details={"local_date": attempted_at.date().isoformat()},
                                     checked_at=attempted_at,
                                 )
                             outcome = controller.poll_once(include_history=include_history)
+                            if include_history:
+                                history_status = "failed" if _exit_code(outcome) else "ok"
+                                # Open intake can prevent a queued discovery
+                                # retry from running, including for just one
+                                # repository. Retain it until a healthy poll
+                                # actually completes historical discovery.
+                                pending_retry = (
+                                    previous_history is not None
+                                    and previous_history.status == "retryable"
+                                    and (
+                                        _exit_code(outcome)
+                                        or outcome.historical_repositories_polled == 0
+                                    )
+                                )
+                                if outcome.historical_scan_retryable or pending_retry:
+                                    history_status = "retryable"
+                                state.record_health(
+                                    component=_HISTORY_ATTEMPT_COMPONENT,
+                                    status=history_status,
+                                    message="Historical backfill attempt finished.",
+                                    details={"local_date": attempted_at.date().isoformat()},
+                                    checked_at=attempted_at,
+                                )
                             state.record_health(
                                 component=_RESPONSIVE_SCHEDULE_COMPONENT,
                                 status="failed" if _exit_code(outcome) else "ok",

@@ -548,6 +548,7 @@ class PollOutcome:
     historical_pull_requests_completed: int = 0
     historical_policy_rejections: int = 0
     historical_items_deferred: int = 0
+    historical_scan_retryable: bool = False
     feedback_revisions_recorded: int = 0
     runs_started: int = 0
     runs_completed: int = 0
@@ -582,6 +583,7 @@ class _PollAccumulator:
     historical_pull_requests_completed: int = 0
     historical_policy_rejections: int = 0
     historical_items_deferred: int = 0
+    historical_scan_retryable: bool = False
     feedback_revisions_recorded: int = 0
     runs_started: int = 0
     runs_completed: int = 0
@@ -617,6 +619,7 @@ class _PollAccumulator:
             ),
             historical_policy_rejections=self.historical_policy_rejections,
             historical_items_deferred=self.historical_items_deferred,
+            historical_scan_retryable=self.historical_scan_retryable,
             feedback_revisions_recorded=self.feedback_revisions_recorded,
             runs_started=self.runs_started,
             runs_completed=self.runs_completed,
@@ -2810,6 +2813,7 @@ class GuardianController:
                             "historical_policy_rejections": (
                                 outcome.historical_policy_rejections
                             ),
+                            "historical_scan_retryable": outcome.historical_scan_retryable,
                             "runs_failed": outcome.runs_failed,
                             "prepared_value_edits": outcome.prepared_value_edits,
                             "deferred_value_edits": outcome.deferred_value_edits,
@@ -3940,16 +3944,24 @@ class GuardianController:
                 )
                 else self.state.latest_event_revisions(repository=policy.base_repo)
             )
-            scan_result = self.historical_snapshot_provider(
-                policy,
-                _stored_feedback(previous_revisions),
-                cutoff=cycle_started_at - timedelta(days=backfill.lookback_days),
-                upper_bound=cycle_started_at,
-                max_prs_per_poll=backfill.max_prs_per_poll,
-                seen_pulls=seen_pulls,
-                excluded_pulls=excluded_pulls,
-                priority_pull_groups=priority_pull_groups,
-            )
+            try:
+                scan_result = self.historical_snapshot_provider(
+                    policy,
+                    _stored_feedback(previous_revisions),
+                    cutoff=cycle_started_at - timedelta(days=backfill.lookback_days),
+                    upper_bound=cycle_started_at,
+                    max_prs_per_poll=backfill.max_prs_per_poll,
+                    seen_pulls=seen_pulls,
+                    excluded_pulls=excluded_pulls,
+                    priority_pull_groups=priority_pull_groups,
+                )
+            except GitHubAuthenticationError:
+                raise
+            except GitHubAPIError:
+                # No scan result means no durable discovery progress. Retry the
+                # same frozen window at the next bounded scheduled poll.
+                outcome.historical_scan_retryable = True
+                raise
             scan_items = _validated_historical_scan_items(
                 scan_result,
                 max_hydration_attempts=backfill.max_prs_per_poll,
@@ -4671,6 +4683,7 @@ class GuardianController:
                 outcome.runs_failed += 1
                 raise _AuthenticationCircuit from None
             except CodexAuthenticationError:
+                outcome.failures.append("CodexAuthenticationError")
                 self._fail_actions(
                     run_id=run_id,
                     revisions=revisions,
