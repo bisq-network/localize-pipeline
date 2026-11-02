@@ -4041,3 +4041,53 @@ def test_review_reply_parent_is_retained_for_reporting():
     root = _parse_feedback("acme/widgets", 12, FeedbackKind.REVIEW_COMMENT,
                            {key: value for key, value in payload.items() if key != "in_reply_to_id"})
     assert root.in_reply_to_id is None
+
+
+@pytest.mark.parametrize("status", [200, 401])
+def test_runtime_history_adapter_preserves_listing_and_auth_failure(status: int) -> None:
+    """The credential adapter must not reclassify an inconsistent API listing."""
+    from localize.guardian.models import RepositoryPolicy
+    from localize.guardian.runtime import AuthenticatedGitHubSnapshotProvider
+
+    source = _policy()
+    policy = RepositoryPolicy(
+        base_repo=source.repository, base_repo_id=source.repository_id,
+        base_branch=source.base_branch, allowed_pr_authors=source.allowed_pr_authors,
+        allowed_head_owners=source.allowed_head_owners,
+        allowed_head_repositories=source.allowed_head_repositories,
+        allowed_branch_globs=source.branch_globs,
+        allowed_path_globs=("l10n/*.properties",),
+        pipeline_config_path="config.yaml", source_locale="en",
+        trusted_reviewers={"ru": (TrustedActor("reviewer", 105, "User"),)},
+        trusted_bots={}, publication_actor=EXPECTED_ACTOR,
+    )
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/repos/acme/app":
+            return _json_response(request, _repo_payload())
+        assert request.url.path == "/repos/acme/app/pulls"
+        return httpx.Response(status, json=[
+            _pr_payload(2, state="closed", updated_at="2026-08-30T10:00:00Z"),
+            _pr_payload(1, state="closed", updated_at="2026-08-30T11:00:00Z"),
+        ])
+
+    class Credential:
+        def read(self) -> str:
+            return TOKEN
+
+    provider = AuthenticatedGitHubSnapshotProvider(
+        credential=Credential(), transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(GitHubAPIError) as caught:
+        provider.collect_closed_pull_requests(
+            policy, (), cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            upper_bound=CLOSED_UPPER, max_prs_per_poll=10, seen_pulls=(),
+            excluded_pulls=(), priority_pull_groups=(),
+        )
+    assert isinstance(caught.value, GitHubAuthenticationError) is (status == 401)
+    if status == 200:
+        assert "descending updated_at order" in str(caught.value)
+    assert requests == ["/repos/acme/app", "/repos/acme/app/pulls"]
+    assert TOKEN not in str(caught.value)

@@ -7172,7 +7172,7 @@ def test_historical_cursor_advances_poison_but_retries_auth_failed_item(
         second = controller.poll_once()
 
     assert first.authentication_circuit_open is True
-    assert first.failures == ("GitHubAPIError",)
+    assert first.failures == ("GitHubAPIError", "CodexAuthenticationError")
     # The poison item reached a defined skip outcome and advanced. The item
     # that opened the global auth circuit did not, so the next poll resumes it.
     assert [call["seen_pulls"] for call in historical_provider.calls] == [
@@ -10573,3 +10573,38 @@ def test_prevention_disposition_controls_whole_poll_health(tmp_path, runtime, de
         assert result.prevention_items_declined == int(decline)
         assert audit.details['prevention_items_declined'] == int(decline)
         assert bool(result.prevention_failures) is not decline
+
+
+@pytest.mark.parametrize("failure_type", [GitHubAPIError, GitHubAuthenticationError])
+def test_failed_history_scan_retains_cursor_and_classifies_retry(
+    tmp_path: Path, runtime, failure_type,
+) -> None:
+    """Discovery failure cannot lose work or turn a transient API error into auth."""
+    base, head, checkout, _provider, broker, _sequence = runtime
+    attempts = []
+
+    def history(_policy, _previous, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise failure_type("listing failed")
+        return ClosedPullScanResult(items=(), hydration_attempts=0, cycle_complete=True)
+
+    with GuardianState(tmp_path / "state.sqlite3") as state:
+        controller = _controller(
+            tmp_path=tmp_path, state=state,
+            config=_config(GuardianMode.OBSERVE, policies=(_historical_policy(),)),
+            checkout=checkout, provider=FakeSnapshotProvider(()),
+            driver=FakeCodexDriver(), broker=broker,
+            historical_snapshot_provider=history,
+            historical_checkout_factory=FakeHistoricalCheckoutFactory(base, head, tmp_path),
+            current_base_provider=FakeCurrentBaseProvider(),
+        )
+        first = controller.poll_once()
+        second = controller.poll_once()
+    assert first.historical_scan_retryable is (failure_type is GitHubAPIError)
+    assert first.authentication_circuit_open is (failure_type is GitHubAuthenticationError)
+    assert first.historical_repositories_polled == 0
+    assert second.historical_repositories_polled == 1
+    assert second.failures == ()
+    assert attempts[0] == attempts[1]
+    assert attempts[1]["seen_pulls"] == ()
