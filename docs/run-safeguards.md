@@ -101,6 +101,13 @@ midnight. It counts requests observed since installation, not historical
 account usage. It is a request limit, not a dollar cap; models, prompt sizes
 and output lengths still affect cost.
 
+An explicitly approved one-time campaign can also set `max_requests_total`.
+This is an absolute ceiling over all attempts retained in the same database:
+save the starting count plus the approved allowance once, then reuse that
+number on every resume. The check is atomic with the daily check and request
+reservation. Neither the passing of 24 hours nor a process restart renews
+this allowance. Normal profile defaults omit this optional ceiling.
+
 ```yaml
 run_safeguards:
   state_path: /app/logs/run_safeguards.sqlite3

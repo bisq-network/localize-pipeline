@@ -97,6 +97,8 @@ UK service but also occurs inside the Russian `Faster Payments System (SBP)`
 description, where natural localization is appropriate. Existing UK service
 labels stay unchanged; a global rule cannot distinguish these contexts.
 
-The existing exact German source-identical acceptances for
-`payment.account.revtag=Revtag` and `CLEAR_X_CHANGE=Zelle` remain unchanged. The
-brand list does not replace those per-key acceptance decisions.
+The exact source-identical acceptances for `payment.account.revtag=Revtag`
+and `CLEAR_X_CHANGE=Zelle` apply to each configured locale: both are
+intentionally shared payment names. Acceptance requires the exact locale,
+key, current English value and target value; changes revoke it. The brand
+list does not replace those per-key acceptance decisions.

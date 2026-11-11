@@ -19,7 +19,49 @@ process_all_files: true
 dry_run: false
 retranslate_identical_source_strings: false
 accepted_source_identical_translations:
+  cs:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
   de:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  es:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  fa:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  fr:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  it:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  ja:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  pl:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  pt-br:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  pt:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  ru:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  th:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  vi:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  zh-hans:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
+  zh-hant:
     payment.account.revtag: Revtag
     CLEAR_X_CHANGE: Zelle
 project_context: >

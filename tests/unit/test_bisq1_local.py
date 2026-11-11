@@ -96,19 +96,21 @@ def test_unknown_locale_fails_before_running(tmp_path):
         job.write_config(tmp_path / "bisq", tmp_path, ["pt_BR"])
 
 
-def test_german_payment_brand_acceptances_are_exact():
+def test_payment_brand_acceptances_are_exact_for_each_configured_locale():
     from localize.source_identical_acceptance import is_accepted_source_identical
 
     config = yaml.safe_load((ROOT / "profiles/bisq1/config.yaml").read_text())
     policy = config.get("accepted_source_identical_translations", {})
     expected = {"payment.account.revtag": "Revtag", "CLEAR_X_CHANGE": "Zelle"}
-    assert policy == {"de": expected}
-    for key, value in expected.items():
-        assert is_accepted_source_identical("de", key, value, value, policy)
-        assert not is_accepted_source_identical("fr", key, value, value, policy)
-        assert not is_accepted_source_identical("de", "other", value, value, policy)
-        assert not is_accepted_source_identical("de", key, value + " changed", value + " changed", policy)
-        assert not is_accepted_source_identical("de", key, value, value + " ", policy)
+    locales = {row["code"] for row in config["supported_locales"]}
+    assert policy == {locale: expected for locale in locales}
+    for locale in locales:
+        for key, value in expected.items():
+            assert is_accepted_source_identical(locale, key, value, value, policy)
+            assert not is_accepted_source_identical("unconfigured", key, value, value, policy)
+            assert not is_accepted_source_identical(locale, "other", value, value, policy)
+            assert not is_accepted_source_identical(locale, key, value + " changed", value + " changed", policy)
+            assert not is_accepted_source_identical(locale, key, value, value + " ", policy)
 
 
 def test_resume_memory_is_conflict_safe_and_does_not_promote_state(tmp_path):

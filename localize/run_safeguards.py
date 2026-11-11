@@ -32,9 +32,13 @@ def code_fingerprint():
 
 class RunSafeguards:
     def __init__(self, path, max_requests_per_24h, sample_files, sample_keys,
-                 sample_max_requests, policy=None):
+                 sample_max_requests, policy=None, max_requests_total=None):
         self.path = Path(path)
         self.max_requests_per_24h = max_requests_per_24h
+        # An optional absolute ceiling over this database's retained history.
+        # Campaigns persist starting count + allowance once; daily expiry and
+        # process restarts must not replenish that allowance.
+        self.max_requests_total = max_requests_total
         self.sample_files = sample_files
         self.sample_keys = sample_keys
         self.sample_max_requests = sample_max_requests
@@ -73,6 +77,13 @@ class RunSafeguards:
             raise RequestBudgetExceeded("Sample request budget exhausted; full run withheld.")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.max_requests_total is not None:
+                total = db.execute("SELECT count(*) FROM requests").fetchone()[0]
+                if total >= self.max_requests_total:
+                    raise RequestBudgetExceeded(
+                        f"Request total budget exhausted ({total}/{self.max_requests_total}). "
+                        "Accepted outputs are retained; the campaign allowance is not renewed."
+                    )
             count = db.execute("SELECT count(*) FROM requests WHERE created > ?",
                                (time.time() - 86400,)).fetchone()[0]
             if count >= self.max_requests_per_24h:
@@ -138,6 +149,10 @@ def load_safeguards(config, config_path):
         if type(value) is not int or value <= 0:
             raise ValueError(f"run_safeguards.{key} must be a positive integer.")
         values[key] = value
+    total = settings.get("max_requests_total")
+    if total is not None and (type(total) is not int or total <= 0):
+        raise ValueError("run_safeguards.max_requests_total must be a positive integer.")
+    values["max_requests_total"] = total
     path = Path(settings.get("state_path", "logs/run_safeguards.sqlite3")).expanduser()
     if not path.is_absolute():
         path = Path(config_path).resolve().parent / path
