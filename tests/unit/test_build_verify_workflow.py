@@ -107,3 +107,14 @@ def test_trivy_vendor_suppressions_are_scoped_and_expire():
     assert 'input.PkgName == "stdlib"' in policy
     assert "input.InstalledVersion == affected_os_root_versions[_]" in policy
     assert 'time.parse_rfc3339_ns("2026-08-15T00:00:00Z")' in policy
+
+
+def test_image_build_resolves_names_through_public_dns():
+    """Runner DNS failed to resolve Ubuntu's archive inside the build on 2026-11-11."""
+    steps = _workflow()["jobs"]["test-and-package"]["steps"]
+    buildx = next(step for step in steps if step["name"] == "Set up Docker Buildx")
+    config = buildx["with"]["buildkitd-config-inline"]
+
+    assert "[dns]" in config
+    assert '"1.1.1.1"' in config
+    assert '"8.8.8.8"' in config
