@@ -140,9 +140,41 @@ not build inputs and are not stored in image layers.
 
 ## 5. Build
 
+Production images may contain only code that is merged into upstream `main`.
+Check out a merged commit, then build through the deployment gate:
+
 ```bash
-docker compose --env-file docker/.env -f docker/docker-compose.yml build
+scripts/deploy-build.sh
 ```
+
+The script refuses to build when:
+
+- the `origin` remote is not `bisq-network/localize-pipeline` (a remote that
+  still uses the repository's former name under `bisq-network` is accepted);
+- the checkout has uncommitted or untracked files, or tracked files flagged
+  `skip-worktree` or `assume-unchanged`;
+- `docker/.env` sets `LOCALIZE_ALLOW_UNVERIFIED_IMAGE`;
+- a fresh fetch shows that the commit is not merged into upstream `main`.
+
+It then exports the commit with `git archive`, builds the image from that clean
+copy with `docker compose ... build`, and records the commit in the image.
+Ignored or hidden local files never enter the image. The container entrypoint
+refuses to run an image without the record, so an image built with a plain
+`docker compose build` cannot start a production run. Extra arguments, such as
+`--no-cache`, are passed to `docker compose build`. To check a commit without
+building, run `scripts/deploy-build.sh --check-only`.
+
+A rollback to an earlier merged commit passes the check. Commits and images
+from before this gate do not check the record at run time, so roll back only to
+commits that contain `scripts/deploy-build.sh`, and retire older rollback
+images once a gated image runs. In a shallow clone, run
+`git fetch --unshallow origin` before a rollback.
+
+Profiles, `config.yaml`, `config-mobile.yaml` and Compose override files are
+mounted at run time and are not part of the image, so local changes to them do
+not block the build. If the upstream remote has another name, set
+`DEPLOY_REMOTE`. A deployment of another repository sets
+`DEPLOY_EXPECTED_REPOSITORY` to its `owner/name`.
 
 The image build does not read the deploy key, signing key, or project profiles.
 Compose supplies the keys as runtime secrets and bind-mounts the selected
@@ -209,7 +241,8 @@ More detail: [docs/maintenance/disk-space-management.md](maintenance/disk-space-
 
 ## Operational Checks
 
-- `git status` in the pipeline repo should be clean before deploys.
+- Deploy only commits that are merged into upstream `main`. Build every
+  production image with `scripts/deploy-build.sh`.
 - Rebuild after changes to `localize/`, `requirements.txt`, or Docker files.
 - Profile config and glossary changes are bind-mounted and take effect on the
   next container run without rebuilding the image.

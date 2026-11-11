@@ -35,6 +35,12 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml build
 docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator
 ```
 
+A plain `build` does not record a merged commit in the image, so the entrypoint
+refuses to run it. For local development, add
+`LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true` to your local `docker/.env`. Never set it
+on a server: production images are built with `scripts/deploy-build.sh`; see
+the [server guide](new-project-deployment.md#5-build).
+
 `-T` disables pseudo-TTY allocation. `docker compose run` still keeps standard
 input open by default; add `--interactive=false` when a script must not pass
 input to the container. No local Compose override or SSH agent forwarding is

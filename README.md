@@ -387,9 +387,13 @@ server jobs that pull from Transifex and push signed translation PRs.
 
 ```bash
 export DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1
-docker compose --env-file docker/.env -f docker/docker-compose.yml build
+scripts/deploy-build.sh
 docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm translator
 ```
+
+`scripts/deploy-build.sh` builds the image only from a clean checkout of a
+commit that is merged into upstream `main`, and records that commit in the
+image. The container refuses to run an image without this record.
 
 Docker mounts `profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml` and
 `glossary.json` into the container. Keep deploy keys, GPG keys, and tokens in

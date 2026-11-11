@@ -46,6 +46,10 @@ override or secret.
 | `APPUSER_UID` | Docker entrypoint | UID for the unprivileged runtime user and mounted volume ownership. |
 | `APPUSER_GID` | Docker entrypoint | GID for the unprivileged runtime user and mounted volume ownership. |
 | `REPO_CLEANUP_STRATEGY` | Docker entrypoint | Handles dirty target repos before checkout: `auto`, `force`, or `skip`. |
+| `LOCALIZE_ALLOW_UNVERIFIED_IMAGE` | Docker entrypoint | When true, runs an image that `scripts/deploy-build.sh` did not stamp with a merged commit. Local development only; never set it in production. |
+| `DEPLOY_REMOTE` | `scripts/deploy-build.sh` | Remote that points to upstream; defaults to `origin`. |
+| `DEPLOY_BRANCH` | `scripts/deploy-build.sh` | Upstream branch that counts as merged; defaults to `main`. |
+| `DEPLOY_EXPECTED_REPOSITORY` | `scripts/deploy-build.sh` | Space-separated `owner/name` values the deploy remote may point to; defaults to `bisq-network/localize-pipeline` and the repository's former name under `bisq-network`. |
 | `FORK_REPO_NAME` | `update-translations.sh` | Fork repository that receives translation branches. |
 | `UPSTREAM_REPO_NAME` | `update-translations.sh` | Upstream repository used for PR targeting and sync. |
 | `TARGET_BRANCH_FOR_PR` | `update-translations.sh` | Base branch for generated PRs. |

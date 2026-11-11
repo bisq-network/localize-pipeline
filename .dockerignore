@@ -69,3 +69,6 @@ docs/*-dossier.md
 # Other
 *.bak
 *.swp
+
+# Only scripts/deploy-build.sh may stamp an image with its merged source commit.
+.source-commit

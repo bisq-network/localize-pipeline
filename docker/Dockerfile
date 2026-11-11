@@ -182,3 +182,14 @@ RUN chmod 644 /etc/ssh/ssh_known_hosts
 
 # Default command is the orchestration script so bare docker run uses PR gating.
 CMD ["/app/update-translations.sh"]
+
+# scripts/deploy-build.sh sets this only after proving that the commit is
+# merged into upstream main. docker-entrypoint.sh refuses to run without it.
+# Declared last so a new commit does not invalidate earlier cached layers.
+ARG LOCALIZE_SOURCE_COMMIT=""
+LABEL org.opencontainers.image.revision="${LOCALIZE_SOURCE_COMMIT}"
+RUN rm -f /app/.source-commit && \
+    if [ -n "${LOCALIZE_SOURCE_COMMIT}" ]; then \
+        printf '%s\n' "${LOCALIZE_SOURCE_COMMIT}" > /app/.source-commit && \
+        chmod 644 /app/.source-commit; \
+    fi

@@ -7,6 +7,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+### Added
+
+- Build production images with `scripts/deploy-build.sh`, which refuses
+  commits that a fresh fetch does not show on upstream `main` and refuses local
+  edits. It builds from a clean `git archive` export of the commit, and the
+  image records that commit. The entrypoint refuses to run an image without the
+  record. **Operators:** images built with a plain `docker compose build` no
+  longer start; local development sets `LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true`
+  in its local `docker/.env`. Images and commits from before this change do not
+  enforce the check.
+
 ### Changed
 
 - Move orchestration, format handling, and model-provider implementations into

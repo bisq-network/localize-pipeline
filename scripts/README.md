@@ -2,6 +2,26 @@
 
 This directory contains maintenance and utility scripts for the translation project.
 
+## Deployment Gate
+
+### deploy-build.sh
+
+Builds the production image only from a commit that is merged into upstream
+`main`, and records that commit in the image. The container entrypoint refuses
+to run an image without the record.
+
+```bash
+scripts/deploy-build.sh               # check, then build
+scripts/deploy-build.sh --no-cache    # extra options go to docker compose build
+scripts/deploy-build.sh --check-only  # check and print the commit; no build
+```
+
+It refuses local edits (including skip-worktree and assume-unchanged files), a
+remote that is not the upstream repository, the development override in
+`docker/.env`, and commits that a fresh fetch does not show on upstream `main`.
+It builds from a `git archive` export of the commit, so ignored local files
+never enter the image. See [the server guide](../docs/new-project-deployment.md#5-build).
+
 ## Docker Cleanup Scripts
 
 ### docker-cleanup.sh

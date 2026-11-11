@@ -26,6 +26,29 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] [Entrypoint] [$level] $message"
 }
 
+# --- Merged-commit stamp ---
+# scripts/deploy-build.sh writes the stamp only after proving that the source
+# commit is merged into upstream main. Production runs only stamped images.
+verify_source_commit_stamp() {
+  local stamp_file="${LOCALIZE_SOURCE_COMMIT_FILE:-/app/.source-commit}"
+  local stamp=""
+
+  if [ "${LOCALIZE_ALLOW_UNVERIFIED_IMAGE:-false}" = "true" ]; then
+    log "LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true: running an image that scripts/deploy-build.sh did not verify. Use this only for local development, never in production." "WARNING"
+    return 0
+  fi
+  if [ -r "$stamp_file" ]; then
+    stamp="$(head -n 1 "$stamp_file")"
+  fi
+  if ! printf '%s' "$stamp" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'; then
+    log "Refusing to run: this image has no merged-commit stamp. Build production images with scripts/deploy-build.sh, which checks that the commit is merged into upstream main. For local development only, set LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true." "ERROR" >&2
+    exit 1
+  fi
+  log "Image was built from merged commit ${stamp}."
+}
+
+verify_source_commit_stamp
+
 if ! id -u appuser >/dev/null 2>&1; then
   if [ "${ALLOW_RUN_AS_ROOT:-false}" = "true" ]; then
     log "User 'appuser' not found. Falling back to root since ALLOW_RUN_AS_ROOT is true." "WARNING"
