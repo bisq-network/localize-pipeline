@@ -98,6 +98,14 @@ def test_dockerfile_uses_orchestration_default_command():
     assert 'CMD ["/app/update-translations.sh"]' in dockerfile
 
 
+def test_dockerfile_upgrades_apt_past_base_image_security_fix():
+    """The pinned base image ships apt 2.8.3, affected by CVE-2026-109518."""
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "apt-get install -y --no-install-recommends --only-upgrade \\\n" \
+        "        apt \\\n        libapt-pkg6.0t64" in dockerfile
+
+
 def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     """Require pinned Go toolchains, source revisions, and verified dependency versions."""
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
@@ -120,9 +128,9 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "ARG COMPRESS_VERSION=1.18.7" in dockerfile
     assert "ARG X_MOD_VERSION=0.41.0" in dockerfile
     assert "ARG GO_GIT_VERSION=5.19.2" in dockerfile
-    assert "ARG X_CRYPTO_VERSION=0.57.0" in dockerfile
-    assert dockerfile.count("ARG X_TEXT_VERSION=0.42.0") == 2
-    assert dockerfile.count("ARG X_NET_VERSION=0.60.0") == 3
+    assert "ARG X_CRYPTO_VERSION=0.58.0" in dockerfile
+    assert dockerfile.count("ARG X_TEXT_VERSION=0.43.0") == 2
+    assert dockerfile.count("ARG X_NET_VERSION=0.62.0") == 3
     assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$YQ_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$TX_COMMIT"' in dockerfile
