@@ -65,6 +65,3 @@ docker/docker-compose.override.*.yaml
 /docs/customer-development-action-plan.md
 /docs/customer-discovery-targets.md
 /docs/*-dossier.md
-
-# Default workspace of the manual Bisq 1 job: checkout, state and .env
-/.agent-artifacts/bisq1-local/
