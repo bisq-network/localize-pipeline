@@ -9,10 +9,24 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Added
 
+- Bound provider requests with an opt-in persistent rolling 24-hour budget,
+  validate a small isolated sample before the full queue, and reuse exact
+  validated outputs after restarts. The Bisq 2 and Bisq Mobile profiles enable
+  it; see [run safeguards](docs/run-safeguards.md).
+- Record heartbeat HTTP receipts; Healthchecks pings count as accepted only
+  with its exact `OK` response.
 - Add an optional, standard-library-only Healthchecks monitor for Guardian
   polls. It pings success only after a new successful poll record, reports
   failed polls to `/fail`, and never renews the heartbeat for skipped wakes. See
   [Monitor failed and missing polls](docs/guardian.md#monitor-failed-and-missing-polls).
+
+### Fixed
+
+- Retry recognized transient Transifex import failures up to three times
+  within `TX_PULL_TIMEOUT`. Permanent and unknown errors still stop the run.
+- Clear queue contents instead of deleting queue roots, so non-root
+  containers can clean up. Cleanup errors now fail the run instead of
+  leaving stale files for the next cycle.
 
 ### Changed
 

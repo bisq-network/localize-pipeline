@@ -685,7 +685,7 @@ def test_transifex_is_required_only_for_transifex_source_and_times_out():
     assert "TX_PULL_CMD=(tx pull -t -f --use-git-timestamps)" in script
     assert "TX_PULL_CMD=(tx pull -s -t -f --use-git-timestamps)" in script
     assert 'TX_PULL_TIMEOUT_SECONDS="${TX_PULL_TIMEOUT:-3600}"' in script
-    assert 'timeout "$TX_PULL_TIMEOUT_SECONDS" "${TX_PULL_CMD[@]}"' in script
+    assert 'timeout --kill-after=10s "$remaining" "${TX_PULL_CMD[@]}"' in script
 
 
 def test_publish_flow_preflights_gh_and_caps_pr_body():

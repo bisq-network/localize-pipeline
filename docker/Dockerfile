@@ -109,15 +109,15 @@ ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies, add repositories, and clean up in a single layer.
-# Listing apt upgrades it (and libapt-pkg) from Ubuntu security updates;
-# the pinned base image ships an apt release with a known vulnerability.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        apt \
         ca-certificates \
         curl \
         gnupg \
         software-properties-common && \
+    apt-get install -y --no-install-recommends --only-upgrade \
+        apt \
+        libapt-pkg6.0t64 && \
     add-apt-repository ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends \

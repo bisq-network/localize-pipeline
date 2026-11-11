@@ -35,6 +35,7 @@ from localize.providers.models import (
     requires_openai_credentials,
 )
 from localize.source_identical_acceptance import normalize_acceptances
+from localize.run_safeguards import RunSafeguards, load_safeguards
 from localize.semantic_quality import normalize_retained_source_word_allowlist
 
 
@@ -155,6 +156,8 @@ class AppConfig:
     # "exact" deterministically requires the configured target text;
     # "prompt-only" treats values as terminology lemmas that models may inflect.
     translation_glossary_enforcement: str = "exact"
+    run_safeguards: Optional[RunSafeguards] = None
+    semantic_review_reasoning_effort: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -688,6 +691,7 @@ def _create_model_provider(
     api_base_url: Optional[str] = None,
     aisuite_provider_configs: Optional[Dict[str, Any]] = None,
     model_names: Tuple[str, ...] = (),
+    safeguards: Optional[RunSafeguards] = None,
 ) -> Optional[ChatModelProvider]:
     """Create the configured chat model provider unless running in dry-run mode.
 
@@ -710,6 +714,7 @@ def _create_model_provider(
             logger=logger,
             aisuite_provider_configs=aisuite_provider_configs,
             model_names=model_names,
+            **({"safeguards": safeguards} if safeguards else {}),
         )
     except ModelProviderConfigurationError as exc:
         logger.critical("CRITICAL: %s", exc)
@@ -956,6 +961,7 @@ def load_app_config() -> AppConfig:
     configured_model_names = [model_name, review_model_name]
     if semantic_review_enabled and semantic_review_model_name:
         configured_model_names.append(semantic_review_model_name)
+    safeguards = load_safeguards(config, config_file_path)
     model_provider = _create_model_provider(
         dry_run,
         logger,
@@ -963,6 +969,7 @@ def load_app_config() -> AppConfig:
         api_base_url,
         aisuite_provider_configs,
         tuple(configured_model_names),
+        **({"safeguards": safeguards} if safeguards else {}),
     )
     openai_client = getattr(model_provider, "client", None) if model_provider else None
 
@@ -1015,4 +1022,8 @@ def load_app_config() -> AppConfig:
         semantic_review_model_name=semantic_review_model_name,
         placeholder_profile=placeholder_profile,
         translation_glossary_enforcement=translation_glossary_enforcement,
+        run_safeguards=safeguards,
+        semantic_review_reasoning_effort=normalize_reasoning_effort(
+            (config.get("semantic_review") or {}).get("reasoning_effort")
+        ),
     )
