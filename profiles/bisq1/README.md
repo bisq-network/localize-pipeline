@@ -81,6 +81,16 @@ mediators and arbitrators distinct.
 
 ## Deliberate exclusions
 
+The seven `tacWindow.legal.section1.body` through
+`tacWindow.legal.section7.body` values stay in English. Bisq 1's locale files
+explicitly defer legal translations until they can be reviewed by lawyers.
+The profile's `ignore_key_patterns` rule copies the current English source
+verbatim on each run and excludes these bodies from model translation and
+semantic review. It also changes the checkpoint policy fingerprint, so cached
+outputs from a policy that translated them are not reused. Legal headings,
+buttons and risk warnings remain translatable. New legal-section keys need an
+explicit policy review before adding them to this bounded rule.
+
 Bisq 2 user/profile identity, reputation-score and market-channel terminology,
 network-role labels and role-manager names are not imported. Some occur only in
 explicit Bisq 2 integration or DAO role references; they must not become global

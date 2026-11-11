@@ -18,6 +18,9 @@ translation_file_filter_glob: displayStrings_*.properties
 process_all_files: true
 dry_run: false
 retranslate_identical_source_strings: false
+# Keep legal-section bodies in English, as required by the locale-file policy.
+ignore_key_patterns:
+  - '^tacWindow\.legal\.section[1-7]\.body$'
 accepted_source_identical_translations:
   cs:
     payment.account.revtag: Revtag

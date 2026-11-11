@@ -39,6 +39,40 @@ def test_profile_discovers_all_existing_bisq1_locales():
     )
 
 
+@pytest.mark.parametrize("previous_body", ["Old English terms", "Translated legal terms"])
+def test_legal_bodies_follow_current_english_without_model_selection(tmp_path, previous_body):
+    from localize import translate_localization_files as runtime
+    from localize.ignore_keys import compile_ignore_key_patterns
+
+    config = yaml.safe_load((ROOT / "profiles/bisq1/config.yaml").read_text())
+    patterns = compile_ignore_key_patterns(config.get("ignore_key_patterns", []))
+    bodies = {f"tacWindow.legal.section{i}.body": f"Current terms {i}: {{0}}\\nRead carefully."
+              for i in range(1, 8)}
+    controls = {"tacWindow.legal.section1.headline": "Liability",
+                "tacWindow.risk.section1.body": "Trading risks",
+                "tacWindow.agree": "Accept"}
+    source = {**bodies, **controls}
+    target = tmp_path / "displayStrings_de.properties"
+    target.write_text("".join(f"{key}={previous_body if key in bodies else ''}\n"
+                              for key in source), encoding="utf-8")
+    lines, values = job.parse_properties_file(str(target))
+
+    updated = runtime.apply_ignored_source_values(lines, values, source, patterns)
+    assert updated == set(bodies)
+    assert {key: values[key] for key in bodies} == bodies
+    _, _, selected = runtime.extract_texts_to_translate(
+        lines, source, values, newly_added_keys=set(source),
+        retranslate_identical_existing=True, ignore_key_patterns=patterns,
+    )
+    assert set(selected) == set(controls)
+
+    newer_source = {**source, "tacWindow.legal.section1.body": "Revised English terms {0}"}
+    assert runtime.apply_ignored_source_values(lines, values, newer_source, patterns) == {
+        "tacWindow.legal.section1.body"
+    }
+    assert values["tacWindow.legal.section1.body"] == newer_source["tacWindow.legal.section1.body"]
+
+
 def test_baseline_selects_changed_english_without_rewriting_existing_translation(tmp_path):
     from localize import translate_localization_files as runtime
 
