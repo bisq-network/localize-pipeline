@@ -142,8 +142,10 @@ def normalize_reasoning_effort(value: Any) -> Optional[str]:
 def _openai_supported_reasoning_efforts(model: str) -> frozenset[str]:
     """Return documented effort values for an OpenAI model family."""
     bare_model = model.split(":", 1)[-1].strip().lower()
-    if bare_model.startswith("gpt-6-astra"):
+    if bare_model.startswith(("gpt-6-astra", "gpt-6.1-sol")):
         return _GPT6_ASTRA_REASONING_EFFORTS
+    if bare_model.startswith(("gpt-6-luna", "gpt-6-sol")):
+        return _GPT56_REASONING_EFFORTS
     if bare_model.startswith("gpt-5.6"):
         return _GPT56_REASONING_EFFORTS
     if bare_model.startswith(("gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro")):
@@ -160,6 +162,25 @@ def _openai_supported_reasoning_efforts(model: str) -> frozenset[str]:
     ):
         return _GPT5_REASONING_EFFORTS
     return frozenset()
+
+
+def validate_gpt6_reasoning_effort(
+    model: str, reasoning_effort: Optional[str], *, field: str = "reasoning_effort",
+) -> None:
+    """Reject explicit unsupported GPT-6 efforts instead of using a default."""
+    provider, separator, bare_model = model.partition(":")
+    if separator and provider.strip().lower() != "openai":
+        return
+    normalized_model = (bare_model if separator else provider).strip().lower()
+    if not normalized_model.startswith("gpt-6") or not reasoning_effort:
+        return
+    supported_efforts = _openai_supported_reasoning_efforts(normalized_model)
+    if supported_efforts and reasoning_effort not in supported_efforts:
+        supported = ", ".join(sorted(supported_efforts))
+        raise ValueError(
+            f"{field} '{reasoning_effort}' is not supported by {model}; "
+            f"supported efforts are: {supported}."
+        )
 
 
 def normalize_model_provider_name(provider_name: str) -> str:
@@ -260,6 +281,11 @@ def _sanitize_aisuite_request_kwargs(
     if capabilities.supports_response_format:
         sanitized = dict(kwargs)
         reasoning_effort = sanitized.get("reasoning_effort")
+        if supports_openai_reasoning_effort:
+            try:
+                validate_gpt6_reasoning_effort(model, reasoning_effort)
+            except ValueError as exc:
+                raise ModelProviderConfigurationError(str(exc)) from exc
         if reasoning_effort is not None and (
             not capabilities.supports_reasoning_effort
             or reasoning_effort not in capabilities.supported_reasoning_efforts
@@ -328,6 +354,11 @@ class OpenAICompatibleProvider:
 
         capabilities = self.capabilities_for_model(model)
         reasoning_effort = kwargs.get("reasoning_effort")
+        if self._supports_openai_reasoning_effort:
+            try:
+                validate_gpt6_reasoning_effort(model, reasoning_effort)
+            except ValueError as exc:
+                raise ModelProviderConfigurationError(str(exc)) from exc
         if reasoning_effort is not None and (
             not capabilities.supports_reasoning_effort
             or reasoning_effort not in capabilities.supported_reasoning_efforts

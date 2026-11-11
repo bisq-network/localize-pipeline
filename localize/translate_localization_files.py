@@ -100,6 +100,8 @@ REPO_ROOT = config.target_project_root
 INPUT_FOLDER = config.input_folder
 GLOSSARY_FILE_PATH = config.glossary_file_path
 MODEL_NAME = config.model_name
+MODEL_REASONING_EFFORT = config.model_reasoning_effort
+MODEL_MAX_COMPLETION_TOKENS = config.model_max_completion_tokens
 REVIEW_MODEL_NAME = config.review_model_name
 REVIEW_REASONING_EFFORT = config.review_reasoning_effort
 SEMANTIC_REVIEW_ENABLED = config.semantic_review_enabled
@@ -1653,8 +1655,16 @@ Provide the translation **of the Value only**, following the instructions above.
                         ],
                         temperature=0.3,
                         timeout=60.0,
+                        **chat_reasoning_effort_kwargs(
+                            MODEL_PROVIDER, MODEL_NAME, MODEL_REASONING_EFFORT,
+                        ),
+                        **({"completion_token_limit": MODEL_MAX_COMPLETION_TOKENS}
+                           if MODEL_MAX_COMPLETION_TOKENS is not None else {}),
                     )
 
+                if getattr(response.choices[0], "finish_reason", None) == "length":
+                    logger.warning("Translation for key '%s' reached the output token limit; keeping original text.", key)
+                    return index, text, False
                 msg_content = response.choices[0].message.content
                 if not msg_content:
                     logger.warning("Empty assistant content for key '%s'; keeping original text.", key)

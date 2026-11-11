@@ -23,6 +23,7 @@ override or secret.
 | `TRANSLATOR_PROFILE` | Docker Compose | Selects `profiles/<name>/config.yaml` and `profiles/<name>/glossary.json`. |
 | `OPENAI_BASE_URL` | Python pipeline, Action wrapper | Optional OpenAI-compatible API base URL. Blank values are unset by the Action wrapper. |
 | `REVIEW_MODEL_NAME` | Python pipeline, Action wrapper | Overrides the holistic-review model. An enabled semantic review inherits this override only when `semantic_review.model` is omitted, empty, or null; an explicit semantic model remains authoritative. |
+| `MODEL_REASONING_EFFORT` | Python pipeline | Overrides `model_reasoning_effort` for translation drafts. |
 | `REVIEW_REASONING_EFFORT` | Python pipeline | Overrides `review_reasoning_effort` for holistic review. |
 | `PROCESS_ALL_FILES` | Python pipeline, Action wrapper | When true, process all discoverable translation files rather than changed files only. |
 
