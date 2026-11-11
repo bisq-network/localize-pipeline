@@ -47,6 +47,7 @@ from localize.formats.metadata import JAVA_PROPERTIES_FORMAT, LocalizationFormat
 from localize.formats.layouts import LocalizationLayout
 from localize.formats.profiles import LocalizationProfile
 from localize.providers.models import OpenAICompatibleProvider
+from localize.run_safeguards import RequestBudgetExceeded, SampleValidationError
 from localize.formats.placeholders import (
     extract_placeholder_tokens,
     protect_placeholders,
@@ -60,6 +61,7 @@ from localize.core.pipeline import (
     TranslationPipelineSteps,
     run_translation_pipeline,
 )
+from localize.queue_cleanup import clear_queue_contents
 from localize.translation_prompts import build_translation_system_prompt
 from localize.source_identical_acceptance import is_accepted_source_identical
 from localize.translation_memory import (
@@ -1689,6 +1691,8 @@ Provide the translation **of the Value only**, following the instructions above.
                 logger.debug(f"Translated key '{key}' successfully.")
                 return index, translated_text, True
 
+            except RequestBudgetExceeded:
+                raise
             except Exception as general_exc:
                 if MODEL_PROVIDER.is_retryable_error(general_exc):
                     logger.error(f"API error occurred: {general_exc.__class__.__name__} - {general_exc}")
@@ -2038,6 +2042,8 @@ async def holistic_review_async(
                 logger.debug(f"Invalid AI response (Schema Error):\n---\n{response_text}\n---")
                 # Fall through to retry logic
 
+            except RequestBudgetExceeded:
+                raise
             except Exception as e:
                 if MODEL_PROVIDER.is_retryable_error(e):
                     logger.warning(f"API error during holistic review: {e}")
@@ -2580,7 +2586,8 @@ async def process_translation_queue(
         translation_queue_folder: str,
         translated_queue_folder: str,
         glossary_file_path: str,
-        validation_summary: Optional[Dict[str, Dict[str, object]]] = None
+        validation_summary: Optional[Dict[str, Dict[str, object]]] = None,
+        _sample: bool = False,
 ) -> ProcessTranslationQueueResult:
     """
     Process all localization files in the translation queue folder.
@@ -2616,6 +2623,39 @@ async def process_translation_queue(
             ):
                 skipped_files[relative_path] = ["No supported target locale profile."]
     localization_files.sort(key=lambda item: item[0])
+    safeguards = config.run_safeguards if not DRY_RUN else None
+    if safeguards and not _sample:
+        # Run the normal translation/serialization validators in an isolated
+        # output directory. Do not advance the source ledger for partial work.
+        sample_summary = {}
+        with tempfile.TemporaryDirectory(prefix="localize-sample-") as scratch:
+            sample_input = os.path.join(scratch, "input")
+            output = os.path.join(scratch, "output")
+            shutil.copytree(translation_queue_folder, sample_input)
+            os.makedirs(output)
+            try:
+                with safeguards.sample_budget():
+                    sample_result = await process_translation_queue(
+                        sample_input, output, glossary_file_path,
+                        validation_summary=sample_summary, _sample=True,
+                    )
+                if sample_result[2]:
+                    raise SampleValidationError(
+                        f"Sample validation failed: {sample_result[2]}"
+                    )
+            except (RequestBudgetExceeded, SampleValidationError):
+                write_translation_validation_summary(
+                    os.path.join(PROJECT_ROOT_DIR, "logs", "sample_validation_summary.json"),
+                    validation_files=sample_summary,
+                    skipped_files={"sample": ["Full run withheld; inspect sample diagnostics."]},
+                )
+                raise
+        write_translation_validation_summary(
+            os.path.join(PROJECT_ROOT_DIR, "logs", "sample_validation_summary.json"),
+            validation_files=sample_summary, skipped_files={},
+        )
+        logger.info("Bounded sample passed for %d file(s); continuing with the queue.",
+                    sample_result[0])
 
     # Load the glossary from the JSON file
     glossary = load_glossary(glossary_file_path)
@@ -2637,6 +2677,10 @@ async def process_translation_queue(
     total_keys_translated = 0
     run_metrics = new_run_metrics()
     for translation_file, localization_profile in localization_files:
+        if _sample and skipped_files:
+            raise SampleValidationError(f"Sample input validation failed: {skipped_files}")
+        if _sample and processed_files_count >= safeguards.sample_files:
+            break
         try:
             localization_format = localization_profile.localization_format
             localization_layout = localization_profile.localization_layout
@@ -2795,7 +2839,10 @@ async def process_translation_queue(
             if not texts_to_translate:
                 # Refresh ledger baseline even when no translation was required.
                 key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
-                save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
+                if not _sample and not safeguards:
+                    save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
+                if _sample:
+                    continue
                 if ignored_keys_requiring_output:
                     increment_run_metric(
                         run_metrics,
@@ -2837,6 +2884,55 @@ async def process_translation_queue(
                 continue
 
             increment_run_metric(run_metrics, "candidate_keys_count", len(keys_to_translate))
+            if _sample:
+                # Include the longest and placeholder-bearing messages first.
+                positions = sorted(
+                    range(len(keys_to_translate)),
+                    key=lambda i: (
+                        not bool(extract_placeholder_tokens(texts_to_translate[i])),
+                        -len(texts_to_translate[i]), keys_to_translate[i],
+                    ),
+                )[:safeguards.sample_keys]
+                texts_to_translate = [texts_to_translate[i] for i in positions]
+                indices = [indices[i] for i in positions]
+                keys_to_translate = [keys_to_translate[i] for i in positions]
+
+            checkpoint = None
+            if safeguards:
+                with open(translation_file_path, encoding="utf-8") as stream:
+                    checkpoint_input = stream.read()
+                checkpoint = safeguards.fingerprint({
+                    "stage": "sample" if _sample else "translation",
+                    "file": translation_file, "format": localization_format.id,
+                    "source": source_translations, "target": original_target_translations,
+                    "target_content": checkpoint_input,
+                    "keys": keys_to_translate, "glossary": glossary,
+                    "draft_model": MODEL_NAME, "review_model": REVIEW_MODEL_NAME,
+                    "review_effort": REVIEW_REASONING_EFFORT,
+                    "semantic_model": SEMANTIC_REVIEW_MODEL_NAME,
+                })
+                accepted = safeguards.lookup(checkpoint)
+                if accepted is not None:
+                    translated_file_path = os.path.join(translated_queue_folder, translation_file)
+                    write_text_atomic(translated_file_path, accepted["content"])
+                    if validation_summary is not None:
+                        validation_summary[translation_file] = accepted["validation"]
+                    if not _sample:
+                        key_ledger[translation_file] = build_file_key_ledger(
+                            source_translations, accepted["translations"],
+                        )
+                    increment_run_metric(
+                        run_metrics, "changed_values_count",
+                        count_changed_translation_values(
+                            original_target_translations, accepted["translations"],
+                        ),
+                    )
+                    processed_files_count += 1
+                    processed_filenames.append(translation_file)
+                    total_keys_translated += len(keys_to_translate)
+                    logger.info("Reused validated output for '%s'; no draft/review requests.",
+                                translation_file)
+                    continue
 
             memory_plan = apply_translation_memory(
                 texts_to_translate=texts_to_translate,
@@ -2898,6 +2994,7 @@ async def process_translation_queue(
             # The tqdm output is directed to stderr by default, which is ideal.
             # It prevents progress bars from being broken by stdout prints.
             if tasks:
+                budget_error = None
                 for coro in tqdm(
                         asyncio.as_completed(tasks),
                         desc=f"Translating {translation_file}",
@@ -2906,10 +3003,17 @@ async def process_translation_queue(
                 ):
                     try:
                         index, result, succeeded = await coro
+                    except RequestBudgetExceeded as exc:
+                        # Drain all concurrent tasks before returning; none may
+                        # make an unreserved request after the limit is reached.
+                        budget_error = exc
+                        continue
                     except Exception:
                         logger.exception("Translation task failed unexpectedly for '%s'; continuing.", translation_file)
                         continue
                     results.append((index, result, succeeded))
+                if budget_error:
+                    raise budget_error
 
             # Sort results by index to ensure correct order
             seen_positions = {position for position, _result, _succeeded in results}
@@ -3039,6 +3143,9 @@ async def process_translation_queue(
             )
 
             review_failed_keys = set()
+            for result in review_results:
+                if isinstance(result, RequestBudgetExceeded):
+                    raise result
             for i, (corrected_chunk, key_chunk) in enumerate(zip(review_results, key_chunks)):
                 if isinstance(corrected_chunk, Exception):
                     logger.error(
@@ -3191,6 +3298,10 @@ async def process_translation_queue(
             per_key_summary["model_translation_failed_keys"] = sorted(model_failed_keys)
             if validation_summary is not None:
                 validation_summary[translation_file] = per_key_summary
+            if _sample and failed_keys:
+                raise SampleValidationError(
+                    f"Sample failed for {translation_file}: {sorted(failed_keys)}"
+                )
 
             # A rejected candidate is not permission to replace localized text
             # with English. Without a valid current-source baseline, withhold
@@ -3218,7 +3329,8 @@ async def process_translation_queue(
                 for key in keys_to_translate:
                     retry_entries[key] = {**retry_entries.get(key, {}), "status": "failed"}
                 key_ledger[translation_file] = retry_entries
-                save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
+                if not _sample and not safeguards:
+                    save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
                 logger.error("Withholding '%s': source fallback would replace %d localized value(s).",
                              translation_file, len(blocked_regressions))
                 continue
@@ -3269,13 +3381,62 @@ async def process_translation_queue(
                     file.write(new_file_content)
                 logger.info(f"Translated file saved to '{translated_file_path}'.\n")
 
+            if _sample:
+                from localize.semantic_quality import (
+                    TranslationChange, evaluate_semantic_rules, load_semantic_rules,
+                )
+                from localize.translation_semantic_reviewer import review_translation_changes
+
+                # Review what was actually serialized, including escape handling.
+                _, serialized = adapter.parse_file(translated_file_path)
+                changes = [
+                    TranslationChange(
+                        file=translation_file, locale_code=language_code, key=key,
+                        source_value=source_translations[key],
+                        old_value=original_target_translations.get(key),
+                        new_value=serialized[key],
+                    ) for key in keys_to_translate
+                ]
+                rule_findings = evaluate_semantic_rules(
+                    changes, load_semantic_rules(safeguards.policy.get("semantic_quality_rules", [])),
+                )
+                if any(item.severity == "error" or config.quality_gate.block_on_semantic_qa_warnings
+                       for item in rule_findings):
+                    raise SampleValidationError(f"Semantic policy sample failed for {translation_file}")
+                failed_batches = []
+                findings = await review_translation_changes(
+                    client=MODEL_PROVIDER.client, model=SEMANTIC_REVIEW_MODEL_NAME,
+                    target_language=target_language, changes=changes,
+                    style_rules=config.style_rules.get(language_code, []),
+                    brand_glossary=BRAND_GLOSSARY, model_provider=MODEL_PROVIDER,
+                    failed_batches=failed_batches,
+                    reasoning_effort=config.semantic_review_reasoning_effort,
+                ) if config.semantic_review_enabled else []
+                blocking = [
+                    item for item in findings
+                    if item.get("severity") == "error"
+                    or config.quality_gate.block_on_semantic_qa_warnings
+                ]
+                per_key_summary["sample_semantic_findings"] = findings
+                if failed_batches or blocking:
+                    raise SampleValidationError(
+                        f"Semantic sample failed for {translation_file}: "
+                        f"{len(blocking)} blocking findings; {len(failed_batches)} failed batches."
+                    )
+            if safeguards and not failed_keys:
+                safeguards.accept(checkpoint, {
+                    "content": new_file_content, "translations": final_output_translations,
+                    "validation": per_key_summary,
+                })
+
             # Update and persist per-file key ledger after successful file processing.
             key_ledger[translation_file] = build_file_key_ledger(
                 source_translations,
                 final_output_translations,
                 failed_keys=failed_keys
             )
-            save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
+            if not _sample and not safeguards:
+                save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
             if translation_memory is not None and not DRY_RUN:
                 update_translation_memory(
                     translation_memory,
@@ -3293,17 +3454,23 @@ async def process_translation_queue(
             processed_filenames.append(translation_file)
             total_keys_translated += len(keys_to_translate)
 
+        except (RequestBudgetExceeded, SampleValidationError):
+            raise
         except Exception as exc:
             logger.exception("Unexpected error while processing translation file %s.", translation_file)
             skipped_files[translation_file] = [f"Unexpected processing error: {exc}"]
+            if _sample:
+                raise SampleValidationError(f"Sample processing failed for {translation_file}") from exc
             continue
-    return ProcessTranslationQueueResult(
+    result = ProcessTranslationQueueResult(
         processed_files_count,
         processed_filenames,
         skipped_files,
         total_keys_translated,
         run_metrics,
     )
+    result.pending_ledger = key_ledger if safeguards and not _sample else None
+    return result
 def archive_original_files(
         changed_files: List[str],
         input_folder_path: str,
@@ -3468,13 +3635,10 @@ def cleanup_translation_queue_folders(
         translation_queue_folder: str,
         translated_queue_folder: str
 ) -> None:
-    """Remove queue folders after a successful non-debug run."""
-    try:
-        shutil.rmtree(translation_queue_folder)
-        shutil.rmtree(translated_queue_folder)
-        logger.info("Cleaned up translation queue folders.")
-    except Exception:
-        logger.exception("Error cleaning up translation queue folders")
+    """Clear validated scratch queues while retaining writable queue roots."""
+    clear_queue_contents(translation_queue_folder)
+    clear_queue_contents(translated_queue_folder)
+    logger.info("Cleaned up translation queue contents.")
 
 
 def _build_pr_title(
@@ -3522,6 +3686,12 @@ def _build_pr_title(
     return candidates[-1][:69] + "..."
 
 
+def commit_processed_state(result):
+    pending = getattr(result, "pending_ledger", None)
+    if pending is not None:
+        save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, pending)
+
+
 async def main():
     """
     Main function to orchestrate the translation process.
@@ -3552,13 +3722,23 @@ async def main():
         write_token_usage_summary=write_token_usage_summary,
         copy_translated_files_back=copy_translated_files_back,
         cleanup_queue_folders=cleanup_translation_queue_folders,
+        commit_processed_state=commit_processed_state,
     )
-    return await run_translation_pipeline(
-        paths=paths,
-        options=options,
-        steps=steps,
-        logger=logger,
-    )
+    try:
+        return await run_translation_pipeline(
+            paths=paths,
+            options=options,
+            steps=steps,
+            logger=logger,
+        )
+    except (RequestBudgetExceeded, SampleValidationError) as exc:
+        write_token_usage_summary(paths.token_usage_summary_path)
+        write_json_atomic(os.path.join(paths.logs_folder_path, "run_stop.json"), {
+            "reason": str(exc), "type": type(exc).__name__,
+            "requests_in_last_24h": config.run_safeguards.request_count(),
+            "limit": config.run_safeguards.max_requests_per_24h,
+        })
+        raise
 
 if __name__ == "__main__":
     # Ensure queue folders exist, potentially using paths derived from config or defaults

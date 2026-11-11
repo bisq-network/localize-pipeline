@@ -1,4 +1,10 @@
 target_project_root: "/target_repo"
+run_safeguards:
+  state_path: "/app/logs/run_safeguards.sqlite3"
+  max_requests_per_24h: 750
+  sample_files: 3
+  sample_keys: 5
+  sample_max_requests: 60
 input_folder: "/target_repo/shared/domain/src/commonMain/resources/mobile"
 glossary_file_path: "glossary.json"
 localization_format: "java_properties"

@@ -91,6 +91,7 @@ async def create_chat_completion(
     model: str,
     messages: Any,
     completion_token_limit: int | None = None,
+    before_request: Callable[[], None] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Create a chat completion with model-aware token-limit parameters."""
@@ -100,6 +101,7 @@ async def create_chat_completion(
         messages=messages,
         completion_token_limit=completion_token_limit,
         retry_exception_types=(OpenAIError, TypeError),
+        before_request=before_request,
         **kwargs,
     )
 
@@ -111,6 +113,7 @@ async def create_chat_completion_with_fallback(
     messages: Any,
     completion_token_limit: int | None = None,
     retry_exception_types: Tuple[type[BaseException], ...] = (Exception,),
+    before_request: Callable[[], None] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Create a chat completion with model-aware token-limit parameters.
@@ -121,6 +124,8 @@ async def create_chat_completion_with_fallback(
     """
     kwargs = _normalize_model_kwargs(model, kwargs)
     if completion_token_limit is None:
+        if before_request:
+            before_request()
         return await _maybe_await(create_completion(model=model, messages=messages, **kwargs))
 
     first_parameter = completion_token_parameter_for_model(model)
@@ -136,6 +141,8 @@ async def create_chat_completion_with_fallback(
     )
 
     try:
+        if before_request:
+            before_request()
         return await _maybe_await(create_completion(model=model, messages=messages, **first_kwargs))
     except retry_exception_types as exc:
         if not _looks_like_unsupported_parameter(exc, first_parameter):
@@ -153,4 +160,6 @@ async def create_chat_completion_with_fallback(
         fallback_parameter,
         completion_token_limit,
     )
+    if before_request:
+        before_request()
     return await _maybe_await(create_completion(model=model, messages=messages, **fallback_kwargs))

@@ -7,6 +7,7 @@ import pytest
 
 from localize.semantic_quality import TranslationChange
 from localize.translation_semantic_reviewer import review_translation_changes
+from localize.run_safeguards import RequestBudgetExceeded
 
 
 def response(findings, finish_reason="stop"):
@@ -87,6 +88,13 @@ async def test_clean_review_needs_no_confirmation():
     assert provider.create_chat_completion.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_confirmation_respects_request_budget_stop():
+    provider = MagicMock(create_chat_completion=AsyncMock(
+        side_effect=[response([FALSE_FINDING]), RequestBudgetExceeded("limit")]))
+    with pytest.raises(RequestBudgetExceeded):
+        await run(provider, [])
+    assert provider.create_chat_completion.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -192,6 +200,16 @@ async def test_repaired_primary_real_finding_still_requires_confirmation():
     assert len(findings) == 1 and findings[0]["severity"] == "error"
     assert not failed
     assert provider.create_chat_completion.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_contract_repair_respects_request_budget_stop():
+    provider = MagicMock(create_chat_completion=AsyncMock(side_effect=[
+        response([], "length"), RequestBudgetExceeded("limit"),
+    ]))
+    with pytest.raises(RequestBudgetExceeded):
+        await run(provider, [])
+    assert provider.create_chat_completion.await_count == 2
 
 
 @pytest.mark.asyncio
