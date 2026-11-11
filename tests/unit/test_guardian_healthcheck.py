@@ -2,6 +2,7 @@
 
 import ast
 from contextlib import contextmanager
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -57,6 +58,59 @@ def test_poll_outcome_requires_fresh_audit_success(
     )
     assert pings == ([] if expected is None else [expected])
     assert result == (1 if expected == "fail" else 0)
+
+
+@pytest.mark.parametrize("ledger_existed", [True, False])
+@pytest.mark.parametrize("exit_code,expected", [(0, None), (1, "fail")])
+def test_empty_ledger_before_first_poll(
+    tmp_path, monkeypatch, ledger_existed, exit_code, expected
+):
+    """A not-due wake on a fresh install is a skip, not a failure."""
+    path = tmp_path / "state.sqlite3"
+    if ledger_existed:
+        GuardianState(path).close()
+
+    def run(command, **kwargs):
+        GuardianState(path).close()  # Guardian opens its ledger, then skips.
+        return subprocess.CompletedProcess(command, exit_code)
+
+    pings = []
+    monkeypatch.setattr(healthcheck.subprocess, "run", run)
+    monkeypatch.setattr(healthcheck, "ping", lambda url, outcome: pings.append(outcome))
+    result = healthcheck.run_monitored(["guardian"], path, "https://hc-ping.com/test")
+    assert pings == ([] if expected is None else [expected])
+    assert result == exit_code
+
+
+def test_first_poll_on_fresh_install_pings_success(tmp_path, monkeypatch):
+    path = tmp_path / "state.sqlite3"
+    monkeypatch.setattr(
+        healthcheck.subprocess,
+        "run",
+        lambda command, **k: _record(path, "ok") or subprocess.CompletedProcess(command, 0),
+    )
+    pings = []
+    monkeypatch.setattr(healthcheck, "ping", lambda url, outcome: pings.append(outcome))
+    assert healthcheck.run_monitored(["guardian"], path, "https://hc-ping.com/test") == 0
+    assert pings == ["success"]
+
+
+def test_missing_ledger_after_command_is_a_failure(tmp_path, monkeypatch):
+    """A wrong --state path must not hide every poll as a skipped wake."""
+    monkeypatch.setattr(
+        healthcheck.subprocess,
+        "run",
+        lambda command, **k: subprocess.CompletedProcess(command, 0),
+    )
+    pings = []
+    monkeypatch.setattr(healthcheck, "ping", lambda url, outcome: pings.append(outcome))
+    assert (
+        healthcheck.run_monitored(
+            ["guardian"], tmp_path / "missing.sqlite3", "https://hc-ping.com/test"
+        )
+        == 1
+    )
+    assert pings == ["fail"]
 
 
 @pytest.mark.parametrize(
@@ -163,6 +217,30 @@ def test_reject_public_url_file(tmp_path):
     path.chmod(0o644)
     with pytest.raises(ValueError):
         healthcheck.read_url(path)
+
+
+def test_fifo_url_file_does_not_block_the_poll(tmp_path):
+    """An invalid monitoring file must not stop Guardian from running."""
+    url_file = tmp_path / "url"
+    os.mkfifo(url_file, 0o600)
+    marker = tmp_path / "ran"
+    result = subprocess.run(
+        [
+            sys.executable, "-I", str(MODULE),
+            "--url-file", str(url_file),
+            "--state", str(tmp_path / "state.sqlite3"),
+            "--", sys.executable, "-c",
+            "import sys; open(sys.argv[1], 'w').close()", str(marker),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert marker.exists()
+    assert "unavailable or invalid" in result.stderr
+    assert result.returncode == 1
 
 
 def test_real_child_completion_is_observed(state, monkeypatch):

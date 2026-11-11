@@ -1372,12 +1372,14 @@ exec /path/to/venv/bin/python -m localize.guardian.healthcheck \
 The monitor sends an empty success ping only after a new successful `guardian`
 poll record and a zero command exit status. A failed command or failed poll
 record sends `/fail`. A scheduled wake that is not due, or that finds another
-poll running, writes no poll record and sends no ping, so it never renews the
-heartbeat. Missing pings therefore expose a stopped scheduler, a sleeping or
-offline host, a hung poll, or an authentication or model circuit that stops
-scheduled polls. An unreadable state database never produces a success ping.
-Monitoring errors preserve a nonzero poll exit code, or return one when the
-poll itself succeeded. An invalid URL file does not prevent the Guardian
+poll running, writes no poll record and sends no ping, even before the first
+completed poll, so it never renews the heartbeat. Missing pings therefore expose
+a stopped scheduler, a sleeping or offline host, a hung poll, or an
+authentication or model circuit that stops scheduled polls. A state database
+that is unreadable, or missing after the command, sends `/fail`, so a wrong
+`--state` path is reported at once. Monitoring errors preserve a nonzero poll
+exit code, or return one when the poll itself succeeded. An invalid URL file,
+including a FIFO or other non-regular file, does not prevent the Guardian
 command from running.
 
 Match the check to the configured schedule. The staged LaunchAgent wakes every

@@ -19,7 +19,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 def read_url(path: Path) -> str:
     """Read the ping capability from an owner-only regular file."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    # Nonblocking, so a FIFO without a writer is rejected instead of waiting.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd) as stream:
         metadata = os.fstat(stream.fileno())
         if (
@@ -91,14 +92,18 @@ def run_monitored(command: list[str], state_path: Path, url: str | None) -> int:
     except (OSError, sqlite3.Error):
         after = None
         audit_available = False
+    # The ledger may be absent before the first poll, but Guardian creates it
+    # before deciding whether a poll is due. Missing afterwards means a wrong path.
+    audit_available = audit_available and state_path.exists()
 
-    if result or not audit_available or after is None:
+    if result or not audit_available:
         outcome = "fail"
     elif before == after:
-        # A scheduled no-op must not renew an old successful heartbeat.
+        # A scheduled no-op, even before the first completed poll, must neither
+        # renew an old successful heartbeat nor report a failure.
         return result if url is not None else 1
     else:
-        outcome = "success" if after[1] == "ok" else "fail"
+        outcome = "success" if after is not None and after[1] == "ok" else "fail"
 
     if url is None:
         return result or 1
