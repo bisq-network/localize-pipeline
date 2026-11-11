@@ -1373,11 +1373,16 @@ The monitor sends an empty success ping only after a new successful `guardian`
 poll record and a zero command exit status. A failed command or failed poll
 record sends `/fail`. A scheduled wake that is not due, or that finds another
 poll running, writes no poll record and sends no ping, even before the first
-completed poll, so it never renews the heartbeat. Missing pings therefore expose
+completed poll, so a wake alone never renews the heartbeat. If that other poll
+finishes during the wake, the wake reports the other poll's real outcome for
+the same ledger. Missing pings therefore expose
 a stopped scheduler, a sleeping or offline host, a hung poll, or an
 authentication or model circuit that stops scheduled polls. A state database
-that is unreadable, or missing after the command, sends `/fail`, so a wrong
-`--state` path is reported at once. Monitoring errors preserve a nonzero poll
+that is unreadable, or missing after the command, sends `/fail`, so a `--state`
+path that does not exist is reported at once. A path to a different, existing
+ledger is not: every wake then looks skipped, and only the missing heartbeat
+alerts. Confirm that `--state` is the `.guardian/state.sqlite3` beside the
+config passed to the wrapped command. Monitoring errors preserve a nonzero poll
 exit code, or return one when the poll itself succeeded. An invalid URL file,
 including a FIFO or other non-regular file, does not prevent the Guardian
 command from running.
