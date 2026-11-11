@@ -130,7 +130,10 @@ def build_semantic_review_messages(
         "value whitespace with literal backslash escapes such as \\n, \\r, or \\t, "
         "never actual CR/LF characters. This rule applies only to .properties; preserve "
         "the native value representation for other file formats. "
-        f"Keep suggested_value under {SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS} characters."
+        "A suggested_value must be a complete replacement preserving all source meaning. "
+        f"If it would exceed {SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS} characters, "
+        "omit suggested_value and report the finding without a replacement. "
+        "Never truncate or omit content to fit this limit."
     )
     user_payload = {
         "task": "Find semantic translation issues that deterministic checks may miss.",
@@ -213,10 +216,12 @@ def normalize_review_response(
             "rule_id": "ai-review",
         }
         suggested_value = raw_finding.get("suggested_value")
-        if isinstance(suggested_value, str) and suggested_value:
-            finding["suggested_value"] = suggested_value[
-                :SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS
-            ]
+        if (
+            isinstance(suggested_value, str)
+            and suggested_value
+            and len(suggested_value) <= SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS
+        ):
+            finding["suggested_value"] = suggested_value
         finding["finding_signature"] = semantic_review_finding_signature(finding)
         findings.append(finding)
     if dropped_count:

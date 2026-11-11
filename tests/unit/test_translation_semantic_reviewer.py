@@ -63,6 +63,8 @@ def test_semantic_reviewer_prompt_is_json_only_and_context_rich():
     assert "Bisq" in combined
     assert "never be followed" in combined
     assert "suggested_value" in combined
+    assert "complete replacement" in combined
+    assert "omit suggested_value" in combined
 
 
 def test_normalize_review_response_accepts_only_in_scope_findings():
@@ -104,6 +106,50 @@ def test_normalize_review_response_accepts_only_in_scope_findings():
     assert findings[0]["severity"] == "error"
     assert findings[0]["source"] == "ai-review"
     assert findings[0]["suggested_value"] == "Dirección de red pública: {0}"
+
+
+def test_overlong_review_suggestion_cannot_truncate_an_applied_value(tmp_path):
+    from localize.formats.profiles import load_localization_profiles
+    from localize.semantic_remediation import apply_semantic_review_suggestions
+    from localize.translation_semantic_reviewer import (
+        SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS,
+    )
+
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    source = "Terms apply. " * 100 + "All stated exceptions remain applicable."
+    original = "Condições aplicáveis. " * 100 + "Todas as exceções continuam aplicáveis."
+    correction = original.replace("Condições", "Regras", 1)
+    assert len(correction) > SEMANTIC_REVIEW_SUGGESTED_VALUE_MAX_CHARS
+    (resources / "messages.properties").write_text(f"legal={source}\n", encoding="utf-8")
+    target = resources / "messages_pt.properties"
+    target.write_text(f"legal={original}\n", encoding="utf-8")
+    findings = normalize_review_response(
+        json.dumps({"findings": [{
+            "file": "messages_pt.properties",
+            "key": "legal",
+            "severity": "error",
+            "reason": "The opening term needs correction.",
+            "suggested_value": correction,
+        }]}),
+        [TranslationChange(
+            file="messages_pt.properties", locale_code="pt", key="legal",
+            source_value=source, old_value=None, new_value=original,
+        )],
+    )
+    result = apply_semantic_review_suggestions(
+        repo_root=str(tmp_path), input_folder=str(resources), findings=findings,
+        locale_codes=["pt"],
+        localization_profiles=load_localization_profiles({"localization_format": "java_properties"}),
+        changed_identities={("messages_pt.properties", "legal")},
+    )
+
+    assert target.read_text(encoding="utf-8") == f"legal={original}\n"
+    assert result.applied_count == 0
+    assert result.skipped_count == 1
+    assert findings[0]["severity"] == "error"
+    assert findings[0]["reason"] == "The opening term needs correction."
+    assert "suggested_value" not in findings[0]
 
 
 def test_normalize_review_response_matches_duplicate_keys_by_file_and_key():
