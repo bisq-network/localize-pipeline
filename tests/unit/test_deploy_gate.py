@@ -21,8 +21,22 @@ DEPLOYMENT_DOCS = PROJECT_ROOT / "docs" / "new-project-deployment.md"
 STAMP_ERROR = "has no merged-commit stamp"
 
 
+# Variables that point Git at another repository. A caller (for example a Git
+# hook) may set them; tests must act only on their temporary repositories.
+_GIT_LOCATION_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+)
+
+
 def _git_env() -> dict[str, str]:
-    env = dict(os.environ)
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_LOCATION_VARIABLES}
     env.update(
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_NOSYSTEM="1",
@@ -153,6 +167,22 @@ class DeployCheckout:
 @pytest.fixture
 def checkout(tmp_path: Path) -> DeployCheckout:
     return DeployCheckout(tmp_path)
+
+
+def test_ignores_git_location_variables_from_the_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.setenv("GIT_DIR", str(elsewhere / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(elsewhere))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(elsewhere / "index"))
+
+    checkout = DeployCheckout(tmp_path / "repo")
+    result = checkout.run("--check-only")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == checkout.head()
+    assert not elsewhere.exists()
 
 
 def test_builds_merged_commit_with_source_stamp(checkout: DeployCheckout):
