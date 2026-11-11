@@ -17,6 +17,10 @@ translation_file_filter_glob: displayStrings_*.properties
 process_all_files: true
 dry_run: false
 retranslate_identical_source_strings: false
+accepted_source_identical_translations:
+  de:
+    payment.account.revtag: Revtag
+    CLEAR_X_CHANGE: Zelle
 project_context: >
   Translate for Bisq 1, the original desktop peer-to-peer bitcoin exchange.
   Preserve the meaning of security warnings, multisignature escrow, security

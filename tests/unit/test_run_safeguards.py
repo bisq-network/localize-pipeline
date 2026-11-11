@@ -66,6 +66,23 @@ def test_cache_is_exact_and_persistent(tmp_path):
     assert safeguards.request_count() == 0
 
 
+def test_provisional_candidates_are_separate_from_acceptance_and_budget(tmp_path):
+    safeguards = guard(tmp_path)
+    safeguards.reserve("already charged")
+    key = safeguards.fingerprint({"source": "Pay {0}", "target": "Alt", "policy": 1})
+    safeguards.save_candidates(key, {"good": "Zahlen {0}"})
+    restarted = guard(tmp_path)
+    assert restarted.lookup_candidates(key) == {"good": "Zahlen {0}"}
+    assert restarted.lookup(key) is None
+    assert restarted.request_count() == 1
+    assert restarted.lookup_candidates(restarted.fingerprint(
+        {"source": "Pay {1}", "target": "Alt", "policy": 1},
+    )) == {}
+    # Revalidation can revoke an earlier candidate; do not merge stale values.
+    restarted.save_candidates(key, {})
+    assert safeguards.lookup_candidates(key) == {}
+
+
 @pytest.mark.parametrize("value", [0, -1, True, "100", 1.5])
 def test_invalid_caps_fail_closed(tmp_path, value):
     with pytest.raises(ValueError):

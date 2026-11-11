@@ -51,6 +51,8 @@ class RunSafeguards:
                 connection.execute("CREATE INDEX IF NOT EXISTS request_time ON requests(created)")
                 connection.execute("CREATE TABLE IF NOT EXISTS accepted "
                                    "(fingerprint TEXT PRIMARY KEY, result TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS candidates "
+                                   "(fingerprint TEXT PRIMARY KEY, result TEXT NOT NULL)")
                 yield connection
         finally:
             connection.close()
@@ -107,6 +109,19 @@ class RunSafeguards:
         with self.connect() as db:
             db.execute("INSERT OR REPLACE INTO accepted VALUES (?, ?)",
                        (fingerprint, json.dumps(result, ensure_ascii=False)))
+
+    def lookup_candidates(self, fingerprint):
+        """Return provisional per-key output; this is not file acceptance."""
+        with self.connect() as db:
+            row = db.execute("SELECT result FROM candidates WHERE fingerprint = ?",
+                             (fingerprint,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def save_candidates(self, fingerprint, translations):
+        """Replace provisional values after validation, including revocations."""
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO candidates VALUES (?, ?)",
+                       (fingerprint, json.dumps(translations, ensure_ascii=False)))
 
 
 def load_safeguards(config, config_path):

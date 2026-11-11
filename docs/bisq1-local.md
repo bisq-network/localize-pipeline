@@ -88,6 +88,15 @@ Each invocation preserves its reports under `runs/<timestamp>/`:
 quality gate. Preserve them; failed runs retain their candidate state under
 their own report directory.
 
+If a prior failed run contains independently verified, accepted sample
+translations in its `memory.json`, reuse that exact file with
+`--resume-memory /absolute/path/to/runs/<timestamp>/memory.json`.
+Inspect its provenance and contents first; this option does not decide whether
+the supplied translations were approved. It merges into the new run's memory
+without advancing workspace state, marks conflicting values unsafe to reuse,
+and repeats current review and validation. Do not import arbitrary failed
+drafts as approved memory.
+
 The command exits unsuccessfully if any locale is skipped or the quality
 gate fails. A failed gate leaves the candidate for diagnosis, not publication.
 Review security warnings and financial language in context before accepting

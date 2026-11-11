@@ -30,6 +30,13 @@ passed draft/holistic processing and deterministic validation, plus semantic
 review responses with no findings. Failed or partial file results and flagged
 semantic reviews are not accepted checkpoints.
 
+When individual keys pass validation but another key withholds the file, a
+separate provisional cache retains the valid candidates. Model failures,
+review failures and validation failures are excluded. An identical retry skips
+drafting and holistic review for those candidates, but runs deterministic
+validation again and still requires the complete semantic and publication
+gates. Provisional candidates do not advance the accepted ledger or memory.
+
 Identical retries reuse these results. The normal semantic and publication
 gates still run; cached translation-stage output is not semantic approval.
 The checkpoint fingerprint includes source and target content, selected keys,

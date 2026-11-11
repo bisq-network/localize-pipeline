@@ -94,6 +94,54 @@ def test_unknown_locale_fails_before_running(tmp_path):
         job.write_config(tmp_path / "bisq", tmp_path, ["pt_BR"])
 
 
+def test_german_payment_brand_acceptances_are_exact():
+    from localize.source_identical_acceptance import is_accepted_source_identical
+
+    config = yaml.safe_load((ROOT / "profiles/bisq1/config.yaml").read_text())
+    policy = config.get("accepted_source_identical_translations", {})
+    expected = {"payment.account.revtag": "Revtag", "CLEAR_X_CHANGE": "Zelle"}
+    assert policy == {"de": expected}
+    for key, value in expected.items():
+        assert is_accepted_source_identical("de", key, value, value, policy)
+        assert not is_accepted_source_identical("fr", key, value, value, policy)
+        assert not is_accepted_source_identical("de", "other", value, value, policy)
+        assert not is_accepted_source_identical("de", key, value + " changed", value + " changed", policy)
+        assert not is_accepted_source_identical("de", key, value, value + " ", policy)
+
+
+def test_resume_memory_is_conflict_safe_and_does_not_promote_state(tmp_path):
+    from localize.translation_memory import TranslationMemory, load_translation_memory_strict, write_translation_memory
+
+    state = tmp_path / "state"
+    report = state / "runs" / "retry"
+    report.mkdir(parents=True)
+    current = TranslationMemory()
+    current.record("Account", "Konto", locale="de", format_id="java_properties")
+    write_translation_memory(state / "memory.json", current)
+    before = (state / "memory.json").read_bytes()
+    resumed = TranslationMemory()
+    resumed.record("Account", "Benutzerkonto", locale="de", format_id="java_properties")
+    resumed.record("Warning", "Warnung", locale="de", format_id="java_properties")
+    resume_path = tmp_path / "reviewed-memory.json"
+    write_translation_memory(resume_path, resumed)
+    job.seed_run_memory(state, report, resume_path)
+    result = load_translation_memory_strict(report / "memory.json", require_exists=True)
+    assert result.lookup("Account", locale="de", format_id="java_properties") is None
+    assert result.lookup("Warning", locale="de", format_id="java_properties") == "Warnung"
+    assert (state / "memory.json").read_bytes() == before
+    assert not (state / "ledger.json").exists()
+
+
+def test_invalid_resume_memory_fails_without_changing_state(tmp_path):
+    resume_path = tmp_path / "invalid.json"
+    resume_path.write_text("{")
+    report = tmp_path / "report"
+    report.mkdir()
+    with pytest.raises(ValueError, match="invalid translation memory"):
+        job.seed_run_memory(tmp_path, report, resume_path)
+    assert not (report / "memory.json").exists()
+
+
 def test_adding_locale_seeds_missing_baseline_and_preserves_existing_ledger(tmp_path, monkeypatch):
     from localize import translate_localization_files as runtime
 

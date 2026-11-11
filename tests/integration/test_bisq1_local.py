@@ -23,6 +23,11 @@ def test_manual_job_keeps_source_and_promotes_state_only_after_quality(tmp_path,
     source.write_text("label=Account\n")
     for code, value in {"de": "Konto", "pt": "Conta", "pt-br": "Conta", "fr": "Compte"}.items():
         (resources / f"displayStrings_{code}.properties").write_text(f"label={value}\n")
+    from localize.translation_memory import TranslationMemory, write_translation_memory
+    reviewed_memory = TranslationMemory()
+    reviewed_memory.record("Account", "Konto", locale="de", format_id="java_properties")
+    write_translation_memory(state / "reviewed-memory.json", reviewed_memory)
+    memory_before = (state / "reviewed-memory.json").read_bytes()
     # A previous interrupted invocation must not feed unrelated locales into
     # this run, or copy an old output back over an unselected target.
     for folder in ("queue", "translated"):
@@ -75,7 +80,8 @@ if sys.argv[4] == "reject":
 state_path = sys.argv[2]
 base = sys.argv[3]
 locales = sys.argv[5:]
-sys.argv = ["job", "--work-dir", state_path, "--base-ref", base, "--locales", *locales]
+sys.argv = ["job", "--work-dir", state_path, "--base-ref", base,
+            "--resume-memory", str(Path(state_path) / "reviewed-memory.json"), "--locales", *locales]
 raise SystemExit(job.main())
 """
     env = dict(os.environ)
@@ -97,6 +103,9 @@ raise SystemExit(job.main())
         assert json.loads((report_dir / "quality.json").read_text())["blocking"] is False
     assert (report_dir / "translations.patch").read_bytes() == b""
     assert (state / "ledger.json").is_file() is not reject_quality
+    assert (state / "memory.json").is_file() is not reject_quality
+    assert (report_dir / "memory.json").is_file()
+    assert (state / "reviewed-memory.json").read_bytes() == memory_before
     assert (report_dir / "ledger.json").is_file()
     assert source.read_bytes() == before
     assert set(json.loads((report_dir / "plan.json").read_text())["files"]) == set(expected)

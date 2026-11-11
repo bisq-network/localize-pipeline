@@ -113,6 +113,17 @@ def require_complete_run(result):
         raise RuntimeError(f"Translation files were skipped: {sorted(result.skipped_files)}")
 
 
+def seed_run_memory(state, report_dir, resume_path=None):
+    """Reuse explicitly reviewed memory without advancing accepted job state."""
+    from localize.translation_memory import load_translation_memory_strict, write_translation_memory
+
+    memory = load_translation_memory_strict(state / "memory.json")
+    if resume_path is not None:
+        memory.merge_from(load_translation_memory_strict(resume_path, require_exists=True))
+    if memory.entries:
+        write_translation_memory(report_dir / "memory.json", memory)
+
+
 def run(args, state):
     repo = state / "bisq"
     prepare_checkout(repo)
@@ -161,8 +172,7 @@ def run(args, state):
 
     # Keep accepted persistent state unchanged until the entire run passes.
     runtime.save_translation_key_ledger(str(report_dir / "ledger.json"), ledger)
-    if (state / "memory.json").exists():
-        shutil.copyfile(state / "memory.json", report_dir / "memory.json")
+    seed_run_memory(state, report_dir, args.resume_memory)
     # General discovery deliberately includes unknown suffix locales so other
     # jobs can report them. This manual job owns only the selected exact files.
     allowed_filenames = set(filenames)
@@ -226,6 +236,8 @@ def main():
     parser.add_argument("--work-dir", type=Path, default=ROOT / ".agent-artifacts/bisq1-local")
     parser.add_argument("--base-ref", default=INITIAL_BASE,
                         help="Source baseline used only when bootstrapping a new ledger.")
+    parser.add_argument("--resume-memory", type=Path,
+                        help="Explicitly reviewed memory from a prior run; seeds only this run and repeats quality checks.")
     args = parser.parse_args()
     state = args.work_dir.expanduser().resolve()
     state.mkdir(parents=True, exist_ok=True)
