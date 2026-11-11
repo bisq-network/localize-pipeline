@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List
 
 import pytest
@@ -229,6 +229,26 @@ async def test_pipeline_runs_core_steps_with_injected_adapters(pipeline_paths):
         "copy_back:/app/translated_queue:/repo/i18n",
         "cleanup:/app/translation_queue:/app/translated_queue",
     ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_aborts_before_enqueue_when_queue_cleanup_fails(pipeline_paths):
+    fake = FakePipelineSteps(changed_files=["app_de.properties"])
+
+    def failed_cleanup(*args):
+        raise PermissionError("Cannot clear stale queue contents")
+
+    with pytest.raises(PermissionError, match="Cannot clear stale"):
+        await run_translation_pipeline(
+            paths=pipeline_paths,
+            options=pipeline_options(),
+            steps=replace(fake.as_steps(), cleanup_queue_folders=failed_cleanup),
+            logger=logging.getLogger("test_pipeline_core"),
+        )
+
+    assert len(fake.calls) == 2
+    assert fake.calls[0].startswith("validate:")
+    assert fake.calls[1].startswith("detect:")
 
 
 @pytest.mark.asyncio

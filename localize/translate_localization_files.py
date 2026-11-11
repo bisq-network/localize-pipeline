@@ -60,6 +60,7 @@ from localize.core.pipeline import (
     TranslationPipelineSteps,
     run_translation_pipeline,
 )
+from localize.queue_cleanup import clear_queue_contents
 from localize.translation_prompts import build_translation_system_prompt
 from localize.source_identical_acceptance import is_accepted_source_identical
 from localize.translation_memory import (
@@ -3468,13 +3469,10 @@ def cleanup_translation_queue_folders(
         translation_queue_folder: str,
         translated_queue_folder: str
 ) -> None:
-    """Remove queue folders after a successful non-debug run."""
-    try:
-        shutil.rmtree(translation_queue_folder)
-        shutil.rmtree(translated_queue_folder)
-        logger.info("Cleaned up translation queue folders.")
-    except Exception:
-        logger.exception("Error cleaning up translation queue folders")
+    """Clear validated scratch queues while retaining writable queue roots."""
+    clear_queue_contents(translation_queue_folder)
+    clear_queue_contents(translated_queue_folder)
+    logger.info("Cleaned up translation queue contents.")
 
 
 def _build_pr_title(

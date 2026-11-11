@@ -173,7 +173,8 @@ def test_filesystem_source_connector_copies_archives_and_cleans_relative_files(t
     assert detected == [True]
     assert changed == ["nested/messages_de.json"]
     assert (archive / "nested" / "messages_de.json").read_text(encoding="utf-8") == '{"hello":"Hallo"}\n'
-    assert not queue.exists()
+    assert queue.is_dir()
+    assert list(queue.iterdir()) == []
 
 
 @pytest.mark.parametrize(

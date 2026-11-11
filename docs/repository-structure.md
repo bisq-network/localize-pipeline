@@ -48,6 +48,7 @@ This project has three supported surfaces:
 | `localize/providers/costs.py` | Run cost estimates. |
 | `localize/providers/usage.py` | Token accounting and usage reports. |
 | `localize/providers/prompt_capture.py` | Offline provider for prompt regression snapshots. |
+| `localize/queue_cleanup.py` | Clears validated queue contents while keeping queue roots and mounts. |
 | `localize/translation_memory.py` | Exact-match translation memory store, import/export, fuzzy suggestions, and conflict handling. |
 | `localize/translate_localization_files.py` | Runtime translation pipeline. |
 | `localize/translation_quality_gate.py` | Deterministic PR quality gate. |
@@ -80,7 +81,8 @@ when working on that layer.
 These three packages do not import one another or load application configuration.
 The root package holds the CLI, configuration, runtime composition, translation
 memory, and quality-review workflows that combine them. `guardian` remains its
-own application package. Shared filesystem helpers stay in `localize.atomic_io`.
+own application package. Shared filesystem helpers stay in `localize.atomic_io`
+and `localize.queue_cleanup`.
 
 ### Migrating implementation imports
 
