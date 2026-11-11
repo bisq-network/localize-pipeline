@@ -313,6 +313,7 @@ class OpenAICompatibleProvider:
         self._prices = prices if prices is not None else DEFAULT_PRICES
         self._usage_tracker = usage_tracker or UsageTracker(prices=self._prices)
         self._supports_openai_reasoning_effort = supports_openai_reasoning_effort
+        self.safeguards = None
 
     async def create_chat_completion(
         self,
@@ -338,6 +339,8 @@ class OpenAICompatibleProvider:
             model=model,
             messages=messages,
             completion_token_limit=completion_token_limit,
+            **({"before_request": lambda: self.safeguards.reserve(model)}
+               if self.safeguards else {}),
             **kwargs,
         )
         self.record_response(model, response)
@@ -511,6 +514,8 @@ class AiSuiteProvider(OpenAICompatibleProvider):
             messages=messages,
             completion_token_limit=completion_token_limit,
             retry_exception_types=(Exception,),
+            **({"before_request": lambda: self.safeguards.reserve(model)}
+               if self.safeguards else {}),
             **request_kwargs,
         )
         self.record_response(model, response)
@@ -549,6 +554,7 @@ def create_openai_compatible_provider(
     api_key: Optional[str],
     api_base_url: Optional[str],
     logger: logging.Logger,
+    safeguards: Any = None,
 ) -> OpenAICompatibleProvider:
     """Create an OpenAI-compatible provider from resolved credentials."""
     is_custom_endpoint = bool(api_base_url)
@@ -570,16 +576,20 @@ def create_openai_compatible_provider(
         logger.warning("Warning: OPENAI_API_KEY does not start with 'sk-'. This may be invalid.")
 
     client_kwargs: Dict[str, Any] = {"api_key": resolved_key}
+    if safeguards:
+        client_kwargs["max_retries"] = 0
     if api_base_url:
         client_kwargs["base_url"] = api_base_url
         logger.info("Using OpenAI-compatible endpoint: %s", api_base_url)
 
     client = AsyncOpenAI(**client_kwargs)
     logger.info("OpenAI-compatible model provider initialized successfully")
-    return OpenAICompatibleProvider(
+    provider = OpenAICompatibleProvider(
         client=client,
         supports_openai_reasoning_effort=not is_custom_endpoint,
     )
+    provider.safeguards = safeguards
+    return provider
 
 
 def create_aisuite_provider(
@@ -630,6 +640,7 @@ def create_model_provider(
     logger: logging.Logger,
     aisuite_provider_configs: Optional[Dict[str, Any]] = None,
     model_names: Sequence[str] = (),
+    safeguards: Any = None,
 ) -> ChatModelProvider:
     """Create the configured model provider backend."""
     normalized = normalize_model_provider_name(provider_name)
@@ -638,6 +649,7 @@ def create_model_provider(
             api_key=api_key,
             api_base_url=api_base_url,
             logger=logger,
+            **({"safeguards": safeguards} if safeguards else {}),
         )
     if normalized == "aisuite":
         provider_configs: Dict[str, Any] = dict(aisuite_provider_configs or {})
@@ -650,6 +662,13 @@ def create_model_provider(
             api_base_url=api_base_url,
             existing_config=openai_provider_config,
         )
+        if safeguards:
+            if any(_aisuite_provider_key_for_model(m, DEFAULT_AISUITE_PROVIDER)
+                   != "openai" for m in model_names):
+                raise ModelProviderConfigurationError(
+                    "Request safeguards currently require an OpenAI-compatible route."
+                )
+            openai_config["max_retries"] = 0
         if openai_config != openai_provider_config:
             provider_configs["openai"] = openai_config
             openai_provider_config = provider_configs["openai"]
@@ -663,7 +682,7 @@ def create_model_provider(
                 "OPENAI_API_KEY is required when AISuite routes bare or openai: models "
                 "to the default OpenAI API without a custom api_base_url."
             )
-        return create_aisuite_provider(
+        provider = create_aisuite_provider(
             provider_configs=provider_configs,
             logger=logger,
             default_provider=DEFAULT_AISUITE_PROVIDER,
@@ -671,6 +690,9 @@ def create_model_provider(
                 openai_provider_config.get("base_url")
             ),
         )
+        if safeguards:
+            provider.safeguards = safeguards
+        return provider
     raise ModelProviderConfigurationError(
         f"Unsupported model_provider '{provider_name}'. Supported values: openai_compatible, aisuite."
     )

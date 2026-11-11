@@ -48,6 +48,7 @@ This project has three supported surfaces:
 | `localize/providers/costs.py` | Run cost estimates. |
 | `localize/providers/usage.py` | Token accounting and usage reports. |
 | `localize/providers/prompt_capture.py` | Offline provider for prompt regression snapshots. |
+| `localize/run_safeguards.py` | Persistent request budget, bounded sample and exact-input checkpoints. |
 | `localize/queue_cleanup.py` | Clears validated queue contents while keeping queue roots and mounts. |
 | `localize/translation_memory.py` | Exact-match translation memory store, import/export, fuzzy suggestions, and conflict handling. |
 | `localize/translate_localization_files.py` | Runtime translation pipeline. |
@@ -155,6 +156,7 @@ OPENAI_API_KEY=sk-test-key venv/bin/pytest -q
 | `docs/github-action.md` | GitHub Action setup and inputs. |
 | `docs/localization-cli.md` | CLI, plugins, custom adapters, and public API. |
 | `docs/new-project-deployment.md` | Docker Compose server deployment. |
+| `docs/run-safeguards.md` | Request budgets, sample validation and checkpoint recovery. |
 | `docs/new-format-checklist.md` | Required tests/docs for adding localization formats. |
 | `docs/adding-new-locales.md` | Locale onboarding workflow. |
 | `docs/maintenance/` | Host maintenance and disk cleanup. |

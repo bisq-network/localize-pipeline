@@ -216,6 +216,9 @@ More detail: [docs/maintenance/disk-space-management.md](maintenance/disk-space-
 - Run a manual `docker compose ... run -T --rm translator` after rebuilds.
 - Keep deploy keys and tokens scoped to the target repository.
 - Rotate keys periodically.
+- Keep `logs/run_safeguards.sqlite3` across rebuilds and recovery. It holds
+  the rolling request count and accepted checkpoints; see
+  [run safeguards](run-safeguards.md).
 
 ### Reviewed source-identical translations
 
