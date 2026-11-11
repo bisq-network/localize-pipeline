@@ -232,8 +232,6 @@ async def test_semantic_clean_result_reused_but_flagged_result_not_cached(tmp_pa
 @pytest.mark.parametrize(("profile", "limit", "state_path"), [
     ("bisq", 2000, "/app/logs/run_safeguards.sqlite3"),
     ("bisq-mobile", 750, "/app/logs/run_safeguards.sqlite3"),
-    # The manual runner replaces this with its workspace store.
-    ("bisq1", 1000, "profiles/bisq1/logs/run_safeguards.sqlite3"),
 ])
 def test_packaged_bisq_profiles_enable_documented_limits(profile, limit, state_path):
     from pathlib import Path
@@ -250,5 +248,5 @@ def test_packaged_bisq_profiles_enable_documented_limits(profile, limit, state_p
     assert (safeguards.sample_files, safeguards.sample_keys,
             safeguards.sample_max_requests) == (3, 5, 60)
     doc = (root / "docs" / "run-safeguards.md").read_text()
-    name = {"bisq": "Bisq 2", "bisq-mobile": "Bisq Mobile", "bisq1": "Bisq 1"}[profile]
+    name = {"bisq": "Bisq 2", "bisq-mobile": "Bisq Mobile"}[profile]
     assert f"| {name} | {limit:,} |" in doc

@@ -1,6 +1,6 @@
 # Translation run safeguards
 
-The Bisq 1, Bisq 2 and Bisq Mobile profiles enable the same safeguards. Other
+The Bisq 2 and Bisq Mobile profiles enable the same safeguards. Other
 profiles opt in with a `run_safeguards` mapping; without one, runs are not
 bounded or checkpointed.
 The safeguards do not change the configured models or relax quality checks.
@@ -48,15 +48,10 @@ While safeguards are enabled, the source key ledger is written only after the
 translated files have been copied back. A budget or sample stop therefore
 leaves the remaining keys pending for the next run.
 
-Bisq 1 keeps this store in its workspace across dated run directories, even
-when the whole-run ledger has not advanced. Pending local changes still need
-review before the runner can prepare that checkout again.
-
 ## Bound provider requests across restarts
 
 | Profile | Maximum requests in a rolling 24 hours |
 | --- | ---: |
-| Bisq 1 | 1,000 |
 | Bisq 2 | 2,000 |
 | Bisq Mobile | 750 |
 
@@ -77,9 +72,6 @@ too many failed or recovery runs to establish that baseline.
   accommodates that observed workload and a sample, but is not a healthy-run
   statistic. The successful October 20 recovery used 13 calls for a small
   remaining workload, so it is not a full-workload baseline either.
-- Bisq 1 has no production history. Its 1,000 ceiling intentionally bounds the
-  initial manual run. The inspected backlog had 2,400 candidate keys across 15
-  locales, so completing it may require multiple rolling budget windows.
 
 The three-file, five-key sample is an engineering smoke test. With one draft
 per key, one holistic pass and one semantic batch per file, it normally needs
@@ -118,8 +110,7 @@ run_safeguards:
 ```
 
 Use a separate persistent store for each pipeline. Docker profiles place it
-in the existing mounted logs directory; Bisq 1's manual runner resolves it into
-its workspace. A relative `state_path` resolves
+in the existing mounted logs directory. A relative `state_path` resolves
 against the configuration file's directory. Preserve this store during
 recovery. Removing it discards both the rolling counter and accepted
 checkpoints.
