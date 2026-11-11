@@ -113,6 +113,46 @@ def test_missing_ledger_after_command_is_a_failure(tmp_path, monkeypatch):
     assert pings == ["fail"]
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores directory search permission",
+)
+@pytest.mark.parametrize("exit_code,expected_result", [(0, 1), (7, 7)])
+def test_audit_error_after_command_keeps_exit_code(
+    tmp_path, monkeypatch, exit_code, expected_result
+):
+    """Losing access to the ledger mid-audit must not crash or hide the poll's exit."""
+    private = tmp_path / "private"
+    path = private / "state.sqlite3"
+    _record(path, "ok")
+    real_latest_poll = healthcheck.latest_poll
+    reads = []
+
+    def latest_poll(state_path):
+        poll = real_latest_poll(state_path)
+        reads.append(poll)
+        if len(reads) == 2:
+            private.chmod(0)  # Search permission is lost after the post-command read.
+        return poll
+
+    def run(command, **kwargs):
+        _record(path, "ok")
+        return subprocess.CompletedProcess(command, exit_code)
+
+    pings = []
+    monkeypatch.setattr(healthcheck, "latest_poll", latest_poll)
+    monkeypatch.setattr(healthcheck.subprocess, "run", run)
+    monkeypatch.setattr(healthcheck, "ping", lambda url, outcome: pings.append(outcome))
+    try:
+        result = healthcheck.run_monitored(
+            ["guardian"], path, "https://hc-ping.com/test"
+        )
+    finally:
+        private.chmod(0o700)
+    assert result == expected_result
+    assert pings == ["fail"]
+
+
 @pytest.mark.parametrize(
     "component", ["guardian-poll-attempt", "guardian-responsive-schedule"]
 )

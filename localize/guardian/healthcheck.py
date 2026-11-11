@@ -73,10 +73,12 @@ def latest_poll(state_path: Path) -> tuple[int, str] | None:
 
 def run_monitored(command: list[str], state_path: Path, url: str | None) -> int:
     """Preserve poll failures; never turn skipped or unverified work green."""
+    # Any audit error counts as an unreadable audit: it must neither stop the
+    # command, hide its exit code, nor allow a success ping.
     audit_available = True
     try:
         before = latest_poll(state_path)
-    except (OSError, sqlite3.Error):
+    except Exception:
         before = None
         audit_available = False
 
@@ -89,12 +91,13 @@ def run_monitored(command: list[str], state_path: Path, url: str | None) -> int:
 
     try:
         after = latest_poll(state_path)
-    except (OSError, sqlite3.Error):
+        # The ledger may be absent before the first poll, but Guardian creates
+        # it before deciding whether a poll is due. Missing now means a wrong path.
+        if not state_path.exists():
+            audit_available = False
+    except Exception:
         after = None
         audit_available = False
-    # The ledger may be absent before the first poll, but Guardian creates it
-    # before deciding whether a poll is due. Missing afterwards means a wrong path.
-    audit_available = audit_available and state_path.exists()
 
     if result or not audit_available:
         outcome = "fail"
