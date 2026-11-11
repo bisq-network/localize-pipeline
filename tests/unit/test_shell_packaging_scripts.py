@@ -98,6 +98,46 @@ def test_dockerfile_uses_orchestration_default_command():
     assert 'CMD ["/app/update-translations.sh"]' in dockerfile
 
 
+def _dockerfile_instructions() -> str:
+    """Return the Dockerfile without comment lines, so rationale may name what it avoids."""
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    return "\n".join(
+        line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_dockerfile_build_does_not_depend_on_launchpad():
+    """Launchpad outages, as on 2026-11-11, must not block image builds."""
+    instructions = _dockerfile_instructions().lower()
+
+    for launchpad_dependency in [
+        "add-apt-repository",
+        "ppa:",
+        "deadsnakes",
+        "launchpad",
+        "software-properties-common",
+        "python3.11",
+    ]:
+        assert launchpad_dependency not in instructions
+
+
+def test_dockerfile_runs_ubuntu_python_from_a_virtualenv():
+    """Python comes from the base image's archive; dependencies live in a venv (PEP 668)."""
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "        python3.12 \\\n        python3.12-venv && \\\n" in dockerfile
+    # Real interpreter copies: code that resolves sys.executable (the Guardian
+    # sandbox runner) must stay inside the venv, not reach the bare system Python.
+    assert "RUN python3.12 -m venv --copies /opt/venv" in dockerfile
+    assert 'ENV PATH="/opt/venv/bin:${PATH}"' in dockerfile
+    assert "RUN python3 -m pip install --no-cache-dir -r requirements.txt" in dockerfile
+    assert "python3-pip" not in dockerfile
+    assert "update-alternatives" not in dockerfile
+    assert dockerfile.index('ENV PATH="/opt/venv/bin:${PATH}"') < dockerfile.index(
+        "RUN python3 -m pip install"
+    )
+
+
 def test_dockerfile_upgrades_apt_past_base_image_security_fix():
     """The pinned base image ships apt 2.8.3, affected by CVE-2026-109518."""
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")

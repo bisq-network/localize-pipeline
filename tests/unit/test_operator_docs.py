@@ -82,7 +82,7 @@ def test_server_guide_smokes_the_cli_without_running_the_repository_entrypoint()
     """Require the server smoke check to bypass the production entrypoint."""
     guide = _read("docs/new-project-deployment.md")
 
-    assert "--no-deps --entrypoint python3.11 translator" in guide
+    assert "--no-deps --entrypoint python3 translator" in guide
     assert "-m localize.cli formats" in guide
     assert "format/config check" not in guide
 
