@@ -7,6 +7,13 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ## Unreleased
 
+### Added
+
+- Add an optional, standard-library-only Healthchecks monitor for Guardian
+  polls. It pings success only after a new successful poll record, reports
+  failed polls to `/fail`, and never renews the heartbeat for skipped wakes. See
+  [Monitor failed and missing polls](docs/guardian.md#monitor-failed-and-missing-polls).
+
 ### Changed
 
 - Move orchestration, format handling, and model-provider implementations into
