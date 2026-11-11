@@ -5,8 +5,8 @@ ARG GH_COMMIT=b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0
 ARG GRPC_VERSION=1.83.2
 ARG COMPRESS_VERSION=1.18.7
 ARG X_MOD_VERSION=0.41.0
-ARG X_TEXT_VERSION=0.42.0
-ARG X_NET_VERSION=0.60.0
+ARG X_TEXT_VERSION=0.43.0
+ARG X_NET_VERSION=0.62.0
 ENV CGO_ENABLED=0
 
 WORKDIR /src/gh
@@ -36,8 +36,8 @@ FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c35
 
 ARG YQ_VERSION=4.53.3
 ARG YQ_COMMIT=1b9b4ac5187171d2e5e3129be0cfa827c7f9d53d
-ARG X_TEXT_VERSION=0.42.0
-ARG X_NET_VERSION=0.60.0
+ARG X_TEXT_VERSION=0.43.0
+ARG X_NET_VERSION=0.62.0
 ENV CGO_ENABLED=0
 
 WORKDIR /src/yq
@@ -59,8 +59,8 @@ FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c35
 ARG TX_VERSION=1.6.17
 ARG TX_COMMIT=30dac142446db7bd1919894e9eb93545f58cc980
 ARG GO_GIT_VERSION=5.19.2
-ARG X_CRYPTO_VERSION=0.57.0
-ARG X_NET_VERSION=0.60.0
+ARG X_CRYPTO_VERSION=0.58.0
+ARG X_NET_VERSION=0.62.0
 ENV CGO_ENABLED=0
 
 WORKDIR /src/tx
@@ -109,8 +109,11 @@ ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies, add repositories, and clean up in a single layer.
+# Listing apt upgrades it (and libapt-pkg) from Ubuntu security updates;
+# the pinned base image ships an apt release with a known vulnerability.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        apt \
         ca-certificates \
         curl \
         gnupg \

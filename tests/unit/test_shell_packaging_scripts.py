@@ -120,9 +120,9 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "ARG COMPRESS_VERSION=1.18.7" in dockerfile
     assert "ARG X_MOD_VERSION=0.41.0" in dockerfile
     assert "ARG GO_GIT_VERSION=5.19.2" in dockerfile
-    assert "ARG X_CRYPTO_VERSION=0.57.0" in dockerfile
-    assert dockerfile.count("ARG X_TEXT_VERSION=0.42.0") == 2
-    assert dockerfile.count("ARG X_NET_VERSION=0.60.0") == 3
+    assert "ARG X_CRYPTO_VERSION=0.58.0" in dockerfile
+    assert dockerfile.count("ARG X_TEXT_VERSION=0.43.0") == 2
+    assert dockerfile.count("ARG X_NET_VERSION=0.62.0") == 3
     assert 'test "$(git rev-parse HEAD)" = "$GH_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$YQ_COMMIT"' in dockerfile
     assert 'test "$(git rev-parse HEAD)" = "$TX_COMMIT"' in dockerfile
@@ -142,6 +142,13 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "COPY --from=yq-builder /out/yq /usr/bin/yq" in dockerfile
     assert "COPY --from=tx-builder /out/tx /usr/local/bin/tx" in dockerfile
     assert "COPY --from=gosu-builder /out/gosu /usr/sbin/gosu" in dockerfile
+
+
+def test_dockerfile_upgrades_apt_from_ubuntu_security_updates():
+    """The pinned base image ships an apt release with a known vulnerability."""
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "apt-get install -y --no-install-recommends \\\n        apt \\\n" in dockerfile
 
 
 def test_dockerignore_excludes_local_configs_and_agent_scratch():
