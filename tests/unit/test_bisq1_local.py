@@ -289,3 +289,11 @@ def test_profile_uses_evaluated_models_with_valid_settings():
         ) if issue.level == "error"
     ]
     assert errors == []
+
+
+def test_profile_keeps_semantic_corrections_under_review():
+    """Findings still block, but suggested replacements are never auto-applied."""
+    config = yaml.safe_load((ROOT / "profiles/bisq1/config.yaml").read_text())
+    assert config["semantic_review"]["enabled"] is True
+    assert config["semantic_review"]["auto_apply_error_suggestions"] is False
+    assert config["quality_gate"]["block_on_semantic_qa_findings"] is True

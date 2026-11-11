@@ -6,6 +6,12 @@ This profile translates the original Bisq desktop application. Its source is
 its 15 configured locales and advances accepted local state only after the
 complete quality gate. It leaves a staged patch; it does not publish changes.
 
+Semantic QA reports findings without automatically applying suggested
+replacements. Error findings still block acceptance. Review the saved candidate
+against English, apply only verified corrections, and rerun source-aware
+semantic and quality checks before accepting it. This avoids allowing a mistaken
+review suggestion to overwrite an otherwise complete translation.
+
 ## Terminology provenance
 
 `glossary.json` is a curated subset of `../bisq/glossary.json`, the existing

@@ -83,7 +83,7 @@ semantic_review:
   enabled: true
   model: gpt-6-luna
   reasoning_effort: none
-  auto_apply_error_suggestions: true
+  auto_apply_error_suggestions: false
 quality_gate:
   source_identical_min_block_count: 5
   source_identical_max_count: 20
