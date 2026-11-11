@@ -25,13 +25,15 @@ project_context: >
   Preserve placeholders, URLs, line breaks, currency codes, and brand names.
   Keep existing terminology and forms of address consistent within each locale.
 model_provider: aisuite
-model_name: gpt-4o-mini
-review_model_name: gpt-5.6-terra
-review_reasoning_effort: none
+model_name: gpt-6-sol
+model_reasoning_effort: none
+model_max_completion_tokens: 4096
+review_model_name: gpt-6.1-sol
+review_reasoning_effort: low
 max_concurrent_api_calls: 1
 semantic_review:
   enabled: true
-  model: gpt-5.4-mini
+  model: gpt-6-luna
   reasoning_effort: none
   auto_apply_error_suggestions: true
 quality_gate:

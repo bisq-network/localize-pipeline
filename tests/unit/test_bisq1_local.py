@@ -151,3 +151,18 @@ def test_default_workspace_is_ignored_by_git(tmp_path):
             check=False,
         )
         assert result.returncode == 0, f"{relative} is not ignored"
+
+
+def test_profile_uses_evaluated_models_with_valid_settings():
+    from localize.app_config import validate_config
+
+    config = yaml.safe_load((ROOT / "profiles/bisq1/config.yaml").read_text())
+    assert (config["model_name"], config["review_model_name"],
+            config["semantic_review"]["model"]) == ("gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna")
+    assert config["model_max_completion_tokens"] == 4096
+    errors = [
+        issue.message for issue in validate_config(
+            config, path_exists=lambda path: True, api_key_available=True,
+        ) if issue.level == "error"
+    ]
+    assert errors == []

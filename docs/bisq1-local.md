@@ -34,9 +34,27 @@ private and untracked. No Transifex or GitHub write credential is needed.
 ./scripts/run-bisq1-local.sh
 ```
 
-The profile uses the pipeline's existing model split: `gpt-4o-mini` for
-translation, `gpt-5.6-terra` for holistic review, and `gpt-5.4-mini` for semantic
-review. Model calls incur provider charges. Preflight is free of model calls.
+The profile uses `gpt-6-sol` with reasoning `none` for translation,
+`gpt-6.1-sol` with `low` for holistic review, and `gpt-6-luna` with `none` for
+semantic review. Draft output is capped at 4,096 tokens; truncated drafts fail
+validation. Model calls incur provider charges. Preflight is free of model calls.
+
+This Bisq 1 selection follows a bounded evaluation on 20 October 2026:
+96 comparison requests across German, French, Russian and Japanese, eight
+isolated financial-language QA checks, and 11 actual-adapter canary requests.
+An independent blinded AI review found the strongest drafts from Sol; Luna
+matched the stronger semantic reviewer on 26 faulty and 26 clean controls.
+Terra initially tied in holistic quality but inserted a forbidden NUL character
+in the French canary, which validation correctly rejected. The 6.1 reviewer
+then passed both French and German canaries using the same saved drafts.
+
+The 115 paid requests had an estimated token cost of about $0.194 at the
+documented Standard rates.
+This is a small evaluation, not a production error-rate estimate or
+native-speaker certification. The choice prioritizes observed quality; Sol
+drafting costs more per token than the previous mini model. Bisq 2 and Mobile
+model defaults are unchanged. Keep reviewing each local patch, especially
+financial conditions and security warnings.
 
 The [run safeguards](run-safeguards.md) first validate a small sample, retain
 accepted checkpoints across retries, and enforce a shared limit of 1,000
