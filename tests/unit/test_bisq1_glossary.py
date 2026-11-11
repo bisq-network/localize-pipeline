@@ -11,7 +11,11 @@ from localize.formats.validation import find_glossary_mismatches
 
 ROOT = Path(__file__).resolve().parents[2]
 ALIASES = {"pt-br": "pt_BR", "pt": "pt_PT", "zh-hans": "zh-Hans", "zh-hant": "zh-Hant"}
-LEGACY_DE = {"balance": "Guthaben", "trade id": "Handels-ID"}
+LEGACY_TERMS = {
+    "de": {"balance": "Guthaben", "trade id": "Handels-ID"},
+    "es": {"trade id": "ID de intercambio"},
+    "it": {"trade id": "ID Scambio"},
+}
 
 
 def load_glossary(profile):
@@ -39,10 +43,33 @@ def test_glossary_values_have_bisq2_or_documented_legacy_provenance():
         original = inherited.get(ALIASES.get(locale, locale), {})
         normalized = {term.replace("_", " "): target for term, target in original.items()}
         for term, target in terms.items():
-            if locale == "de" and term in LEGACY_DE:
-                assert target == LEGACY_DE[term]
+            if term in LEGACY_TERMS.get(locale, {}):
+                assert target == LEGACY_TERMS[locale][term]
             else:
                 assert target == normalized[term]
+
+
+@pytest.mark.parametrize("locale,trade_label,transaction_label", [
+    ("es", "ID de intercambio", "ID de transacción"),
+    ("it", "ID Scambio", "ID della transazione"),
+])
+def test_bank_payment_prompt_distinguishes_trade_and_transaction_ids(
+        locale, trade_label, transaction_label):
+    from localize.translate_localization_files import build_context
+
+    # A bank-payment warning names the trade identifier, not the blockchain
+    # transaction identifier. Preserve the distinct Bisq 1 interface terms.
+    _, guidance = build_context(
+        {},
+        {"tradeRules.trading.body": "Never include the trade ID in payment messages."},
+        load_glossary("bisq1")[locale],
+        4096,
+        "gpt-6-sol",
+        current_key="tradeRules.trading.body",
+        translation_glossary_enforcement="prompt-only",
+    )
+    assert f'"trade id" preferred base term: "{trade_label}"' in guidance
+    assert f'"trade id" preferred base term: "{transaction_label}"' not in guidance
 
 
 @pytest.mark.parametrize("locale", ["de", "pt-br", "pt", "zh-hans", "zh-hant"])

@@ -51,12 +51,20 @@ for example `account` / `Konto` in `Handelskonto`, or `fee` / `Gebühr` in
 whole-file publication gates and semantic review remain active. Semantic and
 human review must distinguish real terminology mistakes from natural grammar.
 
-Two German mappings follow the existing Bisq 1 interface rather than Bisq 2:
+These mappings follow the existing Bisq 1 interface rather than Bisq 2:
 
-| English | Bisq 1 preferred term | Bisq 2 mapping |
-| --- | --- | --- |
-| balance | Guthaben | Kontostand |
-| trade id | Handels-ID | Trade-ID |
+| Locale | English | Bisq 1 preferred term | Bisq 2 mapping |
+| --- | --- | --- | --- |
+| German | balance | Guthaben | Kontostand |
+| German | trade id | Handels-ID | Trade-ID |
+| Spanish | trade id | ID de intercambio | ID de transacción |
+| Italian | trade id | ID Scambio | ID della transazione |
+
+The Spanish and Italian overrides keep a trade identifier distinct from a
+blockchain transaction identifier, matching Bisq 1's `shared.tradeId` and
+`shared.txId` labels. This matters in the warning that prohibits including
+the trade ID in bank payment messages. Other locales may legitimately use
+the same word for both concepts; this is not a global renaming rule.
 
 `arbitrator` keeps the inherited `Schiedsrichter` for new explanatory text;
 `mediator` is `Mediator`. Bisq 1 has older interface labels such as

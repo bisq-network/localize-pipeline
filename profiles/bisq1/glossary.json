@@ -57,7 +57,7 @@
     "send": "Enviar",
     "trade": "Comercio",
     "trade fee": "Tarifa de Comercio",
-    "trade id": "ID de transacción",
+    "trade id": "ID de intercambio",
     "transaction id": "ID de Transacción",
     "wallet": "Billetera"
   },
@@ -102,7 +102,7 @@
     "send": "Invia",
     "trade": "Commercio",
     "trade fee": "Commissione di Scambio",
-    "trade id": "ID della transazione",
+    "trade id": "ID Scambio",
     "transaction id": "ID Transazione",
     "wallet": "Portafoglio"
   },
