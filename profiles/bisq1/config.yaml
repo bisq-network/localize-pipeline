@@ -1,0 +1,76 @@
+# The manual runner resolves paths into its own workspace.
+target_project_root: /target_repo
+run_safeguards:
+  state_path: "logs/run_safeguards.sqlite3"
+  max_requests_per_24h: 1000
+  sample_files: 3
+  sample_keys: 5
+  sample_max_requests: 60
+input_folder: core/src/main/resources/i18n
+glossary_file_path: glossary.json
+translation_source: git
+localization_format: java_properties
+localization_layout:
+  id: suffix
+  source_locale: en
+translation_file_filter_glob: displayStrings_*.properties
+process_all_files: true
+dry_run: false
+retranslate_identical_source_strings: false
+project_context: >
+  Translate for Bisq 1, the original desktop peer-to-peer bitcoin exchange.
+  Preserve the meaning of security warnings, multisignature escrow, security
+  deposits, mediation, arbitration, and DAO governance. This application uses
+  the Bisq 1 trading protocol; do not introduce Bisq Easy or MuSig terminology.
+  Preserve placeholders, URLs, line breaks, currency codes, and brand names.
+  Keep existing terminology and forms of address consistent within each locale.
+model_provider: aisuite
+model_name: gpt-4o-mini
+review_model_name: gpt-5.6-terra
+review_reasoning_effort: none
+max_concurrent_api_calls: 1
+semantic_review:
+  enabled: true
+  model: gpt-5.4-mini
+  reasoning_effort: none
+  auto_apply_error_suggestions: true
+quality_gate:
+  source_identical_min_block_count: 5
+  source_identical_max_count: 20
+  source_identical_max_ratio: 0.30
+  block_on_pipeline_warnings: true
+  block_on_semantic_qa_findings: true
+  block_on_semantic_qa_warnings: false
+  semantic_qa_audit_scope: changed
+brand_technical_glossary:
+  - Bisq
+  - Bitcoin
+  - BSQ
+  - BTC
+  - DAO
+  - Tor
+supported_locales:
+  - {code: cs, name: Czech}
+  - {code: de, name: German}
+  - {code: es, name: Spanish}
+  - {code: fa, name: Persian}
+  - {code: fr, name: French}
+  - {code: it, name: Italian}
+  - {code: ja, name: Japanese}
+  - {code: pl, name: Polish}
+  - {code: pt-br, name: Brazilian Portuguese}
+  - {code: pt, name: European Portuguese}
+  - {code: ru, name: Russian}
+  - {code: th, name: Thai}
+  - {code: vi, name: Vietnamese}
+  - {code: zh-hans, name: Simplified Chinese}
+  - {code: zh-hant, name: Traditional Chinese}
+style_rules:
+  pt-br:
+    - Use Brazilian Portuguese spelling and vocabulary.
+  pt:
+    - Use European Portuguese spelling and vocabulary.
+  zh-hans:
+    - Use Simplified Chinese characters.
+  zh-hant:
+    - Use Traditional Chinese characters.

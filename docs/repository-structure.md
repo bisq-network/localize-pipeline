@@ -115,6 +115,7 @@ plugins that imported them directly must update those imports:
 | --- | --- |
 | `profiles/bisq/` | Production Bisq profile and glossary. |
 | `profiles/bisq-mobile/` | Sanitized Bisq mobile production-shape profile and glossary. |
+| `profiles/bisq1/` | Bisq 1 profile and glossary for the manual local job. |
 | `examples/generic-java-properties/` | Small Java `.properties` example. |
 | `examples/generic-json/` | Small JSON example. |
 
@@ -156,6 +157,7 @@ OPENAI_API_KEY=sk-test-key venv/bin/pytest -q
 | `docs/github-action.md` | GitHub Action setup and inputs. |
 | `docs/localization-cli.md` | CLI, plugins, custom adapters, and public API. |
 | `docs/new-project-deployment.md` | Docker Compose server deployment. |
+| `docs/bisq1-local.md` | Manual Bisq 1 job: preflight, run, review and publication. |
 | `docs/run-safeguards.md` | Request budgets, sample validation and checkpoint recovery. |
 | `docs/new-format-checklist.md` | Required tests/docs for adding localization formats. |
 | `docs/adding-new-locales.md` | Locale onboarding workflow. |
