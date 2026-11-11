@@ -5,12 +5,12 @@ import pytest
 from localize.run_safeguards import load_safeguards
 
 
-LEGAL_BODY_PATTERN = r"^tacWindow\.legal\.section[1-7]\.body$"
+PASSTHROUGH_PATTERN = r"^terms\.section[1-7]\.body$"
 
 
 @pytest.mark.parametrize(
     ("old_patterns", "new_patterns"),
-    [([], [LEGAL_BODY_PATTERN]), ([LEGAL_BODY_PATTERN], [])],
+    [([], [PASSTHROUGH_PATTERN]), ([PASSTHROUGH_PATTERN], [])],
     ids=["add-source-passthrough", "remove-source-passthrough"],
 )
 def test_ignore_policy_change_invalidates_persisted_outputs(
@@ -19,9 +19,9 @@ def test_ignore_policy_change_invalidates_persisted_outputs(
     # The ignored key was not selected in the old run, so source, target and
     # selected-key inputs can stay identical when only the policy changes.
     inputs = {
-        "file": "displayStrings_de.properties",
-        "source": {"tacWindow.legal.section1.body": "Legal text", "other": "New"},
-        "target": {"tacWindow.legal.section1.body": "Rechtlicher Text", "other": ""},
+        "file": "messages_de.properties",
+        "source": {"terms.section1.body": "Terms text", "other": "New"},
+        "target": {"terms.section1.body": "Vertragstext", "other": ""},
         "keys": ["other"],
     }
     config = {
@@ -31,8 +31,8 @@ def test_ignore_policy_change_invalidates_persisted_outputs(
     config_path = tmp_path / "config.yaml"
     old = load_safeguards(config, config_path)
     old_key = old.fingerprint(inputs)
-    legal_value = "Legal text" if old_patterns else "Rechtlicher Text"
-    accepted = {"content": f"tacWindow.legal.section1.body={legal_value}\nother=Neu\n"}
+    passthrough_value = "Terms text" if old_patterns else "Vertragstext"
+    accepted = {"content": f"terms.section1.body={passthrough_value}\nother=Neu\n"}
     candidates = {"other": "Neu"}
     old.accept(old_key, accepted)
     old.save_candidates(old_key, candidates)

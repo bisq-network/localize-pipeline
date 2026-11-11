@@ -15,8 +15,6 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   it; see [run safeguards](docs/run-safeguards.md).
 - Record heartbeat HTTP receipts; Healthchecks pings count as accepted only
   with its exact `OK` response.
-- Add a manual Bisq 1 job (`scripts/run-bisq1-local.sh`, `profiles/bisq1/`)
-  that leaves a reviewed local patch; see the [Bisq 1 guide](docs/bisq1-local.md).
 - Add `model_reasoning_effort` and `model_max_completion_tokens` for draft
   models, with GPT-6 pricing; clipped drafts are rejected.
 - Retain validated per-key candidates when another key withholds a file, and
