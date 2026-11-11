@@ -586,6 +586,70 @@ get_config_value() {
     esac
 }
 
+# Only retry recognized transient acquisition failures. A permanent API error
+# wins when concurrent tx workers report both permanent and transient failures.
+transifex_failure_is_retryable() {
+    local attempt_log="$1" code
+    if grep -Eiq 'unauthorized|forbidden|invalid (token|configuration|config)|token not found|permission denied|certificate signed by unknown authority' "$attempt_log"; then
+        return 1
+    fi
+    while read -r code; do
+        case "$code" in
+            429|500|502|503|504) ;;
+            *) return 1 ;;
+        esac
+    done < <(grep -Eo 'Response error code [0-9]{3}' "$attempt_log" | awk '{print $4}')
+    grep -Eiq 'Response error code (429|500|502|503|504)([^0-9]|$)|connection reset by peer|TLS handshake timeout|dial tcp.*(i/o timeout|temporary failure)|context deadline exceeded|unexpected EOF' "$attempt_log"
+}
+
+# Keep retries within the existing TX_PULL_TIMEOUT budget, including backoff.
+# Retain every attempt's output; never continue with an incomplete import.
+run_transifex_pull() {
+    local deadline=$((SECONDS + TX_PULL_TIMEOUT_SECONDS))
+    local attempt remaining delay attempt_log status
+    local -a statuses
+    for attempt in 1 2 3; do
+        remaining=$((deadline - SECONDS))
+        if (( remaining <= 0 )); then
+            return 124
+        fi
+        attempt_log=$(mktemp "$LOG_DIR/transifex-pull.XXXXXX") || return 1
+        log "Transifex pull attempt $attempt/3 (remaining budget: ${remaining}s; log: $attempt_log)."
+        # Conditional execution preserves PIPESTATUS without toggling errexit.
+        # A stuck process gets at most ten seconds to exit after its deadline.
+        if timeout --kill-after=10s "$remaining" "${TX_PULL_CMD[@]}" 2>&1 |
+            tee "$attempt_log" |
+            grep -v -E 'Pulling file|Creating download job|File was not found locally'; then
+            statuses=("${PIPESTATUS[@]}")
+        else
+            statuses=("${PIPESTATUS[@]}")
+        fi
+        status=${statuses[0]}
+        log "Transifex pull attempt $attempt/3 finished (exit $status)."
+        if (( statuses[1] != 0 || statuses[2] > 1 )); then
+            log "Cannot capture Transifex attempt output; stopping import." "ERROR"
+            return 1
+        fi
+        if (( status == 0 )); then
+            return 0
+        fi
+        if (( status == 124 || status >= 128 || attempt == 3 )); then
+            return "$status"
+        fi
+        if ! transifex_failure_is_retryable "$attempt_log"; then
+            return "$status"
+        fi
+        delay=$((30 * attempt + RANDOM % 11))
+        remaining=$((deadline - SECONDS))
+        if (( remaining <= delay )); then
+            log "Transifex retry would exceed the total timeout; stopping import." "ERROR"
+            return 124
+        fi
+        log "Transient Transifex failure; retrying in ${delay}s." "WARNING"
+        sleep "$delay" || return 1
+    done
+}
+
 prepare_translation_source() {
     local translation_source="$1"
     local dry_run="${2:-false}"
@@ -638,11 +702,11 @@ prepare_translation_source() {
             # Get the process ID of the background loop
             KEEPALIVE_PID=$!
 
-            # Execute and filter output, but preserve original tx exit code.
-            set +e
-            { timeout "$TX_PULL_TIMEOUT_SECONDS" "${TX_PULL_CMD[@]}" 2>&1 | grep -v -E 'Pulling file|Creating download job|File was not found locally'; }
-            TX_STATUS=${PIPESTATUS[0]}
-            set -e
+            if run_transifex_pull; then
+                TX_STATUS=0
+            else
+                TX_STATUS=$?
+            fi
 
             # Stop the keepalive process now that tx pull is done.
             # Make the kill non-fatal in case the process has already exited.
