@@ -17,6 +17,20 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   longer start; local development sets `LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true`
   in its local `docker/.env`. Images and commits from before this change do not
   enforce the check.
+- Bound provider requests with an opt-in persistent rolling 24-hour budget,
+  validate a small isolated sample before the full queue, and reuse exact
+  validated outputs after restarts. The Bisq 2 and Bisq Mobile profiles enable
+  it; see [run safeguards](docs/run-safeguards.md).
+- Record heartbeat HTTP receipts; Healthchecks pings count as accepted only
+  with its exact `OK` response.
+
+### Fixed
+
+- Retry recognized transient Transifex import failures up to three times
+  within `TX_PULL_TIMEOUT`. Permanent and unknown errors still stop the run.
+- Clear queue contents instead of deleting queue roots, so non-root
+  containers can clean up. Cleanup errors now fail the run instead of
+  leaving stale files for the next cycle.
 
 ### Changed
 

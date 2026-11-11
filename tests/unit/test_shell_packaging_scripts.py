@@ -98,6 +98,14 @@ def test_dockerfile_uses_orchestration_default_command():
     assert 'CMD ["/app/update-translations.sh"]' in dockerfile
 
 
+def test_dockerfile_upgrades_apt_past_base_image_security_fix():
+    """The pinned base image ships apt 2.8.3, affected by CVE-2026-109518."""
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "apt-get install -y --no-install-recommends --only-upgrade \\\n" \
+        "        apt \\\n        libapt-pkg6.0t64" in dockerfile
+
+
 def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     """Require pinned Go toolchains, source revisions, and verified dependency versions."""
     dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
@@ -142,13 +150,6 @@ def test_dockerfile_builds_go_tools_with_fixed_dependencies():
     assert "COPY --from=yq-builder /out/yq /usr/bin/yq" in dockerfile
     assert "COPY --from=tx-builder /out/tx /usr/local/bin/tx" in dockerfile
     assert "COPY --from=gosu-builder /out/gosu /usr/sbin/gosu" in dockerfile
-
-
-def test_dockerfile_upgrades_apt_from_ubuntu_security_updates():
-    """The pinned base image ships an apt release with a known vulnerability."""
-    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
-
-    assert "apt-get install -y --no-install-recommends \\\n        apt \\\n" in dockerfile
 
 
 def test_dockerignore_excludes_local_configs_and_agent_scratch():

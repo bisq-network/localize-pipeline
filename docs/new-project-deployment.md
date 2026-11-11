@@ -209,6 +209,14 @@ No further processing needed. Exiting gracefully.
 
 If translations changed, expect a branch and PR in the configured upstream repo.
 
+Transifex imports retry recognized temporary failures (HTTP 429, 500, 502, 503,
+504 and selected transport errors) up to three attempts. Delays are 30–40 and
+60–70 seconds; all attempts and delays share `TX_PULL_TIMEOUT` (default 3600
+seconds), with up to ten additional seconds to kill an unresponsive process.
+Authentication, configuration and unknown errors stop immediately. Each attempt
+retains its output in `logs/transifex-pull.*`. Exhausted or incomplete imports
+exit unsuccessfully before AI processing and do not send a success heartbeat.
+
 ## 7. Schedule Cron
 
 Edit root's crontab:
@@ -249,6 +257,9 @@ More detail: [docs/maintenance/disk-space-management.md](maintenance/disk-space-
 - Run a manual `docker compose ... run -T --rm translator` after rebuilds.
 - Keep deploy keys and tokens scoped to the target repository.
 - Rotate keys periodically.
+- Keep `logs/run_safeguards.sqlite3` across rebuilds and recovery. It holds
+  the rolling request count and accepted checkpoints; see
+  [run safeguards](run-safeguards.md).
 
 ### Reviewed source-identical translations
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Mapping, Optional, Protocol
 
 from localize.atomic_io import write_json_atomic, write_text_atomic
+from localize.queue_cleanup import clear_queue_contents
 from localize.core.pipeline import (
     ProcessQueueResult,
     RUN_METRIC_KEYS,
@@ -206,7 +207,7 @@ class FilesystemSourceConnector:
         if queue_pair not in self._validated_queue_pairs:
             raise ValueError("Queue folders must be validated before cleanup.")
         for folder in queue_pair:
-            shutil.rmtree(folder, ignore_errors=True)
+            clear_queue_contents(folder)
         self._validated_queue_pairs.discard(queue_pair)
 
     @staticmethod

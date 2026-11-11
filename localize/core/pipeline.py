@@ -101,6 +101,7 @@ class TranslationPipelineSteps:
     write_token_usage_summary: Callable[[str], None]
     copy_translated_files_back: Callable[[str, str], None]
     cleanup_queue_folders: Callable[[str, str], None]
+    commit_processed_state: Callable[[object], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -226,6 +227,8 @@ async def run_translation_pipeline(
     )
     if processed_files_count > 0:
         logger.info("Copied translated files back to the input folder.")
+    if steps.commit_processed_state:
+        steps.commit_processed_state(process_result)
 
     if options.dry_run or options.preserve_queues_for_debug:
         logger.info(
