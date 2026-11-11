@@ -33,6 +33,7 @@ from localize.providers.models import (
     normalize_reasoning_effort,
     normalize_model_provider_name,
     requires_openai_credentials,
+    validate_gpt6_reasoning_effort,
 )
 from localize.source_identical_acceptance import normalize_acceptances
 from localize.run_safeguards import RunSafeguards, load_safeguards
@@ -40,9 +41,6 @@ from localize.semantic_quality import normalize_retained_source_word_allowlist
 
 
 TRANSLATION_GLOSSARY_ENFORCEMENT_VALUES = frozenset({"exact", "prompt-only"})
-_GPT6_ASTRA_REASONING_EFFORTS = frozenset(
-    {"low", "medium", "high", "xhigh", "max"}
-)
 
 
 def _validate_model_reasoning_effort(
@@ -53,20 +51,15 @@ def _validate_model_reasoning_effort(
 ) -> None:
     """Reject explicit effort settings unsupported by a known OpenAI model."""
 
-    provider, separator, bare_model = model.partition(":")
-    if separator and provider.strip().lower() != "openai":
-        return
-    normalized_model = (bare_model if separator else provider).strip().lower()
-    if (
-        normalized_model.startswith("gpt-6-astra")
-        and reasoning_effort
-        and reasoning_effort not in _GPT6_ASTRA_REASONING_EFFORTS
-    ):
-        supported = ", ".join(sorted(_GPT6_ASTRA_REASONING_EFFORTS))
-        raise ValueError(
-            f"{field} '{reasoning_effort}' is not supported by {model}; "
-            f"supported efforts are: {supported}."
-        )
+    validate_gpt6_reasoning_effort(model, reasoning_effort, field=field)
+
+
+def _parse_model_max_completion_tokens(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("model_max_completion_tokens must be a positive integer.")
+    return value
 
 
 @dataclass
@@ -143,6 +136,8 @@ class AppConfig:
         LocalizationProfile(JAVA_PROPERTIES_FORMAT, SUFFIX_LAYOUT),
     ))
     review_reasoning_effort: Optional[str] = None
+    model_reasoning_effort: Optional[str] = None
+    model_max_completion_tokens: Optional[int] = None
 
     # Optional third AI pass, run by the semantic-review sidecar after the
     # translation files have been staged.
@@ -295,6 +290,23 @@ def validate_config(
 
     dry_run = dry_run_override if dry_run_override is not None else _as_bool(config.get("dry_run", False), False)
     model_name = str(config.get("model_name") or DEFAULT_TRANSLATION_MODEL)
+    try:
+        _parse_model_max_completion_tokens(config.get("model_max_completion_tokens"))
+    except ValueError as exc:
+        issues.append(ConfigIssue("error", str(exc)))
+    model_reasoning_effort = str(config.get("model_reasoning_effort") or "").strip()
+    if model_reasoning_effort and model_reasoning_effort not in REASONING_EFFORT_VALUES:
+        issues.append(ConfigIssue(
+            "error", "model_reasoning_effort must be one of: "
+            + ", ".join(sorted(REASONING_EFFORT_VALUES)) + ".",
+        ))
+    else:
+        try:
+            _validate_model_reasoning_effort(
+                model_name, model_reasoning_effort or None, field="model_reasoning_effort",
+            )
+        except ValueError as exc:
+            issues.append(ConfigIssue("error", str(exc)))
     review_model_name = str(config.get("review_model_name") or model_name)
     review_reasoning_effort = str(config.get("review_reasoning_effort") or "").strip()
     if review_reasoning_effort and review_reasoning_effort not in REASONING_EFFORT_VALUES:
@@ -768,11 +780,14 @@ def load_app_config() -> AppConfig:
         os.environ['TRANSLATION_FILTER_GLOB'] = config_filter_glob
     review_model_env = _non_empty_env('REVIEW_MODEL_NAME')
     review_reasoning_effort_env = _non_empty_env('REVIEW_REASONING_EFFORT')
+    model_reasoning_effort_env = _non_empty_env('MODEL_REASONING_EFFORT')
     validation_config = dict(config)
     if review_model_env:
         validation_config['review_model_name'] = review_model_env
     if review_reasoning_effort_env:
         validation_config['review_reasoning_effort'] = review_reasoning_effort_env
+    if model_reasoning_effort_env:
+        validation_config['model_reasoning_effort'] = model_reasoning_effort_env
 
     # Validate the configuration and surface actionable problems (non-fatal).
     _log_config_issues(
@@ -803,6 +818,12 @@ def load_app_config() -> AppConfig:
         default=False,
     )
     model_name = str(config.get('model_name') or DEFAULT_TRANSLATION_MODEL)
+    raw_model_reasoning_effort = str(
+        model_reasoning_effort_env
+        if model_reasoning_effort_env is not None
+        else config.get('model_reasoning_effort') or ''
+    ).strip()
+    model_reasoning_effort = normalize_reasoning_effort(raw_model_reasoning_effort)
     review_model_name = review_model_env or str(config.get('review_model_name') or model_name)
     review_reasoning_effort = normalize_reasoning_effort(
         review_reasoning_effort_env
@@ -810,9 +831,18 @@ def load_app_config() -> AppConfig:
         else config.get('review_reasoning_effort')
     )
     try:
+        model_max_completion_tokens = _parse_model_max_completion_tokens(
+            config.get('model_max_completion_tokens'),
+        )
+        if raw_model_reasoning_effort and not model_reasoning_effort:
+            raise ValueError("model_reasoning_effort must be one of: "
+                             + ", ".join(sorted(REASONING_EFFORT_VALUES)) + ".")
+        _validate_model_reasoning_effort(
+            model_name, raw_model_reasoning_effort or None, field="model_reasoning_effort",
+        )
         _validate_model_reasoning_effort(
             review_model_name,
-            review_reasoning_effort,
+            str(validation_config.get('review_reasoning_effort') or '').strip() or None,
             field="review_reasoning_effort",
         )
         semantic_review_enabled, semantic_review_model_name = (
@@ -1018,6 +1048,8 @@ def load_app_config() -> AppConfig:
         localization_layout=localization_layout,
         localization_profiles=localization_profiles,
         review_reasoning_effort=review_reasoning_effort,
+        model_reasoning_effort=model_reasoning_effort,
+        model_max_completion_tokens=model_max_completion_tokens,
         semantic_review_enabled=semantic_review_enabled,
         semantic_review_model_name=semantic_review_model_name,
         placeholder_profile=placeholder_profile,

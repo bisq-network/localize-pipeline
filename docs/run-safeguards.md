@@ -1,6 +1,6 @@
 # Translation run safeguards
 
-The Bisq 2 and Bisq Mobile profiles enable the same safeguards. Other
+The Bisq 1, Bisq 2 and Bisq Mobile profiles enable the same safeguards. Other
 profiles opt in with a `run_safeguards` mapping; without one, runs are not
 bounded or checkpointed.
 The safeguards do not change the configured models or relax quality checks.
@@ -30,6 +30,13 @@ passed draft/holistic processing and deterministic validation, plus semantic
 review responses with no findings. Failed or partial file results and flagged
 semantic reviews are not accepted checkpoints.
 
+When individual keys pass validation but another key withholds the file, a
+separate provisional cache retains the valid candidates. Model failures,
+review failures and validation failures are excluded. An identical retry skips
+drafting and holistic review for those candidates, but runs deterministic
+validation again and still requires the complete semantic and publication
+gates. Provisional candidates do not advance the accepted ledger or memory.
+
 Identical retries reuse these results. The normal semantic and publication
 gates still run; cached translation-stage output is not semantic approval.
 The checkpoint fingerprint includes source and target content, selected keys,
@@ -41,10 +48,15 @@ While safeguards are enabled, the source key ledger is written only after the
 translated files have been copied back. A budget or sample stop therefore
 leaves the remaining keys pending for the next run.
 
+Bisq 1 keeps this store in its workspace across dated run directories, even
+when the whole-run ledger has not advanced. Pending local changes still need
+review before the runner can prepare that checkout again.
+
 ## Bound provider requests across restarts
 
 | Profile | Maximum requests in a rolling 24 hours |
 | --- | ---: |
+| Bisq 1 | 1,000 |
 | Bisq 2 | 2,000 |
 | Bisq Mobile | 750 |
 
@@ -65,6 +77,9 @@ too many failed or recovery runs to establish that baseline.
   accommodates that observed workload and a sample, but is not a healthy-run
   statistic. The successful October 20 recovery used 13 calls for a small
   remaining workload, so it is not a full-workload baseline either.
+- Bisq 1 has no production history. Its 1,000 ceiling intentionally bounds the
+  initial manual run. The inspected backlog had 2,400 candidate keys across 15
+  locales, so completing it may require multiple rolling budget windows.
 
 The three-file, five-key sample is an engineering smoke test. With one draft
 per key, one holistic pass and one semantic batch per file, it normally needs
@@ -86,6 +101,13 @@ midnight. It counts requests observed since installation, not historical
 account usage. It is a request limit, not a dollar cap; models, prompt sizes
 and output lengths still affect cost.
 
+An explicitly approved one-time campaign can also set `max_requests_total`.
+This is an absolute ceiling over all attempts retained in the same database:
+save the starting count plus the approved allowance once, then reuse that
+number on every resume. The check is atomic with the daily check and request
+reservation. Neither the passing of 24 hours nor a process restart renews
+this allowance. Normal profile defaults omit this optional ceiling.
+
 ```yaml
 run_safeguards:
   state_path: /app/logs/run_safeguards.sqlite3
@@ -96,7 +118,8 @@ run_safeguards:
 ```
 
 Use a separate persistent store for each pipeline. Docker profiles place it
-in the existing mounted logs directory. A relative `state_path` resolves
+in the existing mounted logs directory; Bisq 1's manual runner resolves it into
+its workspace. A relative `state_path` resolves
 against the configuration file's directory. Preserve this store during
 recovery. Removing it discards both the rolling counter and accepted
 checkpoints.

@@ -231,6 +231,12 @@ def _append_properties_continuation(current: str, next_line: str) -> str:
     return current[:-1] + next_line.lstrip()
 
 
+def resolve_input_folder(repo_root: str, input_folder: str) -> Path:
+    """Resolve configured relative resource folders against the target checkout."""
+    folder = Path(input_folder)
+    return (folder if folder.is_absolute() else Path(repo_root) / folder).resolve()
+
+
 def iter_translation_changes_from_diff(
     diff_text: str,
     repo_root: str,
@@ -239,9 +245,12 @@ def iter_translation_changes_from_diff(
     localization_format: LocalizationFormat = JAVA_PROPERTIES_FORMAT,
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
     hydrate_source: bool = True,
+    require_source: bool = False,
 ) -> Iterable[TranslationChange]:
-    repo_root_path = Path(repo_root)
-    input_folder_path = Path(input_folder)
+    if require_source and not hydrate_source:
+        raise ValueError("Required source values cannot disable source hydration.")
+    repo_root_path = Path(repo_root).resolve()
+    input_folder_path = resolve_input_folder(repo_root, input_folder)
     adapter = get_localization_adapter(localization_format)
     source_cache: Dict[Path, Dict[str, str]] = {}
     target_cache: Dict[Path, Dict[str, str]] = {}
@@ -288,6 +297,9 @@ def iter_translation_changes_from_diff(
                     except Exception:
                         source_cache[source_path] = {}
                 source_translations = source_cache[source_path]
+
+        if require_source and any(key not in source_translations for key, _value in changed_entries):
+            raise RuntimeError(f"Localization source is unavailable for changed entries in {file_path}.")
 
         return [
             TranslationChange(
@@ -692,7 +704,7 @@ def iter_all_translation_entries(
     localization_layout: LocalizationLayout = SUFFIX_LAYOUT,
 ) -> Iterable[TranslationChange]:
     """Yield every target translation entry for the configured format/layout."""
-    input_folder_path = Path(input_folder)
+    input_folder_path = resolve_input_folder(repo_root, input_folder)
     adapter = get_localization_adapter(localization_format)
     source_cache: Dict[Path, Dict[str, str]] = {}
 

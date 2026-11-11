@@ -63,6 +63,12 @@ sudo ./scripts/setup-cron-cleanup.sh
 - Cron job in `/etc/cron.weekly/docker-cleanup-{project-name}`
 - Logs directory for cleanup output
 
+## Bisq 1 Manual Job
+
+`run-bisq1-local.sh` runs the Bisq 1 profile from a local workspace and leaves
+a reviewed patch candidate; `run-bisq1-local.py` holds its logic. See the
+[Bisq 1 guide](../docs/bisq1-local.md).
+
 ## Additional Configuration
 
 For complete disk space management including log rotation and systemd journal limits, see:

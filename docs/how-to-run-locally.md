@@ -2,6 +2,9 @@
 
 This guide explains how to run the full translation pipeline on your local machine for testing or development.
 
+For the manual Bisq 1 job on a Mac, use [the Bisq 1 local guide](bisq1-local.md).
+It prepares a separate checkout and leaves translations as a local patch.
+
 The recommended method is Docker because it uses the same image, Compose file,
 and runtime-secret boundary as the server deployment.
 
