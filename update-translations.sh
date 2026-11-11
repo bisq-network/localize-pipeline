@@ -375,8 +375,33 @@ send_heartbeat_if_configured() {
     local event="${1:-heartbeat}"
     if [ -n "${HEALTHCHECK_URL:-}" ]; then
         log "Sending heartbeat to health check URL for event '$event'..."
-        # Use curl with options to fail silently and handle connection timeouts
-        curl -fsS --retry 3 --max-time 10 "$HEALTHCHECK_URL" > /dev/null || log "Warning: Health check ping failed."
+        local response http_status response_body curl_status=0
+        # Capture the receipt from the existing request. Curl diagnostics may
+        # contain the private ping URL, so report only status codes ourselves.
+        response=$(curl -fsS --retry 3 --max-time 10 --write-out $'\n%{http_code}' "$HEALTHCHECK_URL" 2>/dev/null) || curl_status=$?
+        http_status="${response##*$'\n'}"
+        response_body="${response%$'\n'*}"
+        if [[ ! "$http_status" =~ ^[0-9]{3}$ ]]; then
+            http_status="unknown"
+        fi
+        if [ "$curl_status" -ne 0 ] || [[ ! "$http_status" =~ ^2[0-9]{2}$ ]]; then
+            log "Warning: Health check ping failed for event '$event' (HTTP $http_status, curl exit $curl_status)."
+            return 0
+        fi
+        case "$HEALTHCHECK_URL" in
+            http://hc-ping.com/*|https://hc-ping.com/*|http://hc-ping.com:80/*|https://hc-ping.com:443/*)
+                # Healthchecks can return HTTP 200 for ignored pings too.
+                # Only its exact OK body confirms provider receipt acceptance.
+                if [ "$http_status" = "200" ] && [ "$response_body" = "OK" ]; then
+                    log "Health check provider accepted receipt for event '$event' (HTTP $http_status)."
+                else
+                    log "Warning: Health check ping failed to confirm provider receipt for event '$event' (HTTP $http_status)."
+                fi
+                ;;
+            *)
+                log "Health check HTTP receipt for event '$event' (HTTP $http_status); provider acceptance not verified."
+                ;;
+        esac
     else
         log "No HEALTHCHECK_URL configured, skipping heartbeat ping." "DEBUG"
     fi

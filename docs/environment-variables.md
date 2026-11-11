@@ -37,7 +37,7 @@ override or secret.
 | `TRANSLATION_FILTER_GLOB` | Python pipeline, local runner, shell scripts | Filters translation files by basename glob. The `translation_file_filter_glob` config key sets this when the environment does not. |
 | `TRANSLATION_QUALITY_AUDIT_SCOPE` | `update-translations.sh` | Optional CLI override for quality-gate audit scope. When unset, the gate uses config. |
 | `LOCALIZE_ALLOW_RESET_LEDGER` | Python pipeline | Allows a corrupt translation-key ledger to be backed up and reset. Default behavior fails closed. |
-| `HEALTHCHECK_URL` | `update-translations.sh` | Optional URL pinged after successful server runs. |
+| `HEALTHCHECK_URL` | `update-translations.sh` | Optional URL pinged after successful server runs. Logs record the HTTP status only; for `hc-ping.com` URLs, only an exact `OK` response counts as accepted. |
 
 ## Docker And Repository Controls
 
