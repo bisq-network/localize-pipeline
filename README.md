@@ -199,6 +199,8 @@ Key settings:
 | `placeholder_profile` | `standard` by default; use `java-indexed` for `%0`, `%1`, ... runtime tokens. |
 | `model_provider` | `aisuite` by default; `openai_compatible` is the direct SDK fallback. |
 | `model_name`, `review_model_name` | Translation and review models. |
+| `model_reasoning_effort` | Optional reasoning effort for the translation model. |
+| `model_max_completion_tokens` | Optional output cap for each draft; clipped drafts are rejected. |
 | `review_reasoning_effort` | Optional reasoning effort for the holistic review model. |
 | `semantic_review.reasoning_effort` | Optional reasoning effort for the semantic review model. |
 | `api_base_url` | OpenAI-compatible endpoint, for example Ollama. |

@@ -40,6 +40,50 @@ def test_budget_expires_only_after_rolling_24_hours(tmp_path, monkeypatch):
     guard(tmp_path, 1).reserve()
 
 
+def test_total_budget_survives_restart_and_daily_expiry(tmp_path, monkeypatch):
+    path = tmp_path / "safeguards.sqlite3"
+    monkeypatch.setattr("localize.run_safeguards.time.time", lambda: 100000)
+    # Existing attempts count towards the absolute, campaign-specific ceiling.
+    guard(tmp_path, 100).reserve("earlier attempt")
+    config = {"run_safeguards": {
+        "state_path": str(path), "max_requests_per_24h": 100,
+        "max_requests_total": 3,
+    }}
+    load_safeguards(config, tmp_path / "config.yaml").reserve("campaign one")
+    monkeypatch.setattr("localize.run_safeguards.time.time", lambda: 200000)
+    restarted = load_safeguards(config, tmp_path / "config.yaml")
+    restarted.reserve("campaign two")
+    assert restarted.request_count() == 1
+    with pytest.raises(RequestBudgetExceeded, match="total"):
+        load_safeguards(config, tmp_path / "config.yaml").reserve("blocked")
+    with restarted.connect() as db:
+        assert db.execute("SELECT count(*) FROM requests").fetchone()[0] == 3
+
+
+def test_total_budget_is_atomic_across_workers(tmp_path):
+    def request(_):
+        safeguards = RunSafeguards(
+            tmp_path / "shared.sqlite3", 100, 3, 5, 60, max_requests_total=7,
+        )
+        try:
+            safeguards.reserve()
+            return True
+        except RequestBudgetExceeded:
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert sum(pool.map(request, range(30))) == 7
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "100", 1.5])
+def test_invalid_total_caps_fail_closed(tmp_path, value):
+    with pytest.raises(ValueError, match="max_requests_total"):
+        load_safeguards(
+            {"run_safeguards": {"max_requests_total": value}},
+            tmp_path / "config.yaml",
+        )
+
+
 def test_sample_has_its_own_small_cap(tmp_path):
     safeguards = guard(tmp_path, 100)
     safeguards.sample_max_requests = 2
@@ -64,6 +108,23 @@ def test_cache_is_exact_and_persistent(tmp_path):
         {"source": "Send {0}", "model": "second"}
     )) is None
     assert safeguards.request_count() == 0
+
+
+def test_provisional_candidates_are_separate_from_acceptance_and_budget(tmp_path):
+    safeguards = guard(tmp_path)
+    safeguards.reserve("already charged")
+    key = safeguards.fingerprint({"source": "Pay {0}", "target": "Alt", "policy": 1})
+    safeguards.save_candidates(key, {"good": "Zahlen {0}"})
+    restarted = guard(tmp_path)
+    assert restarted.lookup_candidates(key) == {"good": "Zahlen {0}"}
+    assert restarted.lookup(key) is None
+    assert restarted.request_count() == 1
+    assert restarted.lookup_candidates(restarted.fingerprint(
+        {"source": "Pay {1}", "target": "Alt", "policy": 1},
+    )) == {}
+    # Revalidation can revoke an earlier candidate; do not merge stale values.
+    restarted.save_candidates(key, {})
+    assert safeguards.lookup_candidates(key) == {}
 
 
 @pytest.mark.parametrize("value", [0, -1, True, "100", 1.5])
@@ -168,8 +229,11 @@ async def test_semantic_clean_result_reused_but_flagged_result_not_cached(tmp_pa
     assert create.await_count == 5  # Each flagged result is confirmed exactly once.
 
 
-@pytest.mark.parametrize(("profile", "limit"), [("bisq", 2000), ("bisq-mobile", 750)])
-def test_packaged_bisq_profiles_enable_documented_limits(profile, limit):
+@pytest.mark.parametrize(("profile", "limit", "state_path"), [
+    ("bisq", 2000, "/app/logs/run_safeguards.sqlite3"),
+    ("bisq-mobile", 750, "/app/logs/run_safeguards.sqlite3"),
+])
+def test_packaged_bisq_profiles_enable_documented_limits(profile, limit, state_path):
     from pathlib import Path
 
     import yaml
@@ -179,7 +243,7 @@ def test_packaged_bisq_profiles_enable_documented_limits(profile, limit):
     safeguards = load_safeguards(yaml.safe_load(config_path.read_text()), str(config_path))
     assert safeguards is not None
     # Docker keeps the store in the mounted logs directory across restarts.
-    assert safeguards.path == Path("/app/logs/run_safeguards.sqlite3")
+    assert safeguards.path == root / state_path
     assert safeguards.max_requests_per_24h == limit
     assert (safeguards.sample_files, safeguards.sample_keys,
             safeguards.sample_max_requests) == (3, 5, 60)

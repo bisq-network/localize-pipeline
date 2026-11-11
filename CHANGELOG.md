@@ -23,6 +23,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   it; see [run safeguards](docs/run-safeguards.md).
 - Record heartbeat HTTP receipts; Healthchecks pings count as accepted only
   with its exact `OK` response.
+- Add `model_reasoning_effort` and `model_max_completion_tokens` for draft
+  models, with GPT-6 pricing; clipped drafts are rejected.
+- Retain validated per-key candidates when another key withholds a file, and
+  add an optional `run_safeguards.max_requests_total` ceiling for one-time
+  campaigns.
 
 ### Fixed
 
@@ -31,6 +36,10 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 - Clear queue contents instead of deleting queue roots, so non-root
   containers can clean up. Cleanup errors now fail the run instead of
   leaving stale files for the next cycle.
+- Never truncate semantic-review suggestions before auto-application;
+  oversized suggestions stay as findings for manual resolution.
+- Resolve relative input folders against the target checkout in the quality
+  gate and semantic review, and stop when a changed entry's source is missing.
 
 ### Changed
 

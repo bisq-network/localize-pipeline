@@ -100,6 +100,8 @@ REPO_ROOT = config.target_project_root
 INPUT_FOLDER = config.input_folder
 GLOSSARY_FILE_PATH = config.glossary_file_path
 MODEL_NAME = config.model_name
+MODEL_REASONING_EFFORT = config.model_reasoning_effort
+MODEL_MAX_COMPLETION_TOKENS = config.model_max_completion_tokens
 REVIEW_MODEL_NAME = config.review_model_name
 REVIEW_REASONING_EFFORT = config.review_reasoning_effort
 SEMANTIC_REVIEW_ENABLED = config.semantic_review_enabled
@@ -454,9 +456,11 @@ def apply_translation_memory(
         locale: str,
         format_id: str,
         context_fingerprint: Optional[str] = None,
+        candidate_translations: Optional[Mapping[str, str]] = None,
 ) -> TranslationMemoryPlan:
-    """Reuse exact approved translations and keep unresolved keys for the model."""
-    if memory is None:
+    """Reuse bound candidates or approved memory; keep unresolved model work."""
+    candidate_translations = candidate_translations or {}
+    if memory is None and not candidate_translations:
         return TranslationMemoryPlan(
             cached_results=[],
             pending_texts=list(texts_to_translate),
@@ -471,12 +475,14 @@ def apply_translation_memory(
     pending_keys: List[str] = []
     pending_positions: List[int] = []
     for position, (text, line_index, key) in enumerate(zip(texts_to_translate, indices, keys_to_translate)):
-        cached = memory.lookup(
-            text,
-            locale=locale,
-            format_id=format_id,
-            context_fingerprint=context_fingerprint,
-        )
+        cached = candidate_translations.get(key)
+        if cached is None and memory is not None:
+            cached = memory.lookup(
+                text,
+                locale=locale,
+                format_id=format_id,
+                context_fingerprint=context_fingerprint,
+            )
         if cached is not None and is_accepted_source_identical(
             locale, key, text, text, ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
         ) and cached != text:
@@ -486,7 +492,8 @@ def apply_translation_memory(
                 logger.warning("Ignoring source-identical translation memory entry for key '%s'.", key)
             else:
                 cached_results.append((position, cached))
-                logger.info("Reused translation memory for key '%s'.", key)
+                logger.info("Reused %s for key '%s'.",
+                            "provisional candidate" if key in candidate_translations else "translation memory", key)
                 continue
         pending_texts.append(text)
         pending_line_indices.append(line_index)
@@ -1653,8 +1660,16 @@ Provide the translation **of the Value only**, following the instructions above.
                         ],
                         temperature=0.3,
                         timeout=60.0,
+                        **chat_reasoning_effort_kwargs(
+                            MODEL_PROVIDER, MODEL_NAME, MODEL_REASONING_EFFORT,
+                        ),
+                        **({"completion_token_limit": MODEL_MAX_COMPLETION_TOKENS}
+                           if MODEL_MAX_COMPLETION_TOKENS is not None else {}),
                     )
 
+                if getattr(response.choices[0], "finish_reason", None) == "length":
+                    logger.warning("Translation for key '%s' reached the output token limit; keeping original text.", key)
+                    return index, text, False
                 msg_content = response.choices[0].message.content
                 if not msg_content:
                     logger.warning("Empty assistant content for key '%s'; keeping original text.", key)
@@ -2908,8 +2923,11 @@ async def process_translation_queue(
                     "target_content": checkpoint_input,
                     "keys": keys_to_translate, "glossary": glossary,
                     "draft_model": MODEL_NAME, "review_model": REVIEW_MODEL_NAME,
+                    "draft_effort": MODEL_REASONING_EFFORT,
+                    "draft_max_completion_tokens": MODEL_MAX_COMPLETION_TOKENS,
                     "review_effort": REVIEW_REASONING_EFFORT,
                     "semantic_model": SEMANTIC_REVIEW_MODEL_NAME,
+                    "semantic_effort": config.semantic_review_reasoning_effort,
                 })
                 accepted = safeguards.lookup(checkpoint)
                 if accepted is not None:
@@ -2934,6 +2952,16 @@ async def process_translation_queue(
                                 translation_file)
                     continue
 
+            # Provisional output is bound to the same complete input/policy as
+            # file checkpoints, but must still pass final validation and gates.
+            candidate_translations = (
+                safeguards.lookup_candidates(checkpoint)
+                if safeguards and not _sample else {}
+            )
+            candidate_translations = {
+                key: value for key, value in candidate_translations.items()
+                if key in keys_to_translate
+            }
             memory_plan = apply_translation_memory(
                 texts_to_translate=texts_to_translate,
                 indices=indices,
@@ -2942,8 +2970,15 @@ async def process_translation_queue(
                 locale=language_code,
                 format_id=localization_format.id,
                 context_fingerprint=memory_context_fingerprint,
+                candidate_translations=candidate_translations,
             )
-            increment_run_metric(run_metrics, "translation_memory_reused_count", len(memory_plan.cached_results))
+            candidate_keys = {
+                keys_to_translate[position] for position, _value in memory_plan.cached_results
+                if keys_to_translate[position] in candidate_translations
+            }
+            review_keys = [key for key in keys_to_translate if key not in candidate_keys]
+            increment_run_metric(run_metrics, "translation_memory_reused_count",
+                                 len(memory_plan.cached_results) - len(candidate_keys))
             increment_run_metric(run_metrics, "model_translation_keys_count", len(memory_plan.pending_keys))
 
             # Pre-run scope/cost preview for this file (ballpark — actuals logged at the end).
@@ -2953,7 +2988,7 @@ async def process_translation_queue(
                 locale_codes=[language_code],
                 translate_model=MODEL_NAME,
                 review_model=REVIEW_MODEL_NAME,
-                review_num_keys=len(keys_to_translate),
+                review_num_keys=len(review_keys),
                 semantic_review_model=(
                     SEMANTIC_REVIEW_MODEL_NAME if SEMANTIC_REVIEW_ENABLED else None
                 ),
@@ -3091,12 +3126,15 @@ async def process_translation_queue(
                 if temp_draft_path and os.path.exists(temp_draft_path):
                     os.remove(temp_draft_path)
 
-            final_corrected_translations = {}
+            final_corrected_translations = {
+                key: candidate_translations[key] for key in candidate_keys
+            }
             # --- Holistic Review Step ---
             # Exhausted drafts remain failed and retryable. Sending their source
             # fallbacks to review cannot clear that failure, and one rejected
             # fallback would invalidate the review of the entire healthy chunk.
-            keys_to_review = [key for key in keys_to_translate if key not in model_failed_keys]
+            # Reused provisional candidates were reviewed when they were saved.
+            keys_to_review = [key for key in review_keys if key not in model_failed_keys]
             logger.info(f"Performing holistic review for {len(keys_to_review)} keys in '{translation_file}'...")
 
             # Create chunks of keys. Translation-memory hits stay in scope so they
@@ -3298,6 +3336,11 @@ async def process_translation_queue(
             per_key_summary["model_translation_failed_keys"] = sorted(model_failed_keys)
             if validation_summary is not None:
                 validation_summary[translation_file] = per_key_summary
+            if safeguards and not _sample:
+                safeguards.save_candidates(checkpoint, {
+                    key: valid_translations[key] for key in keys_to_translate
+                    if key in valid_translations and key not in failed_keys
+                })
             if _sample and failed_keys:
                 raise SampleValidationError(
                     f"Sample failed for {translation_file}: {sorted(failed_keys)}"

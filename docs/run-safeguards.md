@@ -30,6 +30,13 @@ passed draft/holistic processing and deterministic validation, plus semantic
 review responses with no findings. Failed or partial file results and flagged
 semantic reviews are not accepted checkpoints.
 
+When individual keys pass validation but another key withholds the file, a
+separate provisional cache retains the valid candidates. Model failures,
+review failures and validation failures are excluded. An identical retry skips
+drafting and holistic review for those candidates, but runs deterministic
+validation again and still requires the complete semantic and publication
+gates. Provisional candidates do not advance the accepted ledger or memory.
+
 Identical retries reuse these results. The normal semantic and publication
 gates still run; cached translation-stage output is not semantic approval.
 The checkpoint fingerprint includes source and target content, selected keys,
@@ -85,6 +92,13 @@ The limit persists across process/container restarts and does not reset at
 midnight. It counts requests observed since installation, not historical
 account usage. It is a request limit, not a dollar cap; models, prompt sizes
 and output lengths still affect cost.
+
+An explicitly approved one-time campaign can also set `max_requests_total`.
+This is an absolute ceiling over all attempts retained in the same database:
+save the starting count plus the approved allowance once, then reuse that
+number on every resume. The check is atomic with the daily check and request
+reservation. Neither the passing of 24 hours nor a process restart renews
+this allowance. Normal profile defaults omit this optional ceiling.
 
 ```yaml
 run_safeguards:
