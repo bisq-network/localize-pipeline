@@ -71,8 +71,8 @@ def write_config(repo, state, locales, report_dir=None):
     config.update({
         "target_project_root": str(repo),
         "glossary_file_path": str(ROOT / "profiles/bisq1/glossary.json"),
-        "translation_queue_folder": str(state / "queue"),
-        "translated_queue_folder": str(state / "translated"),
+        "translation_queue_folder": str(report_dir / "queue"),
+        "translated_queue_folder": str(report_dir / "translated"),
         "translation_key_ledger_file_path": str(report_dir / "ledger.json"),
         "translation_memory_file_path": str(report_dir / "memory.json"),
         "logging": {"log_level": "INFO", "log_to_console": True,
@@ -163,7 +163,20 @@ def run(args, state):
     runtime.save_translation_key_ledger(str(report_dir / "ledger.json"), ledger)
     if (state / "memory.json").exists():
         shutil.copyfile(state / "memory.json", report_dir / "memory.json")
-    result = asyncio.run(runtime.main())
+    # General discovery deliberately includes unknown suffix locales so other
+    # jobs can report them. This manual job owns only the selected exact files.
+    allowed_filenames = set(filenames)
+    discover = runtime.get_changed_translation_files
+
+    def discover_selected(*args, **kwargs):
+        return [filename for filename in discover(*args, **kwargs)
+                if filename in allowed_filenames]
+
+    runtime.get_changed_translation_files = discover_selected
+    try:
+        result = asyncio.run(runtime.main())
+    finally:
+        runtime.get_changed_translation_files = discover
     require_complete_run(result)
     if source_path.read_bytes() != source_bytes:
         raise RuntimeError("English source changed unexpectedly; inspect the workspace.")
