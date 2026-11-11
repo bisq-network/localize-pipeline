@@ -34,11 +34,11 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _git(cwd: Path, *args: str) -> str:
+def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
-        env=_git_env(),
+        env={**_git_env(), **(env or {})},
         check=True,
         capture_output=True,
         text=True,
@@ -47,16 +47,23 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 class DeployCheckout:
-    """A pipeline checkout whose origin is a local stand-in for upstream."""
+    """A pipeline checkout whose origin looks like GitHub but is served locally.
+
+    The remote keeps a real `git@github.com:owner/name.git` URL. A stand-in for
+    `ssh` serves the requested path from a local directory, so the gate's URL
+    checks run against realistic URLs without network access.
+    """
 
     def __init__(
         self,
         root: Path,
         upstream_owner: str = "bisq-network",
         upstream_name: str = "localize-pipeline",
+        remote_url: str = "git@github.com:{owner}/{name}.git",
     ) -> None:
         self.root = root
-        self.upstream = root / upstream_owner / f"{upstream_name}.git"
+        self.ssh_root = root / "served"
+        self.upstream = self.ssh_root / upstream_owner / f"{upstream_name}.git"
         self.upstream.parent.mkdir(parents=True)
         _git(root, "init", "--quiet", "--bare", "--initial-branch=main", str(self.upstream))
 
@@ -72,9 +79,20 @@ class DeployCheckout:
         (self.work / ".gitignore").write_text("docker/.env\n", encoding="utf-8")
         self.commit("Initial pipeline")
         _git(self.work, "push", "--quiet", "origin", "main")
+        self.set_remote(remote_url.format(owner=upstream_owner, name=upstream_name))
 
         self.bin = root / "bin"
         self.bin.mkdir()
+        self.fake_ssh = self.bin / "fake-ssh"
+        self.fake_ssh.write_text(
+            "#!/bin/sh\n"
+            "# Stand-in for ssh: serve the requested repository from a local directory.\n"
+            "for last; do :; done\n"
+            'eval "set -- $last"\n'
+            'exec "$1" "$FAKE_GIT_SSH_ROOT/${2#/}"\n',
+            encoding="utf-8",
+        )
+        self.fake_ssh.chmod(0o755)
         self.docker_log = root / "docker-args.txt"
         self.build_context = root / "build-context"
         docker = self.bin / "docker"
@@ -93,6 +111,19 @@ class DeployCheckout:
         )
         docker.chmod(0o755)
 
+    def ssh_env(self) -> dict[str, str]:
+        return {
+            "GIT_SSH_COMMAND": str(self.fake_ssh),
+            "GIT_SSH_VARIANT": "ssh",
+            "FAKE_GIT_SSH_ROOT": str(self.ssh_root),
+        }
+
+    def git(self, *args: str) -> str:
+        return _git(self.work, *args, env=self.ssh_env())
+
+    def set_remote(self, url: str) -> None:
+        _git(self.work, "remote", "set-url", "origin", url)
+
     def commit(self, message: str) -> str:
         _git(self.work, "add", "-A")
         _git(self.work, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
@@ -102,7 +133,7 @@ class DeployCheckout:
         return _git(self.work, "rev-parse", "HEAD")
 
     def run(self, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
-        process_env = _git_env()
+        process_env = {**_git_env(), **self.ssh_env()}
         process_env["PATH"] = f"{self.bin}{os.pathsep}{process_env['PATH']}"
         process_env.update(env)
         return subprocess.run(
@@ -200,7 +231,7 @@ def test_accepts_an_older_merged_commit_for_rollback(checkout: DeployCheckout):
     first = checkout.head()
     (checkout.work / "localize" / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
     checkout.commit("Merged change")
-    _git(checkout.work, "push", "--quiet", "origin", "main")
+    checkout.git("push", "--quiet", "origin", "main")
     _git(checkout.work, "checkout", "--quiet", "--detach", first)
 
     result = checkout.run("--check-only")
@@ -242,9 +273,19 @@ def test_refuses_local_edits_hidden_from_git_status(checkout: DeployCheckout, fl
     assert checkout.docker_args() is None
 
 
-def test_refuses_the_development_override_in_the_env_file(checkout: DeployCheckout):
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true",
+        "LOCALIZE_ALLOW_UNVERIFIED_IMAGE: true",
+        "  export LOCALIZE_ALLOW_UNVERIFIED_IMAGE : true",
+    ],
+)
+def test_refuses_the_development_override_in_the_env_file(
+    checkout: DeployCheckout, assignment: str
+):
     (checkout.work / "docker" / ".env").write_text(
-        "OPENAI_API_KEY=placeholder\nLOCALIZE_ALLOW_UNVERIFIED_IMAGE=true\n",
+        f"OPENAI_API_KEY=placeholder\n{assignment}\n",
         encoding="utf-8",
     )
 
@@ -259,10 +300,9 @@ def test_explains_a_shallow_clone_instead_of_reporting_not_merged(checkout: Depl
     first = checkout.head()
     (checkout.work / "localize" / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
     checkout.commit("Merged change")
-    _git(checkout.work, "push", "--quiet", "origin", "main")
-    _git(checkout.work, "remote", "set-url", "origin", checkout.upstream.as_uri())
+    checkout.git("push", "--quiet", "origin", "main")
     _git(checkout.work, "checkout", "--quiet", "--detach", first)
-    _git(checkout.work, "fetch", "--quiet", "--depth", "1", "origin", "main")
+    checkout.git("fetch", "--quiet", "--depth", "1", "origin", "main")
 
     result = checkout.run("--check-only")
 
@@ -311,6 +351,63 @@ def test_refuses_the_former_personal_repository_name(tmp_path: Path):
     assert "git remote set-url" in result.stderr
 
 
+def test_refuses_a_local_path_remote(checkout: DeployCheckout):
+    checkout.set_remote(str(checkout.upstream))
+
+    result = checkout.run("--check-only")
+
+    assert result.returncode != 0
+    assert "not upstream" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://gitlab.example/bisq-network/localize-pipeline.git",
+        "git@mirror.example:bisq-network/localize-pipeline.git",
+        "git://github.com/bisq-network/localize-pipeline.git",
+        "https://github.com/someone/bisq-network/localize-pipeline.git",
+    ],
+)
+def test_refuses_other_hosts_transports_and_paths(checkout: DeployCheckout, url: str):
+    checkout.set_remote(url)
+
+    result = checkout.run("--check-only")
+
+    assert result.returncode != 0
+    assert "not upstream" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/bisq-network/localize-pipeline.git",
+        "https://github.com/Bisq-Network/Localize-Pipeline/",
+        "ssh://git@github.com:22/bisq-network/localize-pipeline.git",
+    ],
+)
+def test_accepts_upstream_url_forms(checkout: DeployCheckout, url: str):
+    checkout.set_remote(url)
+
+    # Allow only local transports, so the accepted URL is checked without network.
+    result = checkout.run("--check-only", GIT_ALLOW_PROTOCOL="file")
+
+    assert "not upstream" not in result.stderr
+    assert "could not fetch" in result.stderr
+
+
+def test_ssh_host_alias_needs_to_be_allowed_explicitly(checkout: DeployCheckout):
+    checkout.set_remote("github-bisq:bisq-network/localize-pipeline.git")
+
+    refused = checkout.run("--check-only")
+    allowed = checkout.run("--check-only", DEPLOY_ALLOWED_HOSTS="github.com github-bisq")
+
+    assert refused.returncode != 0
+    assert "DEPLOY_ALLOWED_HOSTS" in refused.stderr
+    assert allowed.returncode == 0, allowed.stderr
+    assert allowed.stdout.strip() == checkout.head()
+
+
 def test_expected_repository_can_be_configured_for_other_deployments(tmp_path: Path):
     checkout = DeployCheckout(tmp_path, upstream_owner="someone-else")
 
@@ -323,10 +420,7 @@ def test_expected_repository_can_be_configured_for_other_deployments(tmp_path: P
 
 
 def test_refuses_when_upstream_cannot_be_fetched(checkout: DeployCheckout):
-    missing = checkout.root / "gone" / "bisq-network" / "localize-pipeline.git"
-    _git(checkout.work, "remote", "set-url", "origin", str(missing))
-
-    result = checkout.run()
+    result = checkout.run(FAKE_GIT_SSH_ROOT=str(checkout.root / "gone"))
 
     assert result.returncode != 0
     assert "fetch" in result.stderr

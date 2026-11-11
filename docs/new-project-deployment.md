@@ -149,8 +149,9 @@ scripts/deploy-build.sh
 
 The script refuses to build when:
 
-- the `origin` remote is not `bisq-network/localize-pipeline` (a remote that
-  still uses the repository's former name under `bisq-network` is accepted);
+- the `origin` remote is not `bisq-network/localize-pipeline` on `github.com`
+  over `https` or `ssh` (a remote that still uses the repository's former name
+  under `bisq-network` is accepted; local paths and other hosts are refused);
 - the checkout has uncommitted or untracked files, or tracked files flagged
   `skip-worktree` or `assume-unchanged`;
 - `docker/.env` sets `LOCALIZE_ALLOW_UNVERIFIED_IMAGE`;
@@ -173,7 +174,8 @@ images once a gated image runs. In a shallow clone, run
 Profiles, `config.yaml`, `config-mobile.yaml` and Compose override files are
 mounted at run time and are not part of the image, so local changes to them do
 not block the build. If the upstream remote has another name, set
-`DEPLOY_REMOTE`. A deployment of another repository sets
+`DEPLOY_REMOTE`. If the checkout reaches GitHub through an SSH host alias, add
+the alias to `DEPLOY_ALLOWED_HOSTS`. A deployment of another repository sets
 `DEPLOY_EXPECTED_REPOSITORY` to its `owner/name`.
 
 The image build does not read the deploy key, signing key, or project profiles.

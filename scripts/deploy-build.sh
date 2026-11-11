@@ -17,6 +17,9 @@
 #                               the remote (default: bisq-network/localize-pipeline
 #                               and its former name
 #                               bisq-network/translate-java-property-files)
+#   DEPLOY_ALLOWED_HOSTS        Space-separated Git hosts the remote may use over
+#                               https or ssh (default: github.com). Add an SSH
+#                               host alias here if the checkout uses one.
 #
 # Files that Compose mounts at run time (profiles/, config.yaml,
 # config-mobile.yaml, Compose override files) are not image inputs, so local
@@ -27,6 +30,7 @@ set -euo pipefail
 REMOTE="${DEPLOY_REMOTE:-origin}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 EXPECTED_REPOSITORIES="${DEPLOY_EXPECTED_REPOSITORY:-bisq-network/localize-pipeline bisq-network/translate-java-property-files}"
+ALLOWED_HOSTS="${DEPLOY_ALLOWED_HOSTS:-github.com}"
 RUNTIME_CONFIG_PATHSPECS=(
   ':(exclude)profiles'
   ':(exclude)config.yaml'
@@ -51,28 +55,60 @@ if [ "${1:-}" = "--check-only" ]; then
   [ "$#" -eq 0 ] || fail "--check-only takes no further arguments."
 fi
 
-# 1. The remote must be the upstream repository, not a fork or a mirror.
+# 1. The remote must be the upstream repository on an approved host, not a
+# fork, a mirror or a local path. `git remote get-url` shows the URL that
+# fetch really uses, after any insteadOf rewrite.
 remote_url="$(git remote get-url "$REMOTE" 2>/dev/null)" \
   || fail "remote '$REMOTE' does not exist. Set DEPLOY_REMOTE to the upstream remote."
-normalized_url="$(printf '%s' "$remote_url" | tr '[:upper:]' '[:lower:]')"
-normalized_url="${normalized_url%/}"
-normalized_url="${normalized_url%.git}"
-remote_matches=false
-for repository in $EXPECTED_REPOSITORIES; do
-  expected="$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')"
-  case "$normalized_url" in
-    */"$expected" | *:"$expected") remote_matches=true ;;
-  esac
+url="$(printf '%s' "$remote_url" | tr '[:upper:]' '[:lower:]')"
+url="${url%/}"
+url="${url%.git}"
+remote_host=""
+remote_path=""
+case "$url" in
+  https://* | ssh://*)
+    rest="${url#*://}"
+    authority="${rest%%/*}"
+    if [ "$authority" != "$rest" ]; then
+      remote_path="${rest#*/}"
+      remote_host="${authority##*@}"
+      remote_host="${remote_host%%:*}"
+    fi
+    ;;
+  *://*) ;;
+  *:*)
+    authority="${url%%:*}"
+    case "$authority" in
+      */*) ;;
+      *)
+        remote_host="${authority##*@}"
+        remote_path="${url#*:}"
+        ;;
+    esac
+    ;;
+esac
+remote_path="${remote_path#/}"
+host_allowed=false
+for host in $ALLOWED_HOSTS; do
+  [ -n "$remote_host" ] && [ "$remote_host" = "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" ] \
+    && host_allowed=true
 done
-if [ "$remote_matches" != true ]; then
-  fail "remote '$REMOTE' points to $remote_url, which is not upstream ($EXPECTED_REPOSITORIES).
+repository_matches=false
+for repository in $EXPECTED_REPOSITORIES; do
+  [ "$remote_path" = "$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')" ] \
+    && repository_matches=true
+done
+if [ "$host_allowed" != true ] || [ "$repository_matches" != true ]; then
+  fail "remote '$REMOTE' points to $remote_url, which is not upstream.
+It must use https or ssh on an allowed host ($ALLOWED_HOSTS) and name one of: $EXPECTED_REPOSITORIES.
 Point it at upstream, for example:
-  git remote set-url $REMOTE https://github.com/bisq-network/localize-pipeline.git"
+  git remote set-url $REMOTE https://github.com/bisq-network/localize-pipeline.git
+If the checkout uses an SSH host alias, add that alias to DEPLOY_ALLOWED_HOSTS."
 fi
 
 # 2. The development override must never reach a production container.
 if [ -f docker/.env ] \
-  && grep -Eq '^[[:space:]]*(export[[:space:]]+)?LOCALIZE_ALLOW_UNVERIFIED_IMAGE[[:space:]]*=' docker/.env; then
+  && grep -Eq '^[[:space:]]*(export[[:space:]]+)?LOCALIZE_ALLOW_UNVERIFIED_IMAGE[[:space:]]*[=:]' docker/.env; then
   fail "docker/.env sets LOCALIZE_ALLOW_UNVERIFIED_IMAGE, which turns off the merged-commit check in the container. Remove it; it is for local development only."
 fi
 
