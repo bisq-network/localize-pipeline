@@ -114,3 +114,94 @@ raise SystemExit(job.main())
     assert git("diff", "--cached", "--name-only") == ""
     usage = json.loads((report_dir / "logs/token_usage_summary.json").read_text())
     assert usage["totals"]["calls"] == 0
+
+
+@pytest.mark.parametrize("reject_quality", [False, True])
+def test_final_semantic_correction_reconciles_state_only_after_quality(tmp_path, reject_quality):
+    from localize import translate_localization_files as runtime
+    from localize.formats.properties import parse_properties_file
+    from localize.translation_memory import TranslationMemory, load_translation_memory_strict, write_translation_memory
+
+    state = tmp_path / "state"
+    repo = state / "bisq"
+    resources = repo / "core/src/main/resources/i18n"
+    resources.mkdir(parents=True)
+    source = resources / "displayStrings.properties"
+    target = resources / "displayStrings_de.properties"
+    source.write_text("label=Old {0}\\nDone\nstable=Keep\n")
+    target.write_text("label=Alt {0}\\nFertig\nstable=Behalten\n")
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+    git("init", "-b", "master")
+    git("config", "user.name", "Local job test")
+    git("config", "user.email", "test@example.invalid")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-m", "Old source")
+    base = git("rev-parse", "HEAD")
+    runtime.save_translation_key_ledger(str(state / "ledger.json"), {target.name: runtime.build_file_key_ledger(
+        parse_properties_file(str(source))[1], parse_properties_file(str(target))[1],
+    )})
+    source.write_text("label=New {0}\\nDone\nstable=Keep\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-m", "Current source")
+    with (repo / ".git/info/exclude").open("a") as stream:
+        stream.write("\n/core/src/main/resources/i18n/archive/\n")
+    memory = TranslationMemory()
+    memory.record("New {0}\\nDone", "Vorher {0}\\nFertig", locale="de", format_id="java_properties")
+    memory.record("Keep", "Behalten", locale="de", format_id="java_properties")
+    write_translation_memory(state / "memory.json", memory)
+    original_ledger = (state / "ledger.json").read_bytes()
+    original_memory = (state / "memory.json").read_bytes()
+    harness = r'''
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock
+spec = importlib.util.spec_from_file_location("job", sys.argv[1])
+job = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(job)
+job.prepare_checkout = lambda repo: None
+original_run = job.asyncio.run
+state, base, reject = sys.argv[2:5]
+def mocked_run(coro):
+    from localize import translate_localization_files as runtime
+    runtime.holistic_review_async = AsyncMock(return_value={"label": r"Vorher {0}\nFertig"})
+    import localize.translation_semantic_reviewer as reviewer
+    reviewer.review_translation_changes = AsyncMock(return_value=[])
+    return original_run(coro)
+job.asyncio.run = mocked_run
+import localize.translation_semantic_reviewer as reviewer
+def semantic(args):
+    target = Path(state) / "bisq" / job.RESOURCE_PATH / "displayStrings_de.properties"
+    target.write_text("label=D''Artagnan {0}\\nFertig\nstable=Behalten\n")
+    summary = args[args.index("--validation-summary") + 1]
+    reviewer.append_semantic_review_status(summary, attempted=True)
+    return 0
+reviewer.main = semantic
+if reject == "reject":
+    import localize.translation_quality_gate as gate
+    gate.main = lambda args: 1
+sys.argv = ["job", "--work-dir", state, "--base-ref", base, "--locales", "de"]
+raise SystemExit(job.main())
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", harness, str(ROOT / "scripts/run-bisq1-local.py"), str(state), base,
+         "reject" if reject_quality else "accept"],
+        env={**os.environ, "OPENAI_API_KEY": "test-only", "OPENAI_BASE_URL": "http://127.0.0.1:1"},
+        text=True, capture_output=True, timeout=30,
+    )
+    assert result.returncode == int(reject_quality), result.stdout + result.stderr
+    report = Path((state / "latest-run.txt").read_text().strip())
+    final = parse_properties_file(str(target))[1]
+    assert final["label"] == "D''Artagnan {0}\\nFertig"
+    assert "D''Artagnan" in (report / "translations.patch").read_text()
+    if reject_quality:
+        assert (state / "ledger.json").read_bytes() == original_ledger
+        assert (state / "memory.json").read_bytes() == original_memory
+    else:
+        ledger = runtime.load_translation_key_ledger(str(state / "ledger.json"))
+        assert ledger[target.name]["label"]["target_hash"] == runtime.compute_ledger_hash(final["label"])
+        accepted = load_translation_memory_strict(state / "memory.json", require_exists=True)
+        assert accepted.lookup("New {0}\\nDone", locale="de", format_id="java_properties") is None
+        assert accepted.lookup("Keep", locale="de", format_id="java_properties") == "Behalten"
+    assert json.loads((report / "logs/token_usage_summary.json").read_text())["totals"]["calls"] == 0

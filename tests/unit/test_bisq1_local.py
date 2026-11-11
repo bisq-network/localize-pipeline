@@ -86,7 +86,9 @@ def test_configuration_isolates_reports_and_keeps_quality_guards(tmp_path):
     assert payload["quality_gate"]["block_on_pipeline_warnings"] is True
     assert payload["quality_gate"]["block_on_semantic_qa_findings"] is True
     assert payload["translation_key_ledger_file_path"] == str(state / "ledger.json")
-    assert json.loads(Path(payload["glossary_file_path"]).read_text()) == {}
+    assert Path(payload["glossary_file_path"]) == ROOT / "profiles/bisq1/glossary.json"
+    glossary = json.loads(Path(payload["glossary_file_path"]).read_text())
+    assert glossary["de"] and glossary["fa"] == {}
 
 
 def test_unknown_locale_fails_before_running(tmp_path):
@@ -140,6 +142,77 @@ def test_invalid_resume_memory_fails_without_changing_state(tmp_path):
     with pytest.raises(ValueError, match="invalid translation memory"):
         job.seed_run_memory(tmp_path, report, resume_path)
     assert not (report / "memory.json").exists()
+
+
+def test_final_state_uses_serialized_targets_and_invalidates_only_stale_memory(tmp_path):
+    from localize import translate_localization_files as runtime
+    from localize.translation_memory import TranslationMemory, load_translation_memory_strict, write_translation_memory
+
+    repo = tmp_path / "bisq"
+    resources = repo / job.RESOURCE_PATH
+    resources.mkdir(parents=True)
+    report = tmp_path / "report"
+    report.mkdir()
+    sources = {"label": "You don''t have {0}.\\nNext", "stable": "Keep", "shared1": "Shared",
+               "shared2": "Shared", "conflict": "Conflict", "current": "Current"}
+    before = {"label": "Alt {0}", "stable": "Behalten", "shared1": "A", "shared2": "A",
+              "conflict": "Zuvor", "current": "Alt"}
+    final = {**before, "label": "D''Artagnan {0}\\nFertig", "shared1": "B", "conflict": "Danach", "current": "Aktuell"}
+    (resources / "displayStrings.properties").write_text("".join(f"{k}={v}\n" for k, v in sources.items()))
+    target = resources / "displayStrings_de.properties"
+    target.write_text("".join(f"{k}={v}\n" for k, v in final.items()))
+    foreign = {"hold": {"source_hash": "keep-source", "target_hash": "keep-target", "status": "failed"}}
+    runtime.save_translation_key_ledger(str(report / "ledger.json"), {
+        target.name: runtime.build_file_key_ledger(sources, before),
+        "displayStrings_fr.properties": foreign,
+    })
+    memory = TranslationMemory()
+    for key in ("label", "stable", "shared1", "conflict"):
+        memory.record(sources[key], before[key], locale="de", format_id="java_properties")
+    memory.record("Conflict", "Anderer Wert", locale="de", format_id="java_properties")
+    memory.record("Current", "Aktuell", locale="de", format_id="java_properties")
+    memory.record(sources["label"], "French approved", locale="fr", format_id="java_properties")
+    conflict = next(dict(entry) for entry in memory.entries.values() if entry.get("source") == "Conflict")
+    write_translation_memory(report / "memory.json", memory)
+
+    job.reconcile_run_state(runtime, repo, report, [target.name])
+
+    ledger = runtime.load_translation_key_ledger(str(report / "ledger.json"))
+    parsed = job.parse_properties_file(str(target))[1]
+    assert ledger[target.name] == runtime.build_file_key_ledger(sources, parsed)
+    assert ledger["displayStrings_fr.properties"] == foreign
+    assert runtime._ledger_verified_existing_translation("label", sources, parsed, ledger[target.name]) == final["label"]
+    accepted = load_translation_memory_strict(report / "memory.json", require_exists=True)
+    assert accepted.lookup(sources["label"], locale="de", format_id="java_properties") is None
+    assert accepted.lookup("Shared", locale="de", format_id="java_properties") is None
+    assert accepted.lookup("Keep", locale="de", format_id="java_properties") == "Behalten"
+    assert accepted.lookup("Current", locale="de", format_id="java_properties") == "Aktuell"
+    assert accepted.lookup(sources["label"], locale="fr", format_id="java_properties") == "French approved"
+    assert next(entry for entry in accepted.entries.values() if entry.get("source") == "Conflict") == conflict
+    assert job.reconcile_run_state(runtime, repo, report, [target.name]) == []
+
+
+@pytest.mark.parametrize("failure", ["source", "missing_key"])
+def test_reconciliation_refuses_unvalidated_final_state(tmp_path, failure):
+    from localize import translate_localization_files as runtime
+    from localize.translation_memory import TranslationMemory, write_translation_memory
+
+    repo = tmp_path / "bisq"
+    resources = repo / job.RESOURCE_PATH
+    resources.mkdir(parents=True)
+    report = tmp_path / "report"
+    report.mkdir()
+    (resources / "displayStrings.properties").write_text("label=Current\n")
+    (resources / "displayStrings_de.properties").write_text("label=Final\n")
+    entries = runtime.build_file_key_ledger({"label": "Previous"}, {"label": "Before"}) if failure == "source" else {}
+    runtime.save_translation_key_ledger(str(report / "ledger.json"), {"displayStrings_de.properties": entries})
+    memory = TranslationMemory()
+    memory.record("Current", "Before", locale="de", format_id="java_properties")
+    write_translation_memory(report / "memory.json", memory)
+    before = {name: (report / name).read_bytes() for name in ("ledger.json", "memory.json")}
+    with pytest.raises(RuntimeError):
+        job.reconcile_run_state(runtime, repo, report, ["displayStrings_de.properties"])
+    assert {name: (report / name).read_bytes() for name in before} == before
 
 
 def test_adding_locale_seeds_missing_baseline_and_preserves_existing_ledger(tmp_path, monkeypatch):

@@ -54,6 +54,7 @@ from localize.semantic_quality import (
     load_semantic_rules,
     normalize_value,
     normalize_retained_source_word_allowlist,
+    resolve_input_folder,
 )
 from localize.source_identical_acceptance import is_accepted_source_identical, normalize_acceptances
 from localize.formats.validation import find_disallowed_control_characters
@@ -316,6 +317,7 @@ def _iter_profile_translation_changes(
     input_folder: str,
     locale_codes: Sequence[str],
     localization_profiles: Sequence[LocalizationProfile],
+    require_source: bool = False,
 ) -> Iterable[TranslationChange]:
     for profile in localization_profiles:
         yield from iter_translation_changes_from_diff(
@@ -325,6 +327,7 @@ def _iter_profile_translation_changes(
             locale_codes=locale_codes,
             localization_format=profile.localization_format,
             localization_layout=profile.localization_layout,
+            require_source=require_source,
         )
 
 
@@ -355,6 +358,7 @@ def analyze_source_identical_changes_for_profiles(
     ignore_key_patterns: Sequence[Pattern[str]] = (),
     source_identical_allowlist: Optional[Mapping[str, Iterable[str]]] = None,
     accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
+    require_source: bool = False,
 ) -> SourceIdenticalStats:
     """Analyze suspicious source-identical changes across configured profiles."""
     return _analyze_source_identical_translation_changes(
@@ -365,6 +369,7 @@ def analyze_source_identical_changes_for_profiles(
                 input_folder=input_folder,
                 locale_codes=locale_codes,
                 localization_profiles=localization_profiles,
+                require_source=require_source,
             )
         ),
         brand_glossary=brand_glossary,
@@ -457,7 +462,7 @@ def source_affected_translation_entries(
     edits and nested JSON changes retain their actual entry identities.
     """
     root = Path(repo_root).resolve()
-    folder = Path(input_folder).resolve()
+    folder = resolve_input_folder(repo_root, input_folder)
     relative = folder.relative_to(root).as_posix()
 
     def git(*args: str) -> str:
@@ -1214,6 +1219,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ignore_key_patterns=config.ignore_key_patterns,
         source_identical_allowlist=config.source_identical_allowlist,
         accepted_source_identical_translations=config.accepted_source_identical_translations,
+        require_source=True,
     )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":

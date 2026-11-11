@@ -124,6 +124,46 @@ def seed_run_memory(state, report_dir, resume_path=None):
         write_translation_memory(report_dir / "memory.json", memory)
 
 
+def reconcile_run_state(runtime, repo, report_dir, filenames):
+    """Match successful report state to final files, without approving new memory."""
+    from localize.translation_memory import load_translation_memory_strict, memory_source_hash, write_translation_memory
+
+    ledger_path = report_dir / "ledger.json"
+    memory_path = report_dir / "memory.json"
+    ledger = runtime.load_translation_key_ledger(str(ledger_path))
+    memory = load_translation_memory_strict(memory_path)
+    sources = parse_properties_file(str(repo / RESOURCE_PATH / "displayStrings.properties"))[1]
+    invalidated = set()
+    for filename in filenames:
+        locale = runtime.extract_language_from_filename(filename, list(runtime.LANGUAGE_CODES))
+        if locale is None:
+            raise ValueError(f"Unknown final target locale: {filename}")
+        targets = parse_properties_file(str(repo / RESOURCE_PATH / filename))[1]
+        entries = ledger.get(filename, {})
+        for key, value in targets.items():
+            if key not in entries:
+                raise RuntimeError(f"Final key has no validated ledger entry: {filename}:{key}")
+            entry = entries[key]
+            target_hash = runtime.compute_ledger_hash(value)
+            if entry.get("target_hash") == target_hash:
+                continue
+            source = sources.get(key, "")
+            if entry.get("source_hash") != runtime.compute_ledger_hash(source):
+                raise RuntimeError(f"Source changed after validation: {filename}:{key}")
+            entry["target_hash"] = target_hash
+            identity = f"java_properties:{locale}:{memory_source_hash(source)}"
+            cached = memory.entries.get(identity)
+            if cached and cached.get("status") != "conflict" and cached.get("target") != value:
+                invalidated.add(identity)
+        ledger[filename] = entries
+    for identity in invalidated:
+        memory.entries.pop(identity, None)
+    runtime.save_translation_key_ledger(str(ledger_path), ledger)
+    if memory_path.exists():
+        write_translation_memory(memory_path, memory)
+    return sorted(invalidated)
+
+
 def run(args, state):
     repo = state / "bisq"
     prepare_checkout(repo)
@@ -219,6 +259,7 @@ def run(args, state):
     (report_dir / "translations.patch").write_bytes(patch)
     if status:
         raise RuntimeError(f"Quality gate failed. Review {report_dir / 'quality.md'}; do not publish.")
+    reconcile_run_state(runtime, repo, report_dir, filenames)
     for filename in ("ledger.json", "memory.json"):
         if (report_dir / filename).exists():
             temporary = state / f"{filename}.tmp"

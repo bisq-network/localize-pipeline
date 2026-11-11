@@ -39,6 +39,12 @@ The profile uses `gpt-6-sol` with reasoning `none` for translation,
 semantic review. Draft output is capped at 4,096 tokens; truncated drafts fail
 validation. Model calls incur provider charges. Preflight is free of model calls.
 
+The dedicated [Bisq 1 profile](../profiles/bisq1/README.md) contains its config,
+curated terminology glossary and brand names. It reuses applicable Bisq 2
+mappings with Bisq 1 locale aliases and documented German wording choices.
+Terminology guides drafting and review; natural compounds and inflections are
+checked in context instead of requiring literal glossary matches.
+
 This Bisq 1 selection follows a bounded evaluation on 20 October 2026:
 96 comparison requests across German, French, Russian and Japanese, eight
 isolated financial-language QA checks, and 11 actual-adapter canary requests.
@@ -87,6 +93,9 @@ Each invocation preserves its reports under `runs/<timestamp>/`:
 `ledger.json` and `memory.json` advance only after the whole job passes its
 quality gate. Preserve them; failed runs retain their candidate state under
 their own report directory.
+Final semantic review requires the current English source for every changed
+key. After the gate passes, final target hashes are reconciled and stale
+memory entries invalidated before accepted state advances.
 
 If a prior failed run contains independently verified, accepted sample
 translations in its `memory.json`, reuse that exact file with

@@ -8,6 +8,7 @@ run_safeguards:
   sample_max_requests: 60
 input_folder: core/src/main/resources/i18n
 glossary_file_path: glossary.json
+translation_glossary_enforcement: prompt-only
 translation_source: git
 localization_format: java_properties
 localization_layout:
@@ -25,7 +26,8 @@ project_context: >
   Translate for Bisq 1, the original desktop peer-to-peer bitcoin exchange.
   Preserve the meaning of security warnings, multisignature escrow, security
   deposits, mediation, arbitration, and DAO governance. This application uses
-  the Bisq 1 trading protocol; do not introduce Bisq Easy or MuSig terminology.
+  the Bisq 1 trading protocol; do not add Bisq Easy or MuSig concepts absent
+  from the source. Preserve explicit source references to other Bisq products.
   Preserve placeholders, URLs, line breaks, currency codes, and brand names.
   Keep existing terminology and forms of address consistent within each locale.
 model_provider: aisuite
@@ -49,12 +51,53 @@ quality_gate:
   block_on_semantic_qa_warnings: false
   semantic_qa_audit_scope: changed
 brand_technical_glossary:
+  - ACH
+  - Advanced Cash
+  - AliPay
+  - Amazon
   - Bisq
+  - Bisq Easy
   - Bitcoin
+  - Bizum
   - BSQ
   - BTC
+  - Capitual
+  - Cash App
+  - CelPay
+  - Chase QuickPay
   - DAO
+  - HalCash
+  - IMPS
+  - Interac e-Transfer
+  - Liquid
+  - Monese
+  - MoneyBeam (N26)
+  - NEFT
+  - Nequi
+  - Paxum
+  - Paysera
+  - PayTM
+  - Perfect Money
+  - Pix
+  - Popmoney
+  - PromptPay
+  - Revolut
+  - RTGS
+  - Satispay
+  - SEPA
+  - SEPA Instant
+  - Strike
+  - SWIFT
+  - Swish
+  - Tikkie
   - Tor
+  - Uphold
+  - UPI
+  - Verse
+  - WeChat Pay
+  - Wise
+  - Wise-USD
+  - Zelle
 supported_locales:
   - {code: cs, name: Czech}
   - {code: de, name: German}
@@ -72,6 +115,9 @@ supported_locales:
   - {code: zh-hans, name: Simplified Chinese}
   - {code: zh-hant, name: Traditional Chinese}
 style_rules:
+  de:
+    - Use Schiedsrichter for arbitrators and Mediator for mediators in new prose.
+    - Preserve existing quoted UI labels exactly, including legacy Vermittler labels.
   pt-br:
     - Use Brazilian Portuguese spelling and vocabulary.
   pt:

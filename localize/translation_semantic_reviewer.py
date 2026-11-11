@@ -674,6 +674,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
                 locale_codes=locales,
                 localization_format=profile.localization_format,
                 localization_layout=profile.localization_layout,
+                require_source=True,
             )
         )
     if not changes:
