@@ -209,7 +209,8 @@ async def test_a_failed_review_publishes_the_drafts_and_marks_them_for_retry(que
 
 @pytest.mark.asyncio
 async def test_review_corrections_are_limited_to_the_requested_keys(queue):
-    queue.review.return_value = {"key.two": "Wert zwei (geprueft)", "key.other": "Fremd"}
+    # key.one is in the file but was not selected, so the review must not change it.
+    queue.review.return_value = {"key.two": "Wert zwei (geprueft)", "key.one": "Fremd"}
 
     result = await queue.run()
 

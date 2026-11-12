@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from localize import translate_localization_files as runtime
+from localize.ignore_keys import compile_ignore_key_patterns
 from localize.providers.models import OpenAICompatibleProvider
 from localize.run_safeguards import (
     RequestBudgetExceeded, RunSafeguards, SampleValidationError,
@@ -118,6 +119,63 @@ async def test_restart_reuses_accepted_output_without_any_requests(guarded_queue
     result = await q.run()
     assert q.calls == before
     assert len(result.pending_ledger["app_de.properties"]) == 7
+
+
+@pytest.mark.asyncio
+async def test_reused_output_counts_the_file_and_its_keys(guarded_queue):
+    q = guarded_queue
+    first = await q.run()
+    q.target.write_text("# Retained comment\n")
+    second = await q.run()
+    assert tuple(first) == (1, ["app_de.properties"], {}, 7)
+    assert tuple(second) == tuple(first)
+    assert second.run_metrics["changed_values_count"] == 7
+
+
+def _add_second_file(q, name, source_text, target_text):
+    (q.source / f"{name}.properties").write_text(source_text)
+    (q.target.parent / f"{name}_de.properties").write_text(target_text)
+
+
+def _drafts(q):
+    return [key for kind, key in q.calls if kind == "draft"]
+
+
+@pytest.mark.asyncio
+async def test_sample_covers_only_the_configured_number_of_files(guarded_queue):
+    q = guarded_queue
+    _add_second_file(q, "extra", "other0=Other message 0\nother1=Other message 1\n", "")
+    result = await q.run()
+    assert tuple(result)[:3] == (2, ["app_de.properties", "extra_de.properties"], {})
+    # One sampled file with two keys, then every key of both files.
+    assert len(_drafts(q)) == 2 + 7 + 2
+    assert sum(kind == "semantic" for kind, _ in q.calls) == 1
+    assert not set(_drafts(q)[:2]) & {"other0", "other1"}
+
+
+@pytest.mark.asyncio
+async def test_sample_skips_a_file_that_only_copies_ignored_keys(guarded_queue, monkeypatch):
+    """Such a file needs no model call, so it must not use up the sample."""
+    q = guarded_queue
+    monkeypatch.setattr(runtime, "IGNORE_KEY_PATTERNS", compile_ignore_key_patterns([r"^note\."]))
+    # Sorts before app_de.properties, so the sample reaches it first.
+    _add_second_file(q, "aaa", "note.one=Note text\nkey.a=Text a\n", "key.a=Deutscher Text a\n")
+    result = await q.run()
+    assert tuple(result) == (2, ["aaa_de.properties", "app_de.properties"], {}, 7)
+    # The sample drafted two keys of the file that needs translation.
+    assert len(_drafts(q)) == 2 + 7
+    assert ("semantic", 2) in q.calls
+    assert "note.one=Note text" in (q.output / "aaa_de.properties").read_text()
+
+
+@pytest.mark.asyncio
+async def test_sample_stops_before_any_request_when_a_file_has_no_profile(guarded_queue):
+    q = guarded_queue
+    (q.target.parent / "app_xx.properties").write_text("key0=English message 0\n")
+    with pytest.raises(SampleValidationError, match="Sample input validation failed"):
+        await q.run()
+    assert q.calls == []
+    assert not list(q.output.iterdir())
 
 
 @pytest.mark.asyncio
