@@ -32,16 +32,20 @@ This project provides ready-to-deploy scripts and configurations for automated c
 
 **What it does**:
 - Removes stopped containers older than 24 hours
-- Removes dangling images (untagged from builds)
-- Removes unused images older than 7 days (keeps recent builds)
-- Removes unused Docker volumes
+- Removes dangling images (untagged leftovers from builds) older than 7 days
 - Removes build cache older than 7 days
 - Logs cleanup actions with before/after disk metrics
 
 **Safety features**:
 - Preserves running containers and their images
-- Keeps recent builds (7 days) for rollback capability
-- Logs all actions to `logs/docker-cleanup.log`
+- Keeps all tagged images. A rebuild moves the image tag to the new build, so
+  the previous build becomes a dangling image. The 7-day limit counts from
+  when an image was built, so the next cleanup after a rebuild can remove the
+  previous build. To roll back, build an earlier merged commit with
+  `scripts/deploy-build.sh`, or give the previous build its own tag before you
+  rebuild.
+- Never removes Docker volumes
+- Logs all actions to `logs/docker-cleanup.log` in the project directory
 - Provides disk usage metrics
 
 **Installation**:
@@ -249,8 +253,8 @@ Edit `docker-cleanup.sh` to change retention:
 # Keep containers for 48 hours instead of 24
 docker container prune -f --filter "until=48h"
 
-# Keep images for 14 days instead of 7
-docker image prune -a -f --filter "until=336h"  # 336h = 14 days
+# Keep dangling images for 14 days instead of 7
+docker image prune -f --filter "dangling=true" --filter "until=336h"  # 336h = 14 days
 
 # Keep build cache for 30 days
 docker builder prune -f --filter "until=720h"  # 720h = 30 days

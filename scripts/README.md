@@ -30,22 +30,26 @@ Automated Docker cleanup script that prevents disk space accumulation from Docke
 
 **What it does:**
 - Removes stopped containers older than 24 hours
-- Removes dangling images (untagged from builds)
-- Removes unused images older than 7 days (keeps recent builds)
-- Removes unused Docker volumes
+- Removes dangling images (untagged leftovers from builds) older than 7 days
 - Removes build cache older than 7 days
 - Logs all actions with before/after disk metrics
 
 **Safety features:**
 - Preserves running containers and their images
-- Keeps recent builds (7 days) for rollback capability
+- Keeps all tagged images. A rebuild moves the image tag to the new build, so
+  the previous build becomes a dangling image. The 7-day limit counts from
+  when an image was built, so the next cleanup after a rebuild can remove the
+  previous build. To roll back, build an earlier merged commit with
+  `scripts/deploy-build.sh`, or give the previous build its own tag before you
+  rebuild.
+- Never removes Docker volumes
 - Provides detailed logging of all cleanup operations
 
 **Usage:**
 ```bash
-# Manual execution
+# Manual execution from a checkout
 cd /path/to/project
-./docker-cleanup.sh
+./scripts/docker-cleanup.sh
 
 # View cleanup logs
 tail -50 logs/docker-cleanup.log
@@ -83,6 +87,32 @@ sudo ./scripts/setup-cron-cleanup.sh
 - Cron job in `/etc/cron.weekly/docker-cleanup-{project-name}`
 - Logs directory for cleanup output
 
+## Service Health Check
+
+### check-translation-services.sh
+
+Host-side check for the Bisq translation servers. It writes one `OK` or `ALERT`
+line per check. `ALERT` lines go to standard error. The script also appends
+them to `/var/log/translation-service-alerts.log`, but only when it can write
+to that file; otherwise it skips the file without a message. If you rely on
+that file, run the check as root or give its user write access to the file.
+
+**What it checks:**
+- The retired `translator.service` systemd unit is not running (it stops and
+  disables the unit if it is)
+- The number of open translation pull requests stays within the expected limit
+- The latest cron run of each service completed and sent its heartbeat
+- Disk usage of the Docker data directory is at most 85 percent
+
+**Settings (environment variables, all optional):**
+- `LOCALIZE_PIPELINE_ROOT`: main install directory (default `/opt/localize-pipeline`)
+- `LOCALIZE_PIPELINE_MOBILE_ROOT`: mobile install directory (default `/opt/localize-pipeline-mobile`)
+- `MAX_CRON_SUCCESS_AGE_SECONDS`: maximum age of the last completed run (default `93600`)
+- `MAX_RUNNING_AGE_SECONDS`: maximum age of a run that is still in progress (default `10800`)
+
+The script reads `GITHUB_TOKEN` from the `docker/.env` file of the install
+directories to count pull requests.
+
 ## Additional Configuration
 
 For complete disk space management including log rotation and systemd journal limits, see:
@@ -96,8 +126,8 @@ You can adjust the cleanup retention periods by editing `docker-cleanup.sh`:
 # Keep containers for 48 hours instead of 24
 docker container prune -f --filter "until=48h"
 
-# Keep images for 14 days instead of 7
-docker image prune -a -f --filter "until=336h"
+# Keep dangling images for 14 days instead of 7
+docker image prune -f --filter "dangling=true" --filter "until=336h"
 ```
 
 See the [maintenance documentation](../docs/maintenance/disk-space-management.md#customization) for more options.

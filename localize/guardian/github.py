@@ -12,12 +12,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from fnmatch import fnmatchcase
-from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -2151,18 +2150,6 @@ class GitHubWriteBroker:
             transport=self.transport,
             trust_env=False,
         )
-
-    @contextmanager
-    def authenticated_client(self) -> Iterator[httpx.Client]:
-        """Yield a short-lived authenticated client without exposing its token."""
-
-        token = self._mint_token()
-        with self._client(token) as client:
-            self._require_expected_actor(
-                _GitHubHTTP(client, deadline=self.deadline),
-                expected_actor=self.expected_actor,
-            )
-            yield client
 
     def _assert_repository_identity(self, http: _GitHubHTTP) -> None:
         payload = _as_mapping(

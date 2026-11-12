@@ -35,6 +35,24 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Fixed
 
+- Stop the run when the glossary file exists but is not a readable JSON
+  object. Earlier the run continued with an empty glossary and produced
+  translations without the required terms. This also applies to dry runs.
+  `localize check`, `validate`, `doctor` and `smoke` now report such a file as
+  an error, so the smoke-only mode of `update-translations.sh` fails on it
+  too. They warn when a configured `glossary_file_path` does not exist. A
+  missing glossary file is still allowed. **Operators:** an empty file, or a
+  file with a UTF-8 byte order mark, was silently ignored before and is now an
+  error; a glossary without terms must contain `{}`.
+- `scripts/docker-cleanup.sh` writes `logs/docker-cleanup.log` inside the
+  project when it runs from the copy that `setup-cron-cleanup.sh` installs in
+  the project root. That copy logged to the parent directory of the project.
+  **Operators:** an installed copy does not update itself. Run
+  `scripts/setup-cron-cleanup.sh` again, or copy the script again, to get the
+  fix. Earlier cleanup logs are in `logs/` in the parent directory of the
+  project.
+- `scripts/docker-cleanup.sh` no longer stops when `df` lacks the GNU
+  options; its fallback now runs.
 - Retry recognized transient Transifex import failures up to three times
   within `TX_PULL_TIMEOUT`. Permanent and unknown errors still stop the run.
 - Clear queue contents instead of deleting queue roots, so non-root
