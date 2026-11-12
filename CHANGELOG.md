@@ -35,6 +35,18 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Fixed
 
+- Stop the run when the glossary file exists but is not a readable JSON
+  object. Earlier the run continued with an empty glossary and produced
+  translations without the required terms. `localize check` now reports such
+  a file as an error, and warns when a configured `glossary_file_path` does
+  not exist. A missing glossary file is still allowed.
+- `scripts/docker-cleanup.sh` writes `logs/docker-cleanup.log` inside the
+  project when it runs from the copy that `setup-cron-cleanup.sh` installs in
+  the project root. That copy logged to the parent directory of the project.
+  **Operators:** look for earlier cleanup logs in `../logs/` next to the
+  project.
+- `scripts/docker-cleanup.sh` no longer stops when `df` lacks the GNU
+  options; its fallback now runs.
 - Retry recognized transient Transifex import failures up to three times
   within `TX_PULL_TIMEOUT`. Permanent and unknown errors still stop the run.
 - Clear queue contents instead of deleting queue roots, so non-root
