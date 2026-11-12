@@ -49,6 +49,17 @@ def test_docker_cleanup_does_not_prune_shared_volumes_or_tagged_images():
     assert 'docker image prune -f --filter "dangling=true" --filter "until=168h"' in script
 
 
+def test_cleanup_docs_do_not_promise_or_recommend_what_the_script_avoids():
+    """The guides must not tell operators to prune tagged images or volumes."""
+    for guide in ("scripts/README.md", "docs/maintenance/disk-space-management.md"):
+        text = (REPO_ROOT / guide).read_text(encoding="utf-8")
+
+        assert "docker image prune -a" not in text, guide
+        assert "Removes unused Docker volumes" not in text, guide
+        assert "Removes unused images" not in text, guide
+        assert 'docker image prune -f --filter "dangling=true"' in text, guide
+
+
 _DF_TABLE = (
     "Filesystem 1K-blocks Used Available Use% Mounted on\n"
     "/dev/stub 1000000 400000 600000 40% /\n"

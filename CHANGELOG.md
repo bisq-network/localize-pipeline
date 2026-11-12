@@ -43,7 +43,9 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 - `scripts/docker-cleanup.sh` writes `logs/docker-cleanup.log` inside the
   project when it runs from the copy that `setup-cron-cleanup.sh` installs in
   the project root. That copy logged to the parent directory of the project.
-  **Operators:** look for earlier cleanup logs in `../logs/` next to the
+  **Operators:** an installed copy does not update itself. Run
+  `scripts/setup-cron-cleanup.sh` again, or copy the script again, to get the
+  fix. Earlier cleanup logs are in `logs/` in the parent directory of the
   project.
 - `scripts/docker-cleanup.sh` no longer stops when `df` lacks the GNU
   options; its fallback now runs.
