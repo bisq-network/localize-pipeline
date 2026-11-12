@@ -48,7 +48,7 @@ from localize.formats.metadata import JAVA_PROPERTIES_FORMAT, LocalizationFormat
 from localize.formats.layouts import LocalizationLayout
 from localize.formats.profiles import LocalizationProfile
 from localize.providers.models import OpenAICompatibleProvider
-from localize.run_safeguards import RequestBudgetExceeded, SampleValidationError
+from localize.run_safeguards import RequestBudgetExceeded, RunSafeguards, SampleValidationError
 from localize.formats.placeholders import (
     extract_placeholder_tokens,
     protect_placeholders,
@@ -2624,6 +2624,55 @@ def _discover_queue_files(
     return localization_files, skipped_files
 
 
+async def _run_bounded_sample(
+        translation_queue_folder: str,
+        glossary_file_path: str,
+        safeguards: RunSafeguards,
+) -> None:
+    """Translate a small sample of the queue before the full run may start.
+
+    The sample runs the normal queue processing on a copy of the queue, within
+    its own request budget, and writes its diagnostics to
+    ``logs/sample_validation_summary.json``.
+
+    Raises:
+        SampleValidationError: The sample skipped a file, a key failed, or the
+            semantic check of the sample found a blocking problem.
+        RequestBudgetExceeded: The sample used up its request budget.
+    """
+    # Run the normal translation/serialization validators in an isolated
+    # output directory. Do not advance the source ledger for partial work.
+    sample_summary = {}
+    with tempfile.TemporaryDirectory(prefix="localize-sample-") as scratch:
+        sample_input = os.path.join(scratch, "input")
+        output = os.path.join(scratch, "output")
+        shutil.copytree(translation_queue_folder, sample_input)
+        os.makedirs(output)
+        try:
+            with safeguards.sample_budget():
+                sample_result = await process_translation_queue(
+                    sample_input, output, glossary_file_path,
+                    validation_summary=sample_summary, _sample=True,
+                )
+            if sample_result[2]:
+                raise SampleValidationError(
+                    f"Sample validation failed: {sample_result[2]}"
+                )
+        except (RequestBudgetExceeded, SampleValidationError):
+            write_translation_validation_summary(
+                os.path.join(PROJECT_ROOT_DIR, "logs", "sample_validation_summary.json"),
+                validation_files=sample_summary,
+                skipped_files={"sample": ["Full run withheld; inspect sample diagnostics."]},
+            )
+            raise
+    write_translation_validation_summary(
+        os.path.join(PROJECT_ROOT_DIR, "logs", "sample_validation_summary.json"),
+        validation_files=sample_summary, skipped_files={},
+    )
+    logger.info("Bounded sample passed for %d file(s); continuing with the queue.",
+                sample_result[0])
+
+
 async def process_translation_queue(
         translation_queue_folder: str,
         translated_queue_folder: str,
@@ -2650,37 +2699,7 @@ async def process_translation_queue(
     localization_files, skipped_files = _discover_queue_files(translation_queue_folder)
     safeguards = config.run_safeguards if not DRY_RUN else None
     if safeguards and not _sample:
-        # Run the normal translation/serialization validators in an isolated
-        # output directory. Do not advance the source ledger for partial work.
-        sample_summary = {}
-        with tempfile.TemporaryDirectory(prefix="localize-sample-") as scratch:
-            sample_input = os.path.join(scratch, "input")
-            output = os.path.join(scratch, "output")
-            shutil.copytree(translation_queue_folder, sample_input)
-            os.makedirs(output)
-            try:
-                with safeguards.sample_budget():
-                    sample_result = await process_translation_queue(
-                        sample_input, output, glossary_file_path,
-                        validation_summary=sample_summary, _sample=True,
-                    )
-                if sample_result[2]:
-                    raise SampleValidationError(
-                        f"Sample validation failed: {sample_result[2]}"
-                    )
-            except (RequestBudgetExceeded, SampleValidationError):
-                write_translation_validation_summary(
-                    os.path.join(PROJECT_ROOT_DIR, "logs", "sample_validation_summary.json"),
-                    validation_files=sample_summary,
-                    skipped_files={"sample": ["Full run withheld; inspect sample diagnostics."]},
-                )
-                raise
-        write_translation_validation_summary(
-            os.path.join(PROJECT_ROOT_DIR, "logs", "sample_validation_summary.json"),
-            validation_files=sample_summary, skipped_files={},
-        )
-        logger.info("Bounded sample passed for %d file(s); continuing with the queue.",
-                    sample_result[0])
+        await _run_bounded_sample(translation_queue_folder, glossary_file_path, safeguards)
 
     # Load the glossary from the JSON file
     glossary = load_glossary(glossary_file_path)
