@@ -2796,7 +2796,7 @@ def _resolve_queue_file(
 
 def _check_queue_file_before_translation(
         run: _QueueRun,
-        file: _QueueFile,
+        queue_file: _QueueFile,
 ) -> Optional[Tuple[Dict[str, Dict[str, str]], Set[str], Set[str]]]:
     """Validate and lint one queued file before any translation work.
 
@@ -2806,11 +2806,11 @@ def _check_queue_file_before_translation(
         ``None`` when the file has validation or lint errors; the errors are
         then recorded in ``run.skipped_files``.
     """
-    translation_file = file.translation_file
-    translation_file_path = file.translation_file_path
-    source_file_path = file.source_file_path
-    localization_format = file.localization_format
-    adapter = file.adapter
+    translation_file = queue_file.translation_file
+    translation_file_path = queue_file.translation_file_path
+    source_file_path = queue_file.source_file_path
+    localization_format = queue_file.localization_format
+    adapter = queue_file.adapter
     # --- Pre-flight Validator ---
     file_ledger_entries = run.key_ledger.get(translation_file, {})
     original_input_file_path = os.path.join(INPUT_FOLDER, translation_file)
@@ -2853,7 +2853,7 @@ def _check_queue_file_before_translation(
 
 def _finish_file_without_translation(
         run: _QueueRun,
-        file: _QueueFile,
+        queue_file: _QueueFile,
         parsed_lines: List[Dict],
         source_translations: Dict[str, str],
         target_translations: Dict[str, str],
@@ -2870,10 +2870,10 @@ def _finish_file_without_translation(
         run). ``None`` when there was nothing to write, in a sample run, or
         when the final validation withheld the file.
     """
-    translation_file = file.translation_file
-    localization_format = file.localization_format
-    adapter = file.adapter
-    enforced_language_glossary = file.enforced_language_glossary
+    translation_file = queue_file.translation_file
+    localization_format = queue_file.localization_format
+    adapter = queue_file.adapter
+    enforced_language_glossary = queue_file.enforced_language_glossary
     # Refresh ledger baseline even when no translation was required.
     run.key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
     if not run.sample and not run.safeguards:
@@ -2943,7 +2943,7 @@ def _select_sample_keys(
 
 def _checkpoint_fingerprint(
         run: _QueueRun,
-        file: _QueueFile,
+        queue_file: _QueueFile,
         source_translations: Dict[str, str],
         original_target_translations: Dict[str, str],
         keys_to_translate: List[str],
@@ -2953,11 +2953,11 @@ def _checkpoint_fingerprint(
     A validated output or a provisional candidate is reused only for an equal
     fingerprint: same source, target, selected keys, glossary and models.
     """
-    with open(file.translation_file_path, encoding="utf-8") as stream:
+    with open(queue_file.translation_file_path, encoding="utf-8") as stream:
         checkpoint_input = stream.read()
     return run.safeguards.fingerprint({
         "stage": "sample" if run.sample else "translation",
-        "file": file.translation_file, "format": file.localization_format.id,
+        "file": queue_file.translation_file, "format": queue_file.localization_format.id,
         "source": source_translations, "target": original_target_translations,
         "target_content": checkpoint_input,
         "keys": keys_to_translate, "glossary": run.glossary,
@@ -2972,13 +2972,13 @@ def _checkpoint_fingerprint(
 
 def _reuse_accepted_output(
         run: _QueueRun,
-        file: _QueueFile,
+        queue_file: _QueueFile,
         accepted: Mapping[str, object],
         source_translations: Dict[str, str],
         original_target_translations: Dict[str, str],
 ) -> None:
     """Publish the output that an earlier run validated for the same input."""
-    translation_file = file.translation_file
+    translation_file = queue_file.translation_file
     translated_file_path = os.path.join(run.translated_queue_folder, translation_file)
     write_text_atomic(translated_file_path, accepted["content"])
     if run.validation_summary is not None:
@@ -3115,7 +3115,7 @@ class _DraftResult:
 
 async def _draft_file_translations(
         run: _QueueRun,
-        file: _QueueFile,
+        queue_file: _QueueFile,
         checkpoint: Optional[str],
         texts_to_translate: List[str],
         indices: List[int],
@@ -3130,11 +3130,11 @@ async def _draft_file_translations(
     Values come from provisional candidates of an earlier run, from the
     translation memory, or from one model request per remaining key.
     """
-    translation_file = file.translation_file
-    localization_format = file.localization_format
-    language_code = file.language_code
-    target_language = file.target_language
-    memory_context_fingerprint = file.memory_context_fingerprint
+    translation_file = queue_file.translation_file
+    localization_format = queue_file.localization_format
+    language_code = queue_file.language_code
+    target_language = queue_file.target_language
+    memory_context_fingerprint = queue_file.memory_context_fingerprint
     # Provisional output is bound to the same complete input/policy as
     # file checkpoints, but must still pass final validation and gates.
     candidate_translations = (
@@ -3225,10 +3225,10 @@ async def _draft_file_translations(
     )
 
 
-def _parse_draft_content(file: _QueueFile, draft_content: str) -> Dict[str, str]:
+def _parse_draft_content(queue_file: _QueueFile, draft_content: str) -> Dict[str, str]:
     """Return the key-value pairs of a serialized draft file."""
-    localization_format = file.localization_format
-    adapter = file.adapter
+    localization_format = queue_file.localization_format
+    adapter = queue_file.adapter
     # We need a dictionary of the draft translations to build targeted context for each chunk.
     # This is easier than parsing the string repeatedly.
     temp_draft_path = ""
@@ -3249,7 +3249,7 @@ def _parse_draft_content(file: _QueueFile, draft_content: str) -> Dict[str, str]
 
 
 def _merge_review_chunk(
-        file: _QueueFile,
+        queue_file: _QueueFile,
         chunk_index: int,
         corrected_chunk: object,
         key_chunk: List[str],
@@ -3264,9 +3264,9 @@ def _merge_review_chunk(
     review of its chunk failed, returned no usable result, or left the key out.
     A correction that breaks a required glossary term is replaced by the draft.
     """
-    translation_file = file.translation_file
-    localization_format = file.localization_format
-    enforced_language_glossary = file.enforced_language_glossary
+    translation_file = queue_file.translation_file
+    localization_format = queue_file.localization_format
+    enforced_language_glossary = queue_file.enforced_language_glossary
     if isinstance(corrected_chunk, Exception):
         logger.error(
             "Holistic review task failed for chunk %d in '%s'.",
@@ -3338,7 +3338,7 @@ def _merge_review_chunk(
 
 async def _review_file_draft(
         run: _QueueRun,
-        file: _QueueFile,
+        queue_file: _QueueFile,
         keys_to_translate: List[str],
         review_keys: List[str],
         model_failed_keys: Set[str],
@@ -3353,11 +3353,11 @@ async def _review_file_draft(
     Returns:
         The keys whose review failed. They keep their draft value.
     """
-    translation_file = file.translation_file
-    localization_format = file.localization_format
-    adapter = file.adapter
-    target_language = file.target_language
-    language_glossary = file.language_glossary
+    translation_file = queue_file.translation_file
+    localization_format = queue_file.localization_format
+    adapter = queue_file.adapter
+    target_language = queue_file.target_language
+    language_glossary = queue_file.language_glossary
     # --- Holistic Review Step ---
     # Exhausted drafts remain failed and retryable. Sending their source
     # fallbacks to review cannot clear that failure, and one rejected
@@ -3400,7 +3400,7 @@ async def _review_file_draft(
             keys_to_review=key_chunk,
             semaphore=run.semaphore,
             rate_limiter=run.rate_limiter,
-            style_rules_text=file.style_rules_text,
+            style_rules_text=queue_file.style_rules_text,
             localization_format=localization_format,
             translation_glossary=language_glossary,
             translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
@@ -3415,20 +3415,20 @@ async def _review_file_draft(
             raise result
     for i, (corrected_chunk, key_chunk) in enumerate(zip(review_results, key_chunks)):
         _merge_review_chunk(
-            file, i, corrected_chunk, key_chunk, source_translations,
+            queue_file, i, corrected_chunk, key_chunk, source_translations,
             draft_translations, final_corrected_translations, review_failed_keys,
         )
     return review_failed_keys
 
 
 def _apply_review_corrections(
-        file: _QueueFile,
+        queue_file: _QueueFile,
         draft_lines: List[Dict],
         source_translations: Dict[str, str],
         final_corrected_translations: Dict[str, str],
 ) -> None:
     """Write the reviewed values into the draft lines of one file."""
-    adapter = file.adapter
+    adapter = queue_file.adapter
     # Always apply the results from the review stage, which includes fallbacks to draft for failed chunks.
     logger.info("Applying corrected translations (including any draft fallbacks).")
 
@@ -3488,21 +3488,21 @@ async def _process_queue_file(
     validation_summary = run.validation_summary
     run_metrics = run.run_metrics
     skipped_files = run.skipped_files
-    file = _resolve_queue_file(run, translation_file, localization_profile)
-    if file is None:
+    queue_file = _resolve_queue_file(run, translation_file, localization_profile)
+    if queue_file is None:
         return None
-    localization_format = file.localization_format
-    adapter = file.adapter
-    language_code = file.language_code
-    target_language = file.target_language
-    enforced_language_glossary = file.enforced_language_glossary
-    memory_context_fingerprint = file.memory_context_fingerprint
-    translation_file_path = file.translation_file_path
-    source_file_path = file.source_file_path
+    localization_format = queue_file.localization_format
+    adapter = queue_file.adapter
+    language_code = queue_file.language_code
+    target_language = queue_file.target_language
+    enforced_language_glossary = queue_file.enforced_language_glossary
+    memory_context_fingerprint = queue_file.memory_context_fingerprint
+    translation_file_path = queue_file.translation_file_path
+    source_file_path = queue_file.source_file_path
 
     logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
 
-    preflight = _check_queue_file_before_translation(run, file)
+    preflight = _check_queue_file_before_translation(run, queue_file)
     if preflight is None:
         return None
     file_ledger_entries, raw_git_changed_keys, newly_added_keys = preflight
@@ -3572,7 +3572,7 @@ async def _process_queue_file(
     )
     if not texts_to_translate:
         return _finish_file_without_translation(
-            run, file, parsed_lines, source_translations, target_translations,
+            run, queue_file, parsed_lines, source_translations, target_translations,
             original_target_translations, ignored_keys_requiring_output,
         )
 
@@ -3585,19 +3585,19 @@ async def _process_queue_file(
     checkpoint = None
     if safeguards:
         checkpoint = _checkpoint_fingerprint(
-            run, file, source_translations, original_target_translations, keys_to_translate,
+            run, queue_file, source_translations, original_target_translations, keys_to_translate,
         )
         accepted = safeguards.lookup(checkpoint)
         if accepted is not None:
             _reuse_accepted_output(
-                run, file, accepted, source_translations, original_target_translations,
+                run, queue_file, accepted, source_translations, original_target_translations,
             )
             logger.info("Reused validated output for '%s'; no draft/review requests.",
                         translation_file)
             return len(keys_to_translate)
 
     draft = await _draft_file_translations(
-        run, file, checkpoint, texts_to_translate, indices, keys_to_translate,
+        run, queue_file, checkpoint, texts_to_translate, indices, keys_to_translate,
         target_translations, source_translations, original_target_translations,
         file_ledger_entries,
     )
@@ -3618,18 +3618,18 @@ async def _process_queue_file(
     )
     draft_content = adapter.reassemble_file(draft_lines)
 
-    draft_translations = _parse_draft_content(file, draft_content)
+    draft_translations = _parse_draft_content(queue_file, draft_content)
 
     final_corrected_translations = {
         key: candidate_translations[key] for key in candidate_keys
     }
     review_failed_keys = await _review_file_draft(
-        run, file, keys_to_translate, review_keys, model_failed_keys,
+        run, queue_file, keys_to_translate, review_keys, model_failed_keys,
         source_translations, draft_translations, final_corrected_translations,
     )
     model_failed_keys.update(review_failed_keys)
 
-    _apply_review_corrections(file, draft_lines, source_translations, final_corrected_translations)
+    _apply_review_corrections(queue_file, draft_lines, source_translations, final_corrected_translations)
 
     # --- Per-Key Validation ---
     # Extract final translations from updated lines
