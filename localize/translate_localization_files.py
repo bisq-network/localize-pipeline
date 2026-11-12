@@ -3225,6 +3225,248 @@ async def _draft_file_translations(
     )
 
 
+def _parse_draft_content(file: _QueueFile, draft_content: str) -> Dict[str, str]:
+    """Return the key-value pairs of a serialized draft file."""
+    localization_format = file.localization_format
+    adapter = file.adapter
+    # We need a dictionary of the draft translations to build targeted context for each chunk.
+    # This is easier than parsing the string repeatedly.
+    temp_draft_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode='w',
+                delete=False,
+                suffix=localization_format.file_extension,
+                encoding='utf-8'
+        ) as temp_f:
+            temp_f.write(draft_content)
+            temp_draft_path = temp_f.name
+        _, draft_translations = adapter.parse_file(temp_draft_path)
+    finally:
+        if temp_draft_path and os.path.exists(temp_draft_path):
+            os.remove(temp_draft_path)
+    return draft_translations
+
+
+def _merge_review_chunk(
+        file: _QueueFile,
+        chunk_index: int,
+        corrected_chunk: object,
+        key_chunk: List[str],
+        source_translations: Dict[str, str],
+        draft_translations: Dict[str, str],
+        final_corrected_translations: Dict[str, str],
+        review_failed_keys: Set[str],
+) -> None:
+    """Take the review result of one chunk into the corrected translations.
+
+    A key keeps its draft value and is added to ``review_failed_keys`` when the
+    review of its chunk failed, returned no usable result, or left the key out.
+    A correction that breaks a required glossary term is replaced by the draft.
+    """
+    translation_file = file.translation_file
+    localization_format = file.localization_format
+    enforced_language_glossary = file.enforced_language_glossary
+    if isinstance(corrected_chunk, Exception):
+        logger.error(
+            "Holistic review task failed for chunk %d in '%s'.",
+            chunk_index + 1,
+            translation_file,
+            exc_info=(type(corrected_chunk), corrected_chunk, corrected_chunk.__traceback__),
+        )
+        review_failed_keys.update(key_chunk)
+        for key in key_chunk:
+            final_corrected_translations[key] = draft_translations.get(key, "")
+    elif corrected_chunk is not None:
+        if not isinstance(corrected_chunk, Mapping):
+            logger.warning(
+                "Holistic review returned unexpected %s for chunk %d; keeping draft values.",
+                type(corrected_chunk).__name__,
+                chunk_index + 1,
+            )
+            review_failed_keys.update(key_chunk)
+            for key in key_chunk:
+                final_corrected_translations[key] = draft_translations.get(key, "")
+            return
+        if corrected_chunk:
+            key_chunk_set = set(key_chunk)
+            scoped = {}
+            for key, value in corrected_chunk.items():
+                if key not in key_chunk_set:
+                    continue
+                selected_value = _prefer_glossary_compliant_draft(
+                    source_translations.get(key, ""),
+                    draft_translations.get(key, ""),
+                    value,
+                    enforced_language_glossary,
+                    decode_properties_whitespace=localization_format.id == JAVA_PROPERTIES_FORMAT.id,
+                )
+                if selected_value != value:
+                    logger.warning(
+                        "Holistic review broke a required glossary mapping for key '%s'; "
+                        "keeping the compliant draft.",
+                        key,
+                    )
+                scoped[key] = selected_value
+            dropped = set(corrected_chunk) - key_chunk_set
+            if dropped:
+                logger.warning(
+                    "Holistic review returned %d out-of-scope key(s); ignored.",
+                    len(dropped),
+                )
+            final_corrected_translations.update(scoped)
+            missing = key_chunk_set - set(scoped)
+            if missing:
+                logger.warning(
+                    "Holistic review omitted %d key(s) from chunk %d; keeping draft values.",
+                    len(missing),
+                    chunk_index + 1,
+                )
+                review_failed_keys.update(missing)
+                for key in missing:
+                    final_corrected_translations[key] = draft_translations.get(key, "")
+        else:
+            logger.info("Holistic review returned no corrections for this chunk; keeping draft values.")
+            for key in key_chunk:
+                final_corrected_translations[key] = draft_translations.get(key, "")
+    else:
+        logger.warning(f"Holistic review for chunk {chunk_index + 1} failed; keeping draft values for this chunk.")
+        review_failed_keys.update(key_chunk)
+        for key in key_chunk:
+            final_corrected_translations[key] = draft_translations.get(key, "")
+
+
+async def _review_file_draft(
+        run: _QueueRun,
+        file: _QueueFile,
+        keys_to_translate: List[str],
+        review_keys: List[str],
+        model_failed_keys: Set[str],
+        source_translations: Dict[str, str],
+        draft_translations: Dict[str, str],
+        final_corrected_translations: Dict[str, str],
+) -> Set[str]:
+    """Send the drafts of one file to the holistic review, in chunks.
+
+    The reviewed value of each key is stored in ``final_corrected_translations``.
+
+    Returns:
+        The keys whose review failed. They keep their draft value.
+    """
+    translation_file = file.translation_file
+    localization_format = file.localization_format
+    adapter = file.adapter
+    target_language = file.target_language
+    language_glossary = file.language_glossary
+    # --- Holistic Review Step ---
+    # Exhausted drafts remain failed and retryable. Sending their source
+    # fallbacks to review cannot clear that failure, and one rejected
+    # fallback would invalidate the review of the entire healthy chunk.
+    # Reused provisional candidates were reviewed when they were saved.
+    keys_to_review = [key for key in review_keys if key not in model_failed_keys]
+    logger.info(f"Performing holistic review for {len(keys_to_review)} keys in '{translation_file}'...")
+
+    # Create chunks of keys. Translation-memory hits stay in scope so they
+    # receive the same review/glossary scrutiny as fresh model output.
+    key_chunks = [
+        keys_to_review[i:i + HOLISTIC_REVIEW_CHUNK_SIZE]
+        for i in range(0, len(keys_to_review), HOLISTIC_REVIEW_CHUNK_SIZE)
+    ]
+
+    review_inputs = []
+    newly_translated_keys = set(keys_to_translate)
+    for key_chunk in key_chunks:
+        context_keys = _select_holistic_review_context_keys(
+            source_translations,
+            draft_translations,
+            key_chunk,
+            localization_format,
+            excluded_context_keys=newly_translated_keys,
+        )
+        review_content_keys = [*key_chunk, *context_keys]
+        review_inputs.append((key_chunk, review_content_keys))
+
+    review_results = await asyncio.gather(
+        *[holistic_review_async(
+            source_content=adapter.build_review_content(
+                source_translations,
+                review_content_keys,
+            ),
+            translated_content=adapter.build_review_content(
+                draft_translations,
+                review_content_keys,
+            ),
+            target_language=target_language,
+            keys_to_review=key_chunk,
+            semaphore=run.semaphore,
+            rate_limiter=run.rate_limiter,
+            style_rules_text=file.style_rules_text,
+            localization_format=localization_format,
+            translation_glossary=language_glossary,
+            translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
+            source_translations=source_translations,
+        ) for key_chunk, review_content_keys in review_inputs],
+        return_exceptions=True,
+    )
+
+    review_failed_keys = set()
+    for result in review_results:
+        if isinstance(result, RequestBudgetExceeded):
+            raise result
+    for i, (corrected_chunk, key_chunk) in enumerate(zip(review_results, key_chunks)):
+        _merge_review_chunk(
+            file, i, corrected_chunk, key_chunk, source_translations,
+            draft_translations, final_corrected_translations, review_failed_keys,
+        )
+    return review_failed_keys
+
+
+def _apply_review_corrections(
+        file: _QueueFile,
+        draft_lines: List[Dict],
+        source_translations: Dict[str, str],
+        final_corrected_translations: Dict[str, str],
+) -> None:
+    """Write the reviewed values into the draft lines of one file."""
+    adapter = file.adapter
+    # Always apply the results from the review stage, which includes fallbacks to draft for failed chunks.
+    logger.info("Applying corrected translations (including any draft fallbacks).")
+
+    # Debug: Check if restored translations have real placeholders or protection tokens
+    sample_keys = list(final_corrected_translations.keys())[:3]
+    for sample_key in sample_keys:
+        sample_value = final_corrected_translations.get(sample_key, "")
+        has_protection_tokens = "__PH_" in sample_value
+        has_real_placeholders = "{0}" in sample_value or "{1}" in sample_value or "{2}" in sample_value
+        logger.debug(f"Sample restored translation for '{sample_key}': '{sample_value}' "
+                    f"(has_tokens={has_protection_tokens}, has_placeholders={has_real_placeholders})")
+
+    logger.debug("--- ALL CORRECTED JSON FROM REVIEW (first 3 keys) ---")
+    for key in sample_keys:
+        logger.debug(f"  {key}={final_corrected_translations.get(key, '')}")
+
+    # Track changes made by holistic review for INFO-level logging
+    review_changes = 0
+    for line in draft_lines:
+        if line['type'] == 'entry':
+            key = line.get('key')
+            if key in final_corrected_translations:
+                new_value = _escape_output_value(
+                    adapter,
+                    source_translations,
+                    key,
+                    final_corrected_translations[key],
+                )
+                old_value = line['value']
+                if old_value != new_value:
+                    review_changes += 1
+                    logger.debug(f"Review changed key '{key}': FROM '{old_value}' TO '{new_value}'")
+                line['value'] = new_value
+
+    if review_changes > 0:
+        logger.info(f"Holistic review modified {review_changes} translations out of {len(final_corrected_translations)} reviewed keys.")
+
+
 async def _process_queue_file(
         run: _QueueRun,
         translation_file: str,
@@ -3241,8 +3483,6 @@ async def _process_queue_file(
     translated_queue_folder = run.translated_queue_folder
     key_ledger = run.key_ledger
     translation_memory = run.translation_memory
-    semaphore = run.semaphore
-    rate_limiter = run.rate_limiter
     safeguards = run.safeguards
     _sample = run.sample
     validation_summary = run.validation_summary
@@ -3255,8 +3495,6 @@ async def _process_queue_file(
     adapter = file.adapter
     language_code = file.language_code
     target_language = file.target_language
-    style_rules_text_for_review = file.style_rules_text
-    language_glossary = file.language_glossary
     enforced_language_glossary = file.enforced_language_glossary
     memory_context_fingerprint = file.memory_context_fingerprint
     translation_file_path = file.translation_file_path
@@ -3380,188 +3618,18 @@ async def _process_queue_file(
     )
     draft_content = adapter.reassemble_file(draft_lines)
 
-    # We need a dictionary of the draft translations to build targeted context for each chunk.
-    # This is easier than parsing the string repeatedly.
-    temp_draft_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-                mode='w',
-                delete=False,
-                suffix=localization_format.file_extension,
-                encoding='utf-8'
-        ) as temp_f:
-            temp_f.write(draft_content)
-            temp_draft_path = temp_f.name
-        _, draft_translations = adapter.parse_file(temp_draft_path)
-    finally:
-        if temp_draft_path and os.path.exists(temp_draft_path):
-            os.remove(temp_draft_path)
+    draft_translations = _parse_draft_content(file, draft_content)
 
     final_corrected_translations = {
         key: candidate_translations[key] for key in candidate_keys
     }
-    # --- Holistic Review Step ---
-    # Exhausted drafts remain failed and retryable. Sending their source
-    # fallbacks to review cannot clear that failure, and one rejected
-    # fallback would invalidate the review of the entire healthy chunk.
-    # Reused provisional candidates were reviewed when they were saved.
-    keys_to_review = [key for key in review_keys if key not in model_failed_keys]
-    logger.info(f"Performing holistic review for {len(keys_to_review)} keys in '{translation_file}'...")
-
-    # Create chunks of keys. Translation-memory hits stay in scope so they
-    # receive the same review/glossary scrutiny as fresh model output.
-    key_chunks = [
-        keys_to_review[i:i + HOLISTIC_REVIEW_CHUNK_SIZE]
-        for i in range(0, len(keys_to_review), HOLISTIC_REVIEW_CHUNK_SIZE)
-    ]
-
-    review_inputs = []
-    newly_translated_keys = set(keys_to_translate)
-    for key_chunk in key_chunks:
-        context_keys = _select_holistic_review_context_keys(
-            source_translations,
-            draft_translations,
-            key_chunk,
-            localization_format,
-            excluded_context_keys=newly_translated_keys,
-        )
-        review_content_keys = [*key_chunk, *context_keys]
-        review_inputs.append((key_chunk, review_content_keys))
-
-    review_results = await asyncio.gather(
-        *[holistic_review_async(
-            source_content=adapter.build_review_content(
-                source_translations,
-                review_content_keys,
-            ),
-            translated_content=adapter.build_review_content(
-                draft_translations,
-                review_content_keys,
-            ),
-            target_language=target_language,
-            keys_to_review=key_chunk,
-            semaphore=semaphore,
-            rate_limiter=rate_limiter,
-            style_rules_text=style_rules_text_for_review,
-            localization_format=localization_format,
-            translation_glossary=language_glossary,
-            translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
-            source_translations=source_translations,
-        ) for key_chunk, review_content_keys in review_inputs],
-        return_exceptions=True,
+    review_failed_keys = await _review_file_draft(
+        run, file, keys_to_translate, review_keys, model_failed_keys,
+        source_translations, draft_translations, final_corrected_translations,
     )
-
-    review_failed_keys = set()
-    for result in review_results:
-        if isinstance(result, RequestBudgetExceeded):
-            raise result
-    for i, (corrected_chunk, key_chunk) in enumerate(zip(review_results, key_chunks)):
-        if isinstance(corrected_chunk, Exception):
-            logger.error(
-                "Holistic review task failed for chunk %d in '%s'.",
-                i + 1,
-                translation_file,
-                exc_info=(type(corrected_chunk), corrected_chunk, corrected_chunk.__traceback__),
-            )
-            review_failed_keys.update(key_chunk)
-            for key in key_chunk:
-                final_corrected_translations[key] = draft_translations.get(key, "")
-        elif corrected_chunk is not None:
-            if not isinstance(corrected_chunk, Mapping):
-                logger.warning(
-                    "Holistic review returned unexpected %s for chunk %d; keeping draft values.",
-                    type(corrected_chunk).__name__,
-                    i + 1,
-                )
-                review_failed_keys.update(key_chunk)
-                for key in key_chunk:
-                    final_corrected_translations[key] = draft_translations.get(key, "")
-                continue
-            if corrected_chunk:
-                key_chunk_set = set(key_chunk)
-                scoped = {}
-                for key, value in corrected_chunk.items():
-                    if key not in key_chunk_set:
-                        continue
-                    selected_value = _prefer_glossary_compliant_draft(
-                        source_translations.get(key, ""),
-                        draft_translations.get(key, ""),
-                        value,
-                        enforced_language_glossary,
-                        decode_properties_whitespace=localization_format.id == JAVA_PROPERTIES_FORMAT.id,
-                    )
-                    if selected_value != value:
-                        logger.warning(
-                            "Holistic review broke a required glossary mapping for key '%s'; "
-                            "keeping the compliant draft.",
-                            key,
-                        )
-                    scoped[key] = selected_value
-                dropped = set(corrected_chunk) - key_chunk_set
-                if dropped:
-                    logger.warning(
-                        "Holistic review returned %d out-of-scope key(s); ignored.",
-                        len(dropped),
-                    )
-                final_corrected_translations.update(scoped)
-                missing = key_chunk_set - set(scoped)
-                if missing:
-                    logger.warning(
-                        "Holistic review omitted %d key(s) from chunk %d; keeping draft values.",
-                        len(missing),
-                        i + 1,
-                    )
-                    review_failed_keys.update(missing)
-                    for key in missing:
-                        final_corrected_translations[key] = draft_translations.get(key, "")
-            else:
-                logger.info("Holistic review returned no corrections for this chunk; keeping draft values.")
-                for key in key_chunk:
-                    final_corrected_translations[key] = draft_translations.get(key, "")
-        else:
-            logger.warning(f"Holistic review for chunk {i + 1} failed; keeping draft values for this chunk.")
-            review_failed_keys.update(key_chunk)
-            for key in key_chunk:
-                final_corrected_translations[key] = draft_translations.get(key, "")
-
     model_failed_keys.update(review_failed_keys)
 
-    # Always apply the results from the review stage, which includes fallbacks to draft for failed chunks.
-    logger.info("Applying corrected translations (including any draft fallbacks).")
-
-    # Debug: Check if restored translations have real placeholders or protection tokens
-    sample_keys = list(final_corrected_translations.keys())[:3]
-    for sample_key in sample_keys:
-        sample_value = final_corrected_translations.get(sample_key, "")
-        has_protection_tokens = "__PH_" in sample_value
-        has_real_placeholders = "{0}" in sample_value or "{1}" in sample_value or "{2}" in sample_value
-        logger.debug(f"Sample restored translation for '{sample_key}': '{sample_value}' "
-                    f"(has_tokens={has_protection_tokens}, has_placeholders={has_real_placeholders})")
-
-    logger.debug("--- ALL CORRECTED JSON FROM REVIEW (first 3 keys) ---")
-    for key in sample_keys:
-        logger.debug(f"  {key}={final_corrected_translations.get(key, '')}")
-
-    # Track changes made by holistic review for INFO-level logging
-    review_changes = 0
-    for line in draft_lines:
-        if line['type'] == 'entry':
-            key = line.get('key')
-            if key in final_corrected_translations:
-                new_value = _escape_output_value(
-                    adapter,
-                    source_translations,
-                    key,
-                    final_corrected_translations[key],
-                )
-                old_value = line['value']
-                if old_value != new_value:
-                    review_changes += 1
-                    logger.debug(f"Review changed key '{key}': FROM '{old_value}' TO '{new_value}'")
-                line['value'] = new_value
-
-    if review_changes > 0:
-        logger.info(f"Holistic review modified {review_changes} translations out of {len(final_corrected_translations)} reviewed keys.")
+    _apply_review_corrections(file, draft_lines, source_translations, final_corrected_translations)
 
     # --- Per-Key Validation ---
     # Extract final translations from updated lines
