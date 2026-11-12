@@ -9,9 +9,10 @@
 #
 # Safety features:
 # - Preserves running containers and their images
-# - Keeps tagged images. A rebuild leaves the previous build untagged, and it
-#   is removed after 7 days. Roll back by building an earlier merged commit
-#   with scripts/deploy-build.sh.
+# - Keeps tagged images. A rebuild leaves the previous build untagged. The
+#   7-day limit counts from when an image was built, so the next cleanup can
+#   remove that build. Roll back by building an earlier merged commit with
+#   scripts/deploy-build.sh.
 # - Logs all actions with before/after disk metrics
 #
 # Usage:
@@ -30,8 +31,11 @@ set -euo pipefail
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The script runs from <project>/scripts/ in a checkout, or from the project
-# root when setup-cron-cleanup.sh installed a copy there.
-if [ "$(basename "$SCRIPT_DIR")" = "scripts" ]; then
+# root when setup-cron-cleanup.sh installed a copy there. The project root holds
+# scripts/docker-cleanup.sh, which also covers a project folder named scripts.
+if [ -f "$SCRIPT_DIR/scripts/docker-cleanup.sh" ]; then
+    PROJECT_ROOT="$SCRIPT_DIR"
+elif [ "$(basename "$SCRIPT_DIR")" = "scripts" ]; then
     PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 else
     PROJECT_ROOT="$SCRIPT_DIR"

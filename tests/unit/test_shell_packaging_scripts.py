@@ -80,14 +80,21 @@ esac
 """
 
 
-def _run_docker_cleanup(tmp_path, install_dir, df_stub):
-    """Run a copy of the cleanup script with stub `docker` and `df` commands."""
-    project = tmp_path / "parent" / "project"
-    script_dir = project / install_dir
-    script_dir.mkdir(parents=True, exist_ok=True)
-    script = script_dir / "docker-cleanup.sh"
-    shutil.copy(REPO_ROOT / "scripts" / "docker-cleanup.sh", script)
-    script.chmod(0o755)
+def _run_docker_cleanup(tmp_path, install_dir, df_stub, project_name="project", checkout_copy=False):
+    """Run a copy of the cleanup script with stub `docker` and `df` commands.
+
+    ``checkout_copy`` also places the script under ``<project>/scripts/``, as in
+    a real project folder where setup-cron-cleanup.sh installed a root copy.
+    """
+    project = tmp_path / "parent" / project_name
+    copies = [project / install_dir / "docker-cleanup.sh"]
+    if checkout_copy:
+        copies.append(project / "scripts" / "docker-cleanup.sh")
+    for copy in copies:
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / "scripts" / "docker-cleanup.sh", copy)
+        copy.chmod(0o755)
+    script = copies[0]
 
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
@@ -119,6 +126,19 @@ def test_docker_cleanup_logs_inside_the_project(tmp_path, install_dir):
     log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
     assert "stub docker container prune" in log_text
     assert "Disk before cleanup: 0 GB available (40% used)" in log_text
+    assert "Docker cleanup completed successfully" in log_text
+    assert not (project.parent / "logs").exists()
+
+
+def test_docker_cleanup_installed_in_a_project_named_scripts(tmp_path):
+    """The installed root copy logs inside the project, even when the project
+    folder itself is named scripts."""
+    project, result = _run_docker_cleanup(
+        tmp_path, ".", _GNU_DF_STUB, project_name="scripts", checkout_copy=True
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
     assert "Docker cleanup completed successfully" in log_text
     assert not (project.parent / "logs").exists()
 

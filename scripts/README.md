@@ -37,9 +37,11 @@ Automated Docker cleanup script that prevents disk space accumulation from Docke
 **Safety features:**
 - Preserves running containers and their images
 - Keeps all tagged images. A rebuild moves the image tag to the new build, so
-  the previous build becomes a dangling image and is removed after 7 days. To
-  roll back, build an earlier merged commit with `scripts/deploy-build.sh`, or
-  give the previous build its own tag before you rebuild.
+  the previous build becomes a dangling image. The 7-day limit counts from
+  when an image was built, so the next cleanup after a rebuild can remove the
+  previous build. To roll back, build an earlier merged commit with
+  `scripts/deploy-build.sh`, or give the previous build its own tag before you
+  rebuild.
 - Never removes Docker volumes
 - Provides detailed logging of all cleanup operations
 

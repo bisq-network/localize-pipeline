@@ -39,9 +39,11 @@ This project provides ready-to-deploy scripts and configurations for automated c
 **Safety features**:
 - Preserves running containers and their images
 - Keeps all tagged images. A rebuild moves the image tag to the new build, so
-  the previous build becomes a dangling image and is removed after 7 days. To
-  roll back, build an earlier merged commit with `scripts/deploy-build.sh`, or
-  give the previous build its own tag before you rebuild.
+  the previous build becomes a dangling image. The 7-day limit counts from
+  when an image was built, so the next cleanup after a rebuild can remove the
+  previous build. To roll back, build an earlier merged commit with
+  `scripts/deploy-build.sh`, or give the previous build its own tag before you
+  rebuild.
 - Never removes Docker volumes
 - Logs all actions to `logs/docker-cleanup.log` in the project directory
 - Provides disk usage metrics
