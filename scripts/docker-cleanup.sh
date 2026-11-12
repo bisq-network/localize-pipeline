@@ -9,7 +9,9 @@
 #
 # Safety features:
 # - Preserves running containers and their images
-# - Keeps recent builds (7 days) for rollback capability
+# - Keeps tagged images. A rebuild leaves the previous build untagged, and it
+#   is removed after 7 days. Roll back by building an earlier merged commit
+#   with scripts/deploy-build.sh.
 # - Logs all actions with before/after disk metrics
 #
 # Usage:

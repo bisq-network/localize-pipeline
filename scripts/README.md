@@ -36,7 +36,10 @@ Automated Docker cleanup script that prevents disk space accumulation from Docke
 
 **Safety features:**
 - Preserves running containers and their images
-- Keeps all tagged images, so earlier builds stay available for rollback
+- Keeps all tagged images. A rebuild moves the image tag to the new build, so
+  the previous build becomes a dangling image and is removed after 7 days. To
+  roll back, build an earlier merged commit with `scripts/deploy-build.sh`, or
+  give the previous build its own tag before you rebuild.
 - Never removes Docker volumes
 - Provides detailed logging of all cleanup operations
 
@@ -87,7 +90,10 @@ sudo ./scripts/setup-cron-cleanup.sh
 ### check-translation-services.sh
 
 Host-side check for the Bisq translation servers. It writes one `OK` or `ALERT`
-line per check and appends alerts to `/var/log/translation-service-alerts.log`.
+line per check. `ALERT` lines go to standard error. The script also appends
+them to `/var/log/translation-service-alerts.log`, but only when it can write
+to that file; otherwise it skips the file without a message. If you rely on
+that file, run the check as root or give its user write access to the file.
 
 **What it checks:**
 - The retired `translator.service` systemd unit is not running (it stops and
