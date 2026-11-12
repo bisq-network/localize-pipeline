@@ -155,7 +155,7 @@ repository-managing entrypoint:
 
 ```bash
 docker compose --env-file docker/.env -f docker/docker-compose.yml run -T --rm \
-  --no-deps --entrypoint python3.11 translator \
+  --no-deps --entrypoint python3 translator \
   -m localize.cli formats
 ```
 
