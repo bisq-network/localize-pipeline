@@ -13,7 +13,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from typing import Dict, List, Mapping, Optional, Pattern, Set, Tuple
+from typing import Coroutine, Dict, List, Mapping, Optional, Pattern, Set, Tuple
 
 # --- Python Version Check ---
 # This script requires Python 3.11 or newer for features like modern asyncio.
@@ -2995,6 +2995,236 @@ def _reuse_accepted_output(
     )
 
 
+async def _await_draft_tasks(
+        tasks: List[Coroutine],
+        translation_file: str,
+        results: List[Tuple[int, str, bool]],
+) -> None:
+    """Run the draft requests of one file and append their results.
+
+    A task that fails unexpectedly leaves no result; the caller fills the gap.
+    When the request budget is used up, all tasks still finish before the
+    budget error is raised.
+    """
+    # The tqdm output is directed to stderr by default, which is ideal.
+    # It prevents progress bars from being broken by stdout prints.
+    budget_error = None
+    for coro in tqdm(
+            asyncio.as_completed(tasks),
+            desc=f"Translating {translation_file}",
+            unit="translation",
+            total=len(tasks)  # Provide the total number of tasks
+    ):
+        try:
+            index, result, succeeded = await coro
+        except RequestBudgetExceeded as exc:
+            # Drain all concurrent tasks before returning; none may
+            # make an unreserved request after the limit is reached.
+            budget_error = exc
+            continue
+        except Exception:
+            logger.exception("Translation task failed unexpectedly for '%s'; continuing.", translation_file)
+            continue
+        results.append((index, result, succeeded))
+    if budget_error:
+        raise budget_error
+
+
+def _complete_draft_results(
+        results: List[Tuple[int, str, bool]],
+        translation_file: str,
+        texts_to_translate: List[str],
+        keys_to_translate: List[str],
+        source_translations: Dict[str, str],
+        original_target_translations: Dict[str, str],
+        file_ledger_entries: Dict[str, Dict[str, str]],
+) -> Tuple[List[str], Set[str]]:
+    """Turn the draft results into one value per selected key.
+
+    A key without a result gets the source text and counts as failed. A failed
+    key keeps its existing translation when the ledger verifies it.
+
+    Returns:
+        The value for each selected key, in key order, and the failed keys.
+    """
+    # Sort results by index to ensure correct order
+    seen_positions = {position for position, _result, _succeeded in results}
+    for position, key in enumerate(keys_to_translate):
+        if position in seen_positions:
+            continue
+        fallback_text = source_translations.get(
+            key,
+            texts_to_translate[position] if position < len(texts_to_translate) else "",
+        )
+        results.append((position, fallback_text, False))
+    results = prefer_existing_translation_on_failure(
+        results,
+        keys_to_translate,
+        source_translations,
+        original_target_translations,
+        file_ledger_entries,
+    )
+    results.sort(key=lambda x: x[0])
+    translations = [result for _, result, _ in results]
+    model_failed_keys = {
+        keys_to_translate[position]
+        for position, _result, succeeded in results
+        if not succeeded and position < len(keys_to_translate)
+    }
+    if model_failed_keys:
+        preserved_existing_keys = {
+            keys_to_translate[position]
+            for position, _result, succeeded in results
+            if (
+                not succeeded
+                and position < len(keys_to_translate)
+                and _ledger_verified_existing_translation(
+                    keys_to_translate[position],
+                    source_translations,
+                    original_target_translations,
+                    file_ledger_entries,
+                )
+                is not None
+            )
+        }
+        logger.warning(
+            "Model translation failed for %d key(s) in '%s'; preserved %d ledger-verified existing translation(s), used the current source fallback for %d, and marked all failed for retry.",
+            len(model_failed_keys),
+            translation_file,
+            len(preserved_existing_keys),
+            len(model_failed_keys) - len(preserved_existing_keys),
+        )
+    return translations, model_failed_keys
+
+
+@dataclass
+class _DraftResult:
+    """Outcome of the draft stage for one file."""
+
+    translations: List[str]
+    """The draft value for each selected key, in key order."""
+    model_failed_keys: Set[str]
+    """Selected keys without a usable draft. They are retried in a later run."""
+    candidate_translations: Dict[str, str]
+    """Values that an earlier run already validated for the same input."""
+    candidate_keys: Set[str]
+    """The selected keys that reuse such a value."""
+    review_keys: List[str]
+    """The selected keys that still need the holistic review."""
+
+
+async def _draft_file_translations(
+        run: _QueueRun,
+        file: _QueueFile,
+        checkpoint: Optional[str],
+        texts_to_translate: List[str],
+        indices: List[int],
+        keys_to_translate: List[str],
+        target_translations: Dict[str, str],
+        source_translations: Dict[str, str],
+        original_target_translations: Dict[str, str],
+        file_ledger_entries: Dict[str, Dict[str, str]],
+) -> _DraftResult:
+    """Produce a draft value for each selected key of one file.
+
+    Values come from provisional candidates of an earlier run, from the
+    translation memory, or from one model request per remaining key.
+    """
+    translation_file = file.translation_file
+    localization_format = file.localization_format
+    language_code = file.language_code
+    target_language = file.target_language
+    memory_context_fingerprint = file.memory_context_fingerprint
+    # Provisional output is bound to the same complete input/policy as
+    # file checkpoints, but must still pass final validation and gates.
+    candidate_translations = (
+        run.safeguards.lookup_candidates(checkpoint)
+        if run.safeguards and not run.sample else {}
+    )
+    candidate_translations = {
+        key: value for key, value in candidate_translations.items()
+        if key in keys_to_translate
+    }
+    memory_plan = apply_translation_memory(
+        texts_to_translate=texts_to_translate,
+        indices=indices,
+        keys_to_translate=keys_to_translate,
+        memory=run.translation_memory,
+        locale=language_code,
+        format_id=localization_format.id,
+        context_fingerprint=memory_context_fingerprint,
+        candidate_translations=candidate_translations,
+    )
+    candidate_keys = {
+        keys_to_translate[position] for position, _value in memory_plan.cached_results
+        if keys_to_translate[position] in candidate_translations
+    }
+    review_keys = [key for key in keys_to_translate if key not in candidate_keys]
+    increment_run_metric(run.run_metrics, "translation_memory_reused_count",
+                         len(memory_plan.cached_results) - len(candidate_keys))
+    increment_run_metric(run.run_metrics, "model_translation_keys_count", len(memory_plan.pending_keys))
+
+    # Pre-run scope/cost preview for this file (ballpark — actuals logged at the end).
+    provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
+    file_estimate = provider.estimate_run_cost(
+        num_keys=len(memory_plan.pending_keys),
+        locale_codes=[language_code],
+        translate_model=MODEL_NAME,
+        review_model=REVIEW_MODEL_NAME,
+        review_num_keys=len(review_keys),
+        semantic_review_model=(
+            SEMANTIC_REVIEW_MODEL_NAME if SEMANTIC_REVIEW_ENABLED else None
+        ),
+        semantic_review_num_keys=(
+            len(keys_to_translate) if SEMANTIC_REVIEW_ENABLED else None
+        ),
+    )
+    logger.info("Pre-run estimate for '%s':", translation_file)
+    for line in provider.format_estimate(file_estimate).splitlines():
+        logger.info(line)
+
+    # Gather all translation tasks
+    tasks = [
+        translate_text_async(
+            text,
+            key,
+            target_translations,
+            source_translations,
+            target_language,
+            run.glossary,
+            run.semaphore,
+            run.rate_limiter,  # Pass the rate limiter
+            position,
+            localization_format,
+        )
+        for text, key, position in zip(
+            memory_plan.pending_texts,
+            memory_plan.pending_keys,
+            memory_plan.pending_positions,
+        )
+    ]
+
+    # Run tasks concurrently with progress indication
+    results: List[Tuple[int, str, bool]] = [
+        (position, value, True)
+        for position, value in memory_plan.cached_results
+    ]
+    if tasks:
+        await _await_draft_tasks(tasks, translation_file, results)
+
+    translations, model_failed_keys = _complete_draft_results(
+        results, translation_file, texts_to_translate, keys_to_translate,
+        source_translations, original_target_translations, file_ledger_entries,
+    )
+    return _DraftResult(
+        translations=translations,
+        model_failed_keys=model_failed_keys,
+        candidate_translations=candidate_translations,
+        candidate_keys=candidate_keys,
+        review_keys=review_keys,
+    )
+
+
 async def _process_queue_file(
         run: _QueueRun,
         translation_file: str,
@@ -3009,7 +3239,6 @@ async def _process_queue_file(
         has an entry in ``run.skipped_files``.
     """
     translated_queue_folder = run.translated_queue_folder
-    glossary = run.glossary
     key_ledger = run.key_ledger
     translation_memory = run.translation_memory
     semaphore = run.semaphore
@@ -3129,151 +3358,16 @@ async def _process_queue_file(
                         translation_file)
             return len(keys_to_translate)
 
-    # Provisional output is bound to the same complete input/policy as
-    # file checkpoints, but must still pass final validation and gates.
-    candidate_translations = (
-        safeguards.lookup_candidates(checkpoint)
-        if safeguards and not _sample else {}
-    )
-    candidate_translations = {
-        key: value for key, value in candidate_translations.items()
-        if key in keys_to_translate
-    }
-    memory_plan = apply_translation_memory(
-        texts_to_translate=texts_to_translate,
-        indices=indices,
-        keys_to_translate=keys_to_translate,
-        memory=translation_memory,
-        locale=language_code,
-        format_id=localization_format.id,
-        context_fingerprint=memory_context_fingerprint,
-        candidate_translations=candidate_translations,
-    )
-    candidate_keys = {
-        keys_to_translate[position] for position, _value in memory_plan.cached_results
-        if keys_to_translate[position] in candidate_translations
-    }
-    review_keys = [key for key in keys_to_translate if key not in candidate_keys]
-    increment_run_metric(run_metrics, "translation_memory_reused_count",
-                         len(memory_plan.cached_results) - len(candidate_keys))
-    increment_run_metric(run_metrics, "model_translation_keys_count", len(memory_plan.pending_keys))
-
-    # Pre-run scope/cost preview for this file (ballpark — actuals logged at the end).
-    provider = MODEL_PROVIDER or _FALLBACK_PROVIDER
-    file_estimate = provider.estimate_run_cost(
-        num_keys=len(memory_plan.pending_keys),
-        locale_codes=[language_code],
-        translate_model=MODEL_NAME,
-        review_model=REVIEW_MODEL_NAME,
-        review_num_keys=len(review_keys),
-        semantic_review_model=(
-            SEMANTIC_REVIEW_MODEL_NAME if SEMANTIC_REVIEW_ENABLED else None
-        ),
-        semantic_review_num_keys=(
-            len(keys_to_translate) if SEMANTIC_REVIEW_ENABLED else None
-        ),
-    )
-    logger.info("Pre-run estimate for '%s':", translation_file)
-    for line in provider.format_estimate(file_estimate).splitlines():
-        logger.info(line)
-
-    # Gather all translation tasks
-    tasks = [
-        translate_text_async(
-            text,
-            key,
-            target_translations,
-            source_translations,
-            target_language,
-            glossary,
-            semaphore,
-            rate_limiter,  # Pass the rate limiter
-            position,
-            localization_format,
-        )
-        for text, key, position in zip(
-            memory_plan.pending_texts,
-            memory_plan.pending_keys,
-            memory_plan.pending_positions,
-        )
-    ]
-
-    # Run tasks concurrently with progress indication
-    results: List[Tuple[int, str, bool]] = [
-        (position, value, True)
-        for position, value in memory_plan.cached_results
-    ]
-    # The tqdm output is directed to stderr by default, which is ideal.
-    # It prevents progress bars from being broken by stdout prints.
-    if tasks:
-        budget_error = None
-        for coro in tqdm(
-                asyncio.as_completed(tasks),
-                desc=f"Translating {translation_file}",
-                unit="translation",
-                total=len(tasks)  # Provide the total number of tasks
-        ):
-            try:
-                index, result, succeeded = await coro
-            except RequestBudgetExceeded as exc:
-                # Drain all concurrent tasks before returning; none may
-                # make an unreserved request after the limit is reached.
-                budget_error = exc
-                continue
-            except Exception:
-                logger.exception("Translation task failed unexpectedly for '%s'; continuing.", translation_file)
-                continue
-            results.append((index, result, succeeded))
-        if budget_error:
-            raise budget_error
-
-    # Sort results by index to ensure correct order
-    seen_positions = {position for position, _result, _succeeded in results}
-    for position, key in enumerate(keys_to_translate):
-        if position in seen_positions:
-            continue
-        fallback_text = source_translations.get(
-            key,
-            texts_to_translate[position] if position < len(texts_to_translate) else "",
-        )
-        results.append((position, fallback_text, False))
-    results = prefer_existing_translation_on_failure(
-        results,
-        keys_to_translate,
-        source_translations,
-        original_target_translations,
+    draft = await _draft_file_translations(
+        run, file, checkpoint, texts_to_translate, indices, keys_to_translate,
+        target_translations, source_translations, original_target_translations,
         file_ledger_entries,
     )
-    results.sort(key=lambda x: x[0])
-    translations = [result for _, result, _ in results]
-    model_failed_keys = {
-        keys_to_translate[position]
-        for position, _result, succeeded in results
-        if not succeeded and position < len(keys_to_translate)
-    }
-    if model_failed_keys:
-        preserved_existing_keys = {
-            keys_to_translate[position]
-            for position, _result, succeeded in results
-            if (
-                not succeeded
-                and position < len(keys_to_translate)
-                and _ledger_verified_existing_translation(
-                    keys_to_translate[position],
-                    source_translations,
-                    original_target_translations,
-                    file_ledger_entries,
-                )
-                is not None
-            )
-        }
-        logger.warning(
-            "Model translation failed for %d key(s) in '%s'; preserved %d ledger-verified existing translation(s), used the current source fallback for %d, and marked all failed for retry.",
-            len(model_failed_keys),
-            translation_file,
-            len(preserved_existing_keys),
-            len(model_failed_keys) - len(preserved_existing_keys),
-        )
+    translations = draft.translations
+    model_failed_keys = draft.model_failed_keys
+    candidate_translations = draft.candidate_translations
+    candidate_keys = draft.candidate_keys
+    review_keys = draft.review_keys
 
     # Integrate initial translations to create a draft file for review
     draft_lines = integrate_translations(
