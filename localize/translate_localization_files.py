@@ -3893,6 +3893,24 @@ async def _process_queue_file(
 ) -> Optional[int]:
     """Translate one queued file and write the result to the translated queue.
 
+    The stages run in this order. A stage can end the work on the file.
+
+    1. Resolve language, glossary and paths (``_resolve_queue_file``).
+    2. Validate and lint the file (``_check_queue_file_before_translation``).
+    3. Select the keys that need work (``_select_keys_to_translate``). Without
+       selected keys, finish without a model call
+       (``_finish_file_without_translation``).
+    4. With run safeguards, reuse the output that an earlier run validated for
+       the same input (``_reuse_accepted_output``).
+    5. Draft a value for each selected key (``_draft_file_translations``).
+    6. Review the drafts in chunks (``_review_file_draft``).
+    7. Validate each selected key (``_validate_file_translations``). Withhold
+       the file when a failed key would replace localized text with source text
+       (``_withhold_file_for_source_regressions``).
+    8. Write the output file (``_write_validated_file``).
+    9. Record the result in the key ledger and the translation memory
+       (``_record_file_result``).
+
     Returns:
         The number of keys that were selected for translation when the file
         was processed (0 when only ignored keys were copied from the source).
