@@ -116,7 +116,6 @@ LANGUAGE_CODES = config.language_codes
 NAME_TO_CODE = config.name_to_code
 RETRANSLATE_IDENTICAL_SOURCE_STRINGS = config.retranslate_identical_source_strings
 ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS = config.accepted_source_identical_translations
-STYLE_RULES = config.style_rules
 PRECOMPUTED_STYLE_RULES_TEXT = config.precomputed_style_rules_text
 BRAND_GLOSSARY = config.brand_glossary
 IGNORE_KEY_PATTERNS = config.ignore_key_patterns

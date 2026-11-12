@@ -145,14 +145,6 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return _cmd_validate_config(args, success_message="Preflight OK")
 
 
-def _resolve_input_folder(config: dict[str, Any]) -> Path:
-    target_root = Path(str(config.get("target_project_root") or ".")).expanduser()
-    input_folder = Path(str(config.get("input_folder") or ".")).expanduser()
-    if not input_folder.is_absolute():
-        input_folder = target_root / input_folder
-    return input_folder.resolve()
-
-
 def _config_relative_path(raw_path: Any, *, config_path: Path) -> Path:
     path = Path(str(raw_path or ".")).expanduser()
     if path.is_absolute():

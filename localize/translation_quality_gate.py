@@ -958,11 +958,6 @@ def _format_percent(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
-def _truncate(value: str, limit: int = 100) -> str:
-    value = value.replace("\n", "\\n")
-    return value if len(value) <= limit else value[: limit - 3] + "..."
-
-
 def _escape_markdown_report_text(value: Any, limit: int = 500) -> str:
     text = str(value)
     text = text.replace("\r", "\\r").replace("\n", "\\n")
