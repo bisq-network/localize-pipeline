@@ -2851,6 +2851,150 @@ def _check_queue_file_before_translation(
     return file_ledger_entries, raw_git_changed_keys, newly_added_keys
 
 
+def _finish_file_without_translation(
+        run: _QueueRun,
+        file: _QueueFile,
+        parsed_lines: List[Dict],
+        source_translations: Dict[str, str],
+        target_translations: Dict[str, str],
+        original_target_translations: Dict[str, str],
+        ignored_keys_requiring_output: Set[str],
+) -> Optional[int]:
+    """Finish a file that has no key to translate.
+
+    The ledger baseline is refreshed. When ignored keys were copied from the
+    source, the file is validated and written without any model call.
+
+    Returns:
+        0 when the copied ignored keys were written (or would be, in a dry
+        run). ``None`` when there was nothing to write, in a sample run, or
+        when the final validation withheld the file.
+    """
+    translation_file = file.translation_file
+    localization_format = file.localization_format
+    adapter = file.adapter
+    enforced_language_glossary = file.enforced_language_glossary
+    # Refresh ledger baseline even when no translation was required.
+    run.key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
+    if not run.sample and not run.safeguards:
+        save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, run.key_ledger)
+    if run.sample:
+        return None
+    if ignored_keys_requiring_output:
+        increment_run_metric(
+            run.run_metrics,
+            "changed_values_count",
+            count_changed_translation_values(original_target_translations, target_translations),
+        )
+        translated_file_path = os.path.join(run.translated_queue_folder, translation_file)
+        new_file_content = adapter.reassemble_file(parsed_lines)
+        if not run_post_translation_validation(
+                new_file_content,
+                source_translations,
+                translation_file,
+                localization_format,
+                ignore_key_patterns=IGNORE_KEY_PATTERNS,
+                changed_keys_for_run=set(ignored_keys_requiring_output),
+                translation_glossary=enforced_language_glossary,
+        ):
+            logger.error(
+                "Skipping write for '%s' because post-translation validation failed.",
+                translation_file,
+            )
+            run.skipped_files[translation_file] = ["Post-translation validation failed."]
+            return None
+        if DRY_RUN:
+            logger.info(f"[Dry Run] Would write ignored-key passthrough content to '{translated_file_path}'.")
+        else:
+            os.makedirs(os.path.dirname(translated_file_path), exist_ok=True)
+            with open(translated_file_path, 'w', encoding='utf-8') as file:
+                file.write(new_file_content)
+        logger.info(
+            "Updated %d ignored key(s) from source in '%s'.",
+            len(ignored_keys_requiring_output),
+            translation_file,
+        )
+        return 0
+    logger.info(f"No texts to translate in file '{translation_file}'.")
+    return None
+
+
+def _select_sample_keys(
+        texts_to_translate: List[str],
+        indices: List[int],
+        keys_to_translate: List[str],
+        sample_keys: int,
+) -> Tuple[List[str], List[int], List[str]]:
+    """Reduce the selected keys of a file to the keys of the bounded sample."""
+    # Include the longest and placeholder-bearing messages first.
+    positions = sorted(
+        range(len(keys_to_translate)),
+        key=lambda i: (
+            not bool(extract_placeholder_tokens(texts_to_translate[i])),
+            -len(texts_to_translate[i]), keys_to_translate[i],
+        ),
+    )[:sample_keys]
+    return (
+        [texts_to_translate[i] for i in positions],
+        [indices[i] for i in positions],
+        [keys_to_translate[i] for i in positions],
+    )
+
+
+def _checkpoint_fingerprint(
+        run: _QueueRun,
+        file: _QueueFile,
+        source_translations: Dict[str, str],
+        original_target_translations: Dict[str, str],
+        keys_to_translate: List[str],
+) -> str:
+    """Fingerprint everything that decides the output of one file.
+
+    A validated output or a provisional candidate is reused only for an equal
+    fingerprint: same source, target, selected keys, glossary and models.
+    """
+    with open(file.translation_file_path, encoding="utf-8") as stream:
+        checkpoint_input = stream.read()
+    return run.safeguards.fingerprint({
+        "stage": "sample" if run.sample else "translation",
+        "file": file.translation_file, "format": file.localization_format.id,
+        "source": source_translations, "target": original_target_translations,
+        "target_content": checkpoint_input,
+        "keys": keys_to_translate, "glossary": run.glossary,
+        "draft_model": MODEL_NAME, "review_model": REVIEW_MODEL_NAME,
+        "draft_effort": MODEL_REASONING_EFFORT,
+        "draft_max_completion_tokens": MODEL_MAX_COMPLETION_TOKENS,
+        "review_effort": REVIEW_REASONING_EFFORT,
+        "semantic_model": SEMANTIC_REVIEW_MODEL_NAME,
+        "semantic_effort": config.semantic_review_reasoning_effort,
+    })
+
+
+def _reuse_accepted_output(
+        run: _QueueRun,
+        file: _QueueFile,
+        accepted: Mapping[str, object],
+        source_translations: Dict[str, str],
+        original_target_translations: Dict[str, str],
+) -> None:
+    """Publish the output that an earlier run validated for the same input."""
+    translation_file = file.translation_file
+    translated_file_path = os.path.join(run.translated_queue_folder, translation_file)
+    write_text_atomic(translated_file_path, accepted["content"])
+    if run.validation_summary is not None:
+        run.validation_summary[translation_file] = accepted["validation"]
+    if not run.sample:
+        run.key_ledger[translation_file] = build_file_key_ledger(
+            source_translations, accepted["translations"],
+        )
+    increment_run_metric(
+        run.run_metrics, "changed_values_count",
+        count_changed_translation_values(
+            original_target_translations, accepted["translations"],
+        ),
+    )
+
+
 async def _process_queue_file(
         run: _QueueRun,
         translation_file: str,
@@ -2960,96 +3104,26 @@ async def _process_queue_file(
         accepted_source_identical_keys=accepted_keys,
     )
     if not texts_to_translate:
-        # Refresh ledger baseline even when no translation was required.
-        key_ledger[translation_file] = build_file_key_ledger(source_translations, target_translations)
-        if not _sample and not safeguards:
-            save_translation_key_ledger(TRANSLATION_KEY_LEDGER_FILE_PATH, key_ledger)
-        if _sample:
-            return None
-        if ignored_keys_requiring_output:
-            increment_run_metric(
-                run_metrics,
-                "changed_values_count",
-                count_changed_translation_values(original_target_translations, target_translations),
-            )
-            translated_file_path = os.path.join(translated_queue_folder, translation_file)
-            new_file_content = adapter.reassemble_file(parsed_lines)
-            if not run_post_translation_validation(
-                    new_file_content,
-                    source_translations,
-                    translation_file,
-                    localization_format,
-                    ignore_key_patterns=IGNORE_KEY_PATTERNS,
-                    changed_keys_for_run=set(ignored_keys_requiring_output),
-                    translation_glossary=enforced_language_glossary,
-            ):
-                logger.error(
-                    "Skipping write for '%s' because post-translation validation failed.",
-                    translation_file,
-                )
-                skipped_files[translation_file] = ["Post-translation validation failed."]
-                return None
-            if DRY_RUN:
-                logger.info(f"[Dry Run] Would write ignored-key passthrough content to '{translated_file_path}'.")
-            else:
-                os.makedirs(os.path.dirname(translated_file_path), exist_ok=True)
-                with open(translated_file_path, 'w', encoding='utf-8') as file:
-                    file.write(new_file_content)
-            logger.info(
-                "Updated %d ignored key(s) from source in '%s'.",
-                len(ignored_keys_requiring_output),
-                translation_file,
-            )
-            return 0
-        logger.info(f"No texts to translate in file '{translation_file}'.")
-        return None
+        return _finish_file_without_translation(
+            run, file, parsed_lines, source_translations, target_translations,
+            original_target_translations, ignored_keys_requiring_output,
+        )
 
     increment_run_metric(run_metrics, "candidate_keys_count", len(keys_to_translate))
     if _sample:
-        # Include the longest and placeholder-bearing messages first.
-        positions = sorted(
-            range(len(keys_to_translate)),
-            key=lambda i: (
-                not bool(extract_placeholder_tokens(texts_to_translate[i])),
-                -len(texts_to_translate[i]), keys_to_translate[i],
-            ),
-        )[:safeguards.sample_keys]
-        texts_to_translate = [texts_to_translate[i] for i in positions]
-        indices = [indices[i] for i in positions]
-        keys_to_translate = [keys_to_translate[i] for i in positions]
+        texts_to_translate, indices, keys_to_translate = _select_sample_keys(
+            texts_to_translate, indices, keys_to_translate, safeguards.sample_keys,
+        )
 
     checkpoint = None
     if safeguards:
-        with open(translation_file_path, encoding="utf-8") as stream:
-            checkpoint_input = stream.read()
-        checkpoint = safeguards.fingerprint({
-            "stage": "sample" if _sample else "translation",
-            "file": translation_file, "format": localization_format.id,
-            "source": source_translations, "target": original_target_translations,
-            "target_content": checkpoint_input,
-            "keys": keys_to_translate, "glossary": glossary,
-            "draft_model": MODEL_NAME, "review_model": REVIEW_MODEL_NAME,
-            "draft_effort": MODEL_REASONING_EFFORT,
-            "draft_max_completion_tokens": MODEL_MAX_COMPLETION_TOKENS,
-            "review_effort": REVIEW_REASONING_EFFORT,
-            "semantic_model": SEMANTIC_REVIEW_MODEL_NAME,
-            "semantic_effort": config.semantic_review_reasoning_effort,
-        })
+        checkpoint = _checkpoint_fingerprint(
+            run, file, source_translations, original_target_translations, keys_to_translate,
+        )
         accepted = safeguards.lookup(checkpoint)
         if accepted is not None:
-            translated_file_path = os.path.join(translated_queue_folder, translation_file)
-            write_text_atomic(translated_file_path, accepted["content"])
-            if validation_summary is not None:
-                validation_summary[translation_file] = accepted["validation"]
-            if not _sample:
-                key_ledger[translation_file] = build_file_key_ledger(
-                    source_translations, accepted["translations"],
-                )
-            increment_run_metric(
-                run_metrics, "changed_values_count",
-                count_changed_translation_values(
-                    original_target_translations, accepted["translations"],
-                ),
+            _reuse_accepted_output(
+                run, file, accepted, source_translations, original_target_translations,
             )
             logger.info("Reused validated output for '%s'; no draft/review requests.",
                         translation_file)
