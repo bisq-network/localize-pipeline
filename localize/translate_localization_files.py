@@ -33,6 +33,7 @@ from tqdm.asyncio import tqdm
 
 from localize.app_config import load_app_config
 from localize.atomic_io import write_json_atomic, write_text_atomic
+from localize.glossary import GlossaryLoadError as GlossaryLoadError, read_glossary_payload
 from localize.ignore_keys import is_ignored_key
 from localize.json_response import (
     chat_json_mode_kwargs,
@@ -164,39 +165,35 @@ def load_glossary(glossary_file_path: str) -> Dict[str, Dict[str, str]]:
     """
     Load the glossary from a JSON file.
 
+    A missing file means the project has no glossary. A file that exists but
+    cannot be parsed stops the run, because translating without the required
+    terms would produce output that is known to be wrong.
+
     Args:
         glossary_file_path (str): The path to the glossary JSON file.
 
     Returns:
         Dict[str, Dict[str, str]]: A dictionary containing the glossary data.
+
+    Raises:
+        GlossaryLoadError: The file exists but is not a readable JSON object.
     """
     if not os.path.exists(glossary_file_path):
         logger.error(f"Glossary file '{glossary_file_path}' not found.")
         return {}
-    try:
-        with open(glossary_file_path, 'r', encoding='utf-8') as f:
-            payload = json.load(f)
-        if not isinstance(payload, dict):
-            logger.error("Glossary file '%s' must contain a JSON object.", glossary_file_path)
-            return {}
-        glossary: Dict[str, Dict[str, str]] = {}
-        for locale, mappings in payload.items():
-            if str(locale).startswith('_'):
-                continue
-            if not isinstance(mappings, dict) or not all(
-                isinstance(source, str) and isinstance(target, str)
-                for source, target in mappings.items()
-            ):
-                logger.warning("Ignoring invalid glossary locale namespace '%s'.", locale)
-                continue
-            glossary[str(locale)] = dict(mappings)
-        return glossary
-    except json.JSONDecodeError as json_exc:
-        logger.error(f"Error decoding JSON glossary file: {json_exc}")
-        return {}
-    except Exception as general_exc:
-        logger.error(f"An unexpected error occurred while loading the glossary: {general_exc}")
-        return {}
+    payload = read_glossary_payload(glossary_file_path)
+    glossary: Dict[str, Dict[str, str]] = {}
+    for locale, mappings in payload.items():
+        if str(locale).startswith('_'):
+            continue
+        if not isinstance(mappings, dict) or not all(
+            isinstance(source, str) and isinstance(target, str)
+            for source, target in mappings.items()
+        ):
+            logger.warning("Ignoring invalid glossary locale namespace '%s'.", locale)
+            continue
+        glossary[str(locale)] = dict(mappings)
+    return glossary
 
 def normalize_value(value: Optional[str]) -> str:
     """

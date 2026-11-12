@@ -57,6 +57,7 @@ This project has three supported surfaces:
 | `localize/translate_localization_files.py` | Runtime translation pipeline. |
 | `localize/translation_prompts.py` | Builds the translation system prompt. |
 | `localize/json_response.py` | Provider-neutral JSON-mode request arguments and tolerant parsing of JSON model replies. |
+| `localize/glossary.py` | Reads the glossary file and rejects one that cannot be parsed. |
 | `localize/ignore_keys.py` | Compiles and applies the configured key-exclusion patterns. |
 | `localize/source_identical_acceptance.py` | Exact, operator-reviewed exemptions for translations that intentionally equal the source. |
 | `localize/translation_publication.py` | Keeps skipped files out of the published change and retains their diagnostic inputs. |

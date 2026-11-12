@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Pattern, Tuple
 import yaml
 from dotenv import load_dotenv
 
+from localize.glossary import GlossaryLoadError, read_glossary_payload
 from localize.ignore_keys import compile_ignore_key_patterns
 from localize.logging_config import setup_logger
 from localize.formats.placeholders import DEFAULT_PLACEHOLDER_PROFILE, validate_placeholder_profile
@@ -261,6 +262,8 @@ def validate_config(
             + ".",
         ))
 
+    issues.extend(_glossary_file_issues(config, config_base_dir))
+
     translation_source = str(config.get("translation_source") or "transifex").strip().lower()
     if translation_source not in {"git", "transifex"}:
         issues.append(ConfigIssue(
@@ -367,6 +370,37 @@ def validate_config(
         ))
 
     return issues
+
+
+def _glossary_file_issues(
+    config: Mapping[str, Any],
+    config_base_dir: Optional[str],
+) -> List[ConfigIssue]:
+    """Report a glossary file that the run could not use.
+
+    The path is resolved like ``load_app_config`` resolves it: relative to the
+    config file, with ``glossary.json`` next to the config as the default. The
+    glossary is optional, so a missing default file is not a problem.
+    """
+    configured_path = config.get("glossary_file_path")
+    if not configured_path and not config_base_dir:
+        return []
+    glossary_path = os.path.expanduser(str(configured_path or "glossary.json"))
+    if not os.path.isabs(glossary_path) and config_base_dir:
+        glossary_path = os.path.join(config_base_dir, glossary_path)
+    if not os.path.exists(glossary_path):
+        if not configured_path:
+            return []
+        return [ConfigIssue(
+            "warning",
+            f"'glossary_file_path' points to '{glossary_path}', which does not exist. "
+            "The run will translate without a glossary."
+        )]
+    try:
+        read_glossary_payload(glossary_path)
+    except GlossaryLoadError as exc:
+        return [ConfigIssue("error", f"{exc} Fix the file; the run stops when it cannot read the glossary.")]
+    return []
 
 
 def _log_config_issues(issues: List[ConfigIssue], logger: logging.Logger) -> None:
