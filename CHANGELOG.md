@@ -28,6 +28,10 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 - Retain validated per-key candidates when another key withholds a file, and
   add an optional `run_safeguards.max_requests_total` ceiling for one-time
   campaigns.
+- Add an optional, standard-library-only Healthchecks monitor for Guardian
+  polls. It pings success only after a new successful poll record, reports
+  failed polls to `/fail`, and never renews the heartbeat for skipped wakes. See
+  [Monitor failed and missing polls](docs/guardian.md#monitor-failed-and-missing-polls).
 
 ### Fixed
 

@@ -1350,6 +1350,63 @@ wake. Re-run `doctor` after CLI, model, authentication, credential, signing, or
 policy changes. If the ChatGPT session expires or is revoked, run
 `guardian login` again before the next scheduled poll.
 
+### Monitor failed and missing polls
+
+Use a dedicated [Healthchecks check](https://healthchecks.io/docs/) for Guardian,
+with notifications enabled. Store its base HTTPS ping URL in an operator-owned
+file outside the repository, with permissions `0600`. Keep that URL out of
+the LaunchAgent, command arguments, and logs.
+
+The optional monitor wraps one Guardian invocation and reads the state database
+at `.guardian/state.sqlite3` beside the config. In the staged runner, replace
+the `exec` line with:
+
+```sh
+exec /path/to/venv/bin/python -m localize.guardian.healthcheck \
+  --url-file /private/operator/guardian-healthcheck.url \
+  --state /private/operator/.guardian/state.sqlite3 \
+  -- /path/to/venv/bin/localize guardian run --scheduled \
+  --config /private/operator/guardian.yaml
+```
+
+The monitor sends an empty success ping only after a new successful `guardian`
+poll record and a zero command exit status. A failed command or failed poll
+record sends `/fail`. A scheduled wake that is not due, or that finds another
+poll running, writes no poll record and sends no ping, even before the first
+completed poll, so a wake alone never renews the heartbeat. If that other poll
+finishes during the wake, the wake reports the other poll's real outcome for
+the same ledger. Missing pings therefore expose
+a stopped scheduler, a sleeping or offline host, a hung poll, or an
+authentication or model circuit that stops scheduled polls. A state database
+that is unreadable, or missing after the command, sends `/fail`, so a `--state`
+path that does not exist is reported at once. A path to a different, existing
+ledger is not: every wake then looks skipped, and only the missing heartbeat
+alerts. Confirm that `--state` is the `.guardian/state.sqlite3` beside the
+config passed to the wrapped command. Monitoring errors preserve a nonzero poll
+exit code, or return one when the poll itself succeeded. An invalid URL file,
+including a FIFO or other non-regular file, does not prevent the Guardian
+command from running.
+
+Match the check to the configured schedule. The staged LaunchAgent wakes every
+15 minutes. With `poll_interval_seconds: 900` and the example's 30-minute
+`limits.run_timeout_seconds`, a 15-minute period and 45-minute grace alert after
+roughly an hour without a successful poll. With `poll_interval_seconds: 3600`,
+use a one-hour period and 45-minute grace, roughly 105 minutes. The default
+once-daily schedule needs a daily check. A wake can arrive just before the poll
+interval has elapsed; the poll then runs on the next wake, so leave grace for
+one deferred wake and the poll timeout. Explicit failure pings alert
+immediately. Configure alert delivery and the check's schedule in Healthchecks.
+
+Route a manual recovery `guardian run` through the same monitor, without
+`--scheduled`, so a successful recovery also renews the heartbeat.
+
+The monitor uses only the Python standard library. An existing installation can
+copy the module beside its private runner and invoke it by absolute file path,
+without replacing the installed Guardian package. Back up the runner first and
+keep its existing arguments, local notifications, and exit handling. Verify that
+Healthchecks accepts a failure ping while the check is down; only a real
+successful poll should mark it healthy.
+
 ## Operator checklist
 
 - Guardian config and credential helpers are outside monitored repositories.
