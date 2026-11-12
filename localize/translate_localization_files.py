@@ -3816,6 +3816,76 @@ def _record_file_result(
         save_translation_memory(TRANSLATION_MEMORY_FILE_PATH, run.translation_memory)
 
 
+def _write_validated_file(
+        run: _QueueRun,
+        queue_file: _QueueFile,
+        draft_lines: List[Dict],
+        valid_translations: Dict[str, str],
+        keys_to_translate: List[str],
+        source_translations: Dict[str, str],
+        original_target_translations: Dict[str, str],
+) -> Optional[Tuple[str, str, Dict[str, str]]]:
+    """Serialize the validated values of one file and write the output file.
+
+    Returns:
+        The path of the output file, its content, and the value of every key
+        in it. ``None`` when the final validation of the whole file fails; the
+        file is then recorded in ``run.skipped_files`` and nothing is written.
+        A dry run validates but does not write.
+    """
+    translation_file = queue_file.translation_file
+    localization_format = queue_file.localization_format
+    adapter = queue_file.adapter
+    enforced_language_glossary = queue_file.enforced_language_glossary
+    # Apply validated translations (valid translations + reverted source for failed keys)
+    for line in draft_lines:
+        if line['type'] == 'entry':
+            key = line.get('key')
+            if key and key in valid_translations:
+                line['value'] = valid_translations[key]
+
+    # Reassemble the final file content with validated translations
+    updated_lines = draft_lines
+    new_file_content = adapter.reassemble_file(updated_lines)
+    final_output_translations = {
+        line['key']: line.get('value', '')
+        for line in updated_lines
+        if line.get('type') == 'entry' and line.get('key')
+    }
+    increment_run_metric(
+        run.run_metrics,
+        "changed_values_count",
+        count_changed_translation_values(original_target_translations, final_output_translations),
+    )
+    # --- End Per-Key Validation ---
+
+    translated_file_path = os.path.join(run.translated_queue_folder, translation_file)
+
+    if not run_post_translation_validation(
+            new_file_content,
+            source_translations,
+            translation_file,
+            localization_format,
+            ignore_key_patterns=IGNORE_KEY_PATTERNS,
+            changed_keys_for_run=set(keys_to_translate),
+            translation_glossary=enforced_language_glossary,
+    ):
+        logger.error("Skipping write for '%s' because post-translation validation failed.", translation_file)
+        run.skipped_files[translation_file] = ["Post-translation validation failed."]
+        return None
+
+    if DRY_RUN:
+        logger.info(f"[Dry Run] Would write translated content to '{translated_file_path}'.")
+    else:
+        # Ensure the destination directory exists
+        os.makedirs(os.path.dirname(translated_file_path), exist_ok=True)
+        with open(translated_file_path, 'w', encoding='utf-8') as file:
+            file.write(new_file_content)
+        logger.info(f"Translated file saved to '{translated_file_path}'.\n")
+
+    return translated_file_path, new_file_content, final_output_translations
+
+
 async def _process_queue_file(
         run: _QueueRun,
         translation_file: str,
@@ -3829,18 +3899,15 @@ async def _process_queue_file(
         ``None`` when the file was skipped or needed no work; a skipped file
         has an entry in ``run.skipped_files``.
     """
-    translated_queue_folder = run.translated_queue_folder
     safeguards = run.safeguards
     _sample = run.sample
     run_metrics = run.run_metrics
-    skipped_files = run.skipped_files
     queue_file = _resolve_queue_file(run, translation_file, localization_profile)
     if queue_file is None:
         return None
     localization_format = queue_file.localization_format
     adapter = queue_file.adapter
     target_language = queue_file.target_language
-    enforced_language_glossary = queue_file.enforced_language_glossary
 
     logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
 
@@ -3933,51 +4000,13 @@ async def _process_queue_file(
     ):
         return None
 
-    # Apply validated translations (valid translations + reverted source for failed keys)
-    for line in draft_lines:
-        if line['type'] == 'entry':
-            key = line.get('key')
-            if key and key in valid_translations:
-                line['value'] = valid_translations[key]
-
-    # Reassemble the final file content with validated translations
-    updated_lines = draft_lines
-    new_file_content = adapter.reassemble_file(updated_lines)
-    final_output_translations = {
-        line['key']: line.get('value', '')
-        for line in updated_lines
-        if line.get('type') == 'entry' and line.get('key')
-    }
-    increment_run_metric(
-        run_metrics,
-        "changed_values_count",
-        count_changed_translation_values(original_target_translations, final_output_translations),
+    written = _write_validated_file(
+        run, queue_file, draft_lines, valid_translations, keys_to_translate,
+        source_translations, original_target_translations,
     )
-    # --- End Per-Key Validation ---
-
-    translated_file_path = os.path.join(translated_queue_folder, translation_file)
-
-    if not run_post_translation_validation(
-            new_file_content,
-            source_translations,
-            translation_file,
-            localization_format,
-            ignore_key_patterns=IGNORE_KEY_PATTERNS,
-            changed_keys_for_run=set(keys_to_translate),
-            translation_glossary=enforced_language_glossary,
-    ):
-        logger.error("Skipping write for '%s' because post-translation validation failed.", translation_file)
-        skipped_files[translation_file] = ["Post-translation validation failed."]
+    if written is None:
         return None
-
-    if DRY_RUN:
-        logger.info(f"[Dry Run] Would write translated content to '{translated_file_path}'.")
-    else:
-        # Ensure the destination directory exists
-        os.makedirs(os.path.dirname(translated_file_path), exist_ok=True)
-        with open(translated_file_path, 'w', encoding='utf-8') as file:
-            file.write(new_file_content)
-        logger.info(f"Translated file saved to '{translated_file_path}'.\n")
+    translated_file_path, new_file_content, final_output_translations = written
 
     if _sample:
         await _check_sample_semantics(
