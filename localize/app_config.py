@@ -181,7 +181,8 @@ def validate_config(
 ) -> List[ConfigIssue]:
     """Validate a raw config dict and return actionable issues.
 
-    Pure and side-effect free (``path_exists`` is injectable for testing). Callers
+    Side-effect free. ``path_exists`` is injectable for testing the required
+    paths; the glossary check reads the real glossary file when it exists. Callers
     decide how to surface the result; ``load_app_config`` logs it. The loader stays
     forgiving — validation reports problems, it does not raise.
 
@@ -399,7 +400,7 @@ def _glossary_file_issues(
     try:
         read_glossary_payload(glossary_path)
     except GlossaryLoadError as exc:
-        return [ConfigIssue("error", f"{exc} Fix the file; the run stops when it cannot read the glossary.")]
+        return [ConfigIssue("error", f"{exc} The run stops when it cannot read the glossary.")]
     return []
 
 

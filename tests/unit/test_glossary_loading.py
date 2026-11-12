@@ -38,6 +38,27 @@ def test_unreadable_glossary_file_stops_the_load(tmp_path, content):
         pipeline.load_glossary(str(glossary_path))
 
     assert str(glossary_path) in str(error.value)
+    assert "empty JSON object {}" in str(error.value)
+
+
+def test_glossary_with_a_byte_order_mark_or_extreme_nesting_is_rejected_cleanly(tmp_path):
+    """Unusual parse failures raise the same error, not a raw traceback."""
+    bom_path = tmp_path / "bom.json"
+    bom_path.write_bytes(b"\xef\xbb\xbf" + b'{"de": {"account": "Konto"}}')
+    nested_path = tmp_path / "nested.json"
+    nested_path.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    for path in (bom_path, nested_path, tmp_path):  # tmp_path is a directory
+        with pytest.raises(GlossaryLoadError):
+            pipeline.load_glossary(str(path))
+
+
+def test_empty_json_object_is_an_empty_glossary(tmp_path):
+    """`{}` is how a project states that it has no required terms."""
+    glossary_path = tmp_path / "glossary.json"
+    glossary_path.write_text("{}", encoding="utf-8")
+
+    assert pipeline.load_glossary(str(glossary_path)) == {}
 
 
 def test_invalid_locale_namespace_is_still_only_skipped(tmp_path):
@@ -138,8 +159,9 @@ def test_validation_accepts_a_missing_default_and_a_valid_glossary(tmp_path):
     assert _glossary_issues(dict(_BASE_CONFIG), tmp_path) == []
 
 
-def test_cli_check_fails_on_an_unreadable_glossary(tmp_path, capsys):
-    """`localize check` reports the problem before a run is started."""
+@pytest.mark.parametrize("command", ["check", "validate", "doctor", "smoke"])
+def test_cli_preflight_fails_on_an_unreadable_glossary(tmp_path, capsys, command):
+    """Every preflight command reports the problem before a run is started."""
     repo = tmp_path / "repo"
     i18n = repo / "i18n"
     i18n.mkdir(parents=True)
@@ -157,9 +179,13 @@ def test_cli_check_fails_on_an_unreadable_glossary(tmp_path, capsys):
     )
     (tmp_path / "glossary.json").write_text('{"de": {"a": "b",}}', encoding="utf-8")
 
-    exit_code = cli.main(["check", "--config", str(config_path)])
+    exit_code = cli.main([command, "--config", str(config_path)])
 
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "glossary.json" in captured.err + captured.out
     assert "Preflight OK" not in captured.out
+    assert "Configuration OK" not in captured.out
+
+    (tmp_path / "glossary.json").write_text("{}", encoding="utf-8")
+    assert cli.main([command, "--config", str(config_path)]) == 0

@@ -208,7 +208,7 @@ Key settings:
 | `supported_locales` | Target locales. |
 | `project_context` | Product/domain context injected into prompts. |
 | `brand_technical_glossary` | Terms that must not be translated. |
-| `glossary_file_path` | Glossary JSON file with required term translations per locale; defaults to `glossary.json` next to the config. A missing file means no glossary. A file that is not a readable JSON object stops the run. |
+| `glossary_file_path` | Glossary JSON file with required term translations per locale; defaults to `glossary.json` next to the config. A missing file means no glossary; so does a file that contains `{}`. Any other file that is not a readable JSON object, including an empty file, stops the run and fails the preflight commands. |
 | `translation_glossary_enforcement` | `exact` by default; use `prompt-only` for preferred lemmas that require grammatical inflection. |
 | `ignore_key_patterns` | Python regexes matched against adapter keys; matching keys are copied from source and never translated. |
 | `style_rules` | Locale-specific writing rules. |
