@@ -81,6 +81,13 @@ jobs:
       - name: Set up Docker Buildx
         if: ${{ matrix.python-version == '3.11' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        with:
+          # On 2026-11-11 the runner's DNS could not resolve archive.ubuntu.com
+          # or security.ubuntu.com inside the image build for hours. Public
+          # resolvers keep the required build independent of that path.
+          buildkitd-config-inline: |
+            [dns]
+              nameservers = ["1.1.1.1", "8.8.8.8"]
 
       # QEMU not required unless building multi-arch
       # - name: Set up QEMU
