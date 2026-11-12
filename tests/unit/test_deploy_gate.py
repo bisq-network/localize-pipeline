@@ -226,6 +226,23 @@ def test_passes_extra_build_options_to_compose(checkout: DeployCheckout):
     assert checkout.docker_args()[-1] == "--no-cache"
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--build-arg", "LOCALIZE_SOURCE_COMMIT=" + "0" * 40),
+        ("--build-arg=LOCALIZE_SOURCE_COMMIT=" + "0" * 40,),
+        ("--build-arg", "LOCALIZE_SOURCE_COMMIT"),
+        ("--build-arg=LOCALIZE_SOURCE_COMMIT",),
+    ],
+)
+def test_refuses_build_options_that_set_the_stamp(checkout: DeployCheckout, options):
+    result = checkout.run(*options)
+
+    assert result.returncode != 0
+    assert "must not set LOCALIZE_SOURCE_COMMIT" in result.stderr
+    assert checkout.docker_args() is None
+
+
 def test_check_only_prints_the_merged_commit_without_building(checkout: DeployCheckout):
     result = checkout.run("--check-only")
 
@@ -514,6 +531,8 @@ def test_dockerfile_stamps_only_the_commit_supplied_by_the_gate():
     assert 'ARG LOCALIZE_SOURCE_COMMIT=""' in dockerfile
     assert 'LABEL org.opencontainers.image.revision="${LOCALIZE_SOURCE_COMMIT}"' in dockerfile
     assert "rm -f /app/.source-commit" in dockerfile
+    assert '"${LOCALIZE_SOURCE_COMMIT}" > /app/.source-commit' in dockerfile
+    assert "${LOCALIZE_SOURCE_COMMIT_FILE:-/app/.source-commit}" in ENTRYPOINT.read_text(encoding="utf-8")
     assert dockerfile.index("ARG LOCALIZE_SOURCE_COMMIT") > dockerfile.index("COPY . .")
 
 

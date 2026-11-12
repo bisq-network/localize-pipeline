@@ -55,6 +55,18 @@ if [ "${1:-}" = "--check-only" ]; then
   [ "$#" -eq 0 ] || fail "--check-only takes no further arguments."
 fi
 
+# Only this script sets the stamp. A second LOCALIZE_SOURCE_COMMIT build
+# argument from the caller could replace it, depending on how Compose treats
+# duplicates, and the image would then name a commit it was not built from.
+for build_option in "$@"; do
+  case "$build_option" in
+    LOCALIZE_SOURCE_COMMIT | LOCALIZE_SOURCE_COMMIT=* | \
+      --build-arg=LOCALIZE_SOURCE_COMMIT | --build-arg=LOCALIZE_SOURCE_COMMIT=*)
+      fail "build options must not set LOCALIZE_SOURCE_COMMIT; this script records the merged commit itself."
+      ;;
+  esac
+done
+
 # 1. The remote must be the upstream repository on an approved host, not a
 # fork, a mirror or a local path. `git remote get-url` shows the URL that
 # fetch really uses, after any insteadOf rewrite.
