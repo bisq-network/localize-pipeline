@@ -61,6 +61,14 @@ esac
 """
 
 
+_BSD_DF_STUB = f"""#!/bin/sh
+case "$1" in
+  --*) echo "df: illegal option -- -" >&2; exit 64 ;;
+  *) printf '%s' '{_DF_TABLE}' ;;
+esac
+"""
+
+
 def _run_docker_cleanup(tmp_path, install_dir, df_stub):
     """Run a copy of the cleanup script with stub `docker` and `df` commands."""
     project = tmp_path / "parent" / "project"
@@ -102,6 +110,17 @@ def test_docker_cleanup_logs_inside_the_project(tmp_path, install_dir):
     assert "Disk before cleanup: 0 GB available (40% used)" in log_text
     assert "Docker cleanup completed successfully" in log_text
     assert not (project.parent / "logs").exists()
+
+
+def test_docker_cleanup_falls_back_when_df_lacks_gnu_options(tmp_path):
+    """A df without --block-size and --output must not end the cleanup."""
+    project, result = _run_docker_cleanup(tmp_path, "scripts", _BSD_DF_STUB)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
+    assert "Disk before cleanup: 0 GB available (40% used)" in log_text
+    assert "stub docker builder prune" in log_text
+    assert "Docker cleanup completed successfully" in log_text
 
 
 def test_entrypoint_insecure_ssh_preserves_identity_config():

@@ -42,8 +42,10 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 echo "[$DATE] Starting Docker cleanup..." | tee -a "$LOG_FILE"
 
-# Get disk usage before cleanup (in KB for robustness across systems)
-BEFORE_AVAIL=$(df --block-size=1K / 2>/dev/null | awk 'NR==2 {print $4}')
+# Get disk usage before cleanup (in KB for robustness across systems).
+# "|| true" keeps "set -e" and pipefail from ending the script when df rejects
+# a GNU-only option, so the fallback below can run.
+BEFORE_AVAIL=$(df --block-size=1K / 2>/dev/null | awk 'NR==2 {print $4}' || true)
 if ! [[ "$BEFORE_AVAIL" =~ ^[0-9]+$ ]]; then
     # Fallback for systems without --block-size support (e.g., macOS)
     BEFORE_AVAIL=$(df -k / | awk 'NR==2 {print $4}')
@@ -54,7 +56,7 @@ if ! [[ "$BEFORE_AVAIL" =~ ^[0-9]+$ ]]; then
 fi
 BEFORE_GB=$((BEFORE_AVAIL / 1024 / 1024))
 # Extract percentage with robust parsing
-BEFORE_PERCENT=$(df --output=pcent / 2>/dev/null | tail -1 | sed 's/[^0-9]//g')
+BEFORE_PERCENT=$(df --output=pcent / 2>/dev/null | tail -1 | sed 's/[^0-9]//g' || true)
 if ! [[ "$BEFORE_PERCENT" =~ ^[0-9]+$ ]]; then
     # Fallback: find the column with % sign
     BEFORE_PERCENT=$(df / | awk 'NR==2 {for(i=1;i<=NF;i++) if($i ~ /%$/) {gsub(/%/, "", $i); print $i; exit}}')
@@ -78,7 +80,7 @@ echo "[$DATE] Removing old build cache..." | tee -a "$LOG_FILE"
 docker builder prune -f --filter "until=168h" 2>&1 | tee -a "$LOG_FILE"
 
 # Get disk usage after cleanup (in KB for robustness across systems)
-AFTER_AVAIL=$(df --block-size=1K / 2>/dev/null | awk 'NR==2 {print $4}')
+AFTER_AVAIL=$(df --block-size=1K / 2>/dev/null | awk 'NR==2 {print $4}' || true)
 if ! [[ "$AFTER_AVAIL" =~ ^[0-9]+$ ]]; then
     # Fallback for systems without --block-size support (e.g., macOS)
     AFTER_AVAIL=$(df -k / | awk 'NR==2 {print $4}')
@@ -89,7 +91,7 @@ if ! [[ "$AFTER_AVAIL" =~ ^[0-9]+$ ]]; then
 fi
 AFTER_GB=$((AFTER_AVAIL / 1024 / 1024))
 # Extract percentage with robust parsing
-AFTER_PERCENT=$(df --output=pcent / 2>/dev/null | tail -1 | sed 's/[^0-9]//g')
+AFTER_PERCENT=$(df --output=pcent / 2>/dev/null | tail -1 | sed 's/[^0-9]//g' || true)
 if ! [[ "$AFTER_PERCENT" =~ ^[0-9]+$ ]]; then
     # Fallback: find the column with % sign
     AFTER_PERCENT=$(df / | awk 'NR==2 {for(i=1;i<=NF;i++) if($i ~ /%$/) {gsub(/%/, "", $i); print $i; exit}}')
