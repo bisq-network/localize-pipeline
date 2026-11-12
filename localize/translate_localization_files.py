@@ -41,6 +41,7 @@ from localize.json_response import (
     loads_json_object,
 )
 from localize.formats.adapters import (
+    LocalizationFileAdapter,
     get_localization_adapter,
     lint_properties_file as lint_properties_file,
 )
@@ -2696,31 +2697,36 @@ class _QueueRun:
     skipped_files: Dict[str, List[str]]
 
 
-async def _process_queue_file(
+@dataclass(frozen=True)
+class _QueueFile:
+    """One target file of the queue, with the values that are fixed for it."""
+
+    translation_file: str
+    """Path of the target file, relative to the queue folder."""
+    translation_file_path: str
+    source_file_path: str
+    localization_format: LocalizationFormat
+    adapter: LocalizationFileAdapter
+    language_code: str
+    target_language: str
+    style_rules_text: str
+    language_glossary: Mapping[str, str]
+    """Required terms for the language, as sent to the model."""
+    enforced_language_glossary: Mapping[str, str]
+    """The terms that validation enforces; empty for prompt-only enforcement."""
+    memory_context_fingerprint: str
+
+
+def _resolve_queue_file(
         run: _QueueRun,
         translation_file: str,
         localization_profile: LocalizationProfile,
-) -> Optional[int]:
-    """Translate one queued file and write the result to the translated queue.
+) -> Optional[_QueueFile]:
+    """Work out language, glossary and paths for one queued file.
 
-    Returns:
-        The number of keys that were selected for translation when the file
-        was processed (0 when only ignored keys were copied from the source).
-        ``None`` when the file was skipped or needed no work; a skipped file
-        has an entry in ``run.skipped_files``.
+    Returns ``None`` and records the reason in ``run.skipped_files`` when the
+    language is unknown or the source file is missing.
     """
-    translation_queue_folder = run.translation_queue_folder
-    translated_queue_folder = run.translated_queue_folder
-    glossary = run.glossary
-    key_ledger = run.key_ledger
-    translation_memory = run.translation_memory
-    semaphore = run.semaphore
-    rate_limiter = run.rate_limiter
-    safeguards = run.safeguards
-    _sample = run.sample
-    validation_summary = run.validation_summary
-    run_metrics = run.run_metrics
-    skipped_files = run.skipped_files
     localization_format = localization_profile.localization_format
     localization_layout = localization_profile.localization_layout
     adapter = get_localization_adapter(localization_format)
@@ -2732,16 +2738,16 @@ async def _process_queue_file(
     )
     if not language_code:
         logger.warning(f"Skipping file {translation_file}: unable to extract language code.")
-        skipped_files[translation_file] = ["Unable to extract language code."]
+        run.skipped_files[translation_file] = ["Unable to extract language code."]
         return None
     # 4) Now we find the "friendly name" from the dictionary
     target_language = language_code_to_name(language_code)
     if not target_language:
         logger.warning(f"Skipping file {translation_file}: unsupported language code '{language_code}'.")
-        skipped_files[translation_file] = [f"Unsupported language code: {language_code}."]
+        run.skipped_files[translation_file] = [f"Unsupported language code: {language_code}."]
         return None
     style_rules_text_for_review = PRECOMPUTED_STYLE_RULES_TEXT.get(language_code, "")
-    raw_language_glossary = glossary.get(language_code, {})
+    raw_language_glossary = run.glossary.get(language_code, {})
     language_glossary = (
         raw_language_glossary
         if isinstance(raw_language_glossary, Mapping)
@@ -2753,14 +2759,14 @@ async def _process_queue_file(
     )
     memory_context_fingerprint = translation_memory_context_fingerprint(
         locale=language_code,
-        glossary=glossary,
+        glossary=run.glossary,
         brand_glossary=BRAND_GLOSSARY,
         style_rules_text=style_rules_text_for_review,
         translation_glossary_enforcement=TRANSLATION_GLOSSARY_ENFORCEMENT,
     )
 
     # Define full paths
-    translation_file_path = os.path.join(translation_queue_folder, translation_file)
+    translation_file_path = os.path.join(run.translation_queue_folder, translation_file)
     source_file_name = localization_layout.source_path_for_target(
         translation_file,
         list(LANGUAGE_CODES.keys()),
@@ -2770,13 +2776,43 @@ async def _process_queue_file(
 
     if not os.path.exists(source_file_path):
         logger.warning(f"Source file '{source_file_name}' not found in '{INPUT_FOLDER}'. Skipping.")
-        skipped_files[translation_file] = [f"Source file not found: {source_file_name}."]
+        run.skipped_files[translation_file] = [f"Source file not found: {source_file_name}."]
         return None
 
-    logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
+    return _QueueFile(
+        translation_file=translation_file,
+        translation_file_path=translation_file_path,
+        source_file_path=source_file_path,
+        localization_format=localization_format,
+        adapter=adapter,
+        language_code=language_code,
+        target_language=target_language,
+        style_rules_text=style_rules_text_for_review,
+        language_glossary=language_glossary,
+        enforced_language_glossary=enforced_language_glossary,
+        memory_context_fingerprint=memory_context_fingerprint,
+    )
 
+
+def _check_queue_file_before_translation(
+        run: _QueueRun,
+        file: _QueueFile,
+) -> Optional[Tuple[Dict[str, Dict[str, str]], Set[str], Set[str]]]:
+    """Validate and lint one queued file before any translation work.
+
+    Returns:
+        The ledger entries of the file, the keys that Git reports as changed in
+        the working tree, and the keys that the key synchronization added.
+        ``None`` when the file has validation or lint errors; the errors are
+        then recorded in ``run.skipped_files``.
+    """
+    translation_file = file.translation_file
+    translation_file_path = file.translation_file_path
+    source_file_path = file.source_file_path
+    localization_format = file.localization_format
+    adapter = file.adapter
     # --- Pre-flight Validator ---
-    file_ledger_entries = key_ledger.get(translation_file, {})
+    file_ledger_entries = run.key_ledger.get(translation_file, {})
     original_input_file_path = os.path.join(INPUT_FOLDER, translation_file)
     raw_git_changed_keys = get_working_tree_changed_keys(
         original_input_file_path,
@@ -2795,7 +2831,7 @@ async def _process_queue_file(
         logger.error(f"Skipping translation for '{translation_file}' due to pre-translation validation errors.")
         for error in validation_errors:
             logger.error(f"  - {error}")
-        skipped_files[translation_file] = validation_errors
+        run.skipped_files[translation_file] = validation_errors
         return None
     # --- End Validator ---
 
@@ -2808,9 +2844,57 @@ async def _process_queue_file(
         logger.error(f"Linter found errors in '{translation_file}'. Skipping translation for this file.")
         for error in lint_errors:
             logger.error(f"  - {error}")
-        skipped_files[translation_file] = lint_errors
+        run.skipped_files[translation_file] = lint_errors
         return None
     # --- End Linter Check ---
+
+    return file_ledger_entries, raw_git_changed_keys, newly_added_keys
+
+
+async def _process_queue_file(
+        run: _QueueRun,
+        translation_file: str,
+        localization_profile: LocalizationProfile,
+) -> Optional[int]:
+    """Translate one queued file and write the result to the translated queue.
+
+    Returns:
+        The number of keys that were selected for translation when the file
+        was processed (0 when only ignored keys were copied from the source).
+        ``None`` when the file was skipped or needed no work; a skipped file
+        has an entry in ``run.skipped_files``.
+    """
+    translated_queue_folder = run.translated_queue_folder
+    glossary = run.glossary
+    key_ledger = run.key_ledger
+    translation_memory = run.translation_memory
+    semaphore = run.semaphore
+    rate_limiter = run.rate_limiter
+    safeguards = run.safeguards
+    _sample = run.sample
+    validation_summary = run.validation_summary
+    run_metrics = run.run_metrics
+    skipped_files = run.skipped_files
+    file = _resolve_queue_file(run, translation_file, localization_profile)
+    if file is None:
+        return None
+    localization_format = file.localization_format
+    adapter = file.adapter
+    language_code = file.language_code
+    target_language = file.target_language
+    style_rules_text_for_review = file.style_rules_text
+    language_glossary = file.language_glossary
+    enforced_language_glossary = file.enforced_language_glossary
+    memory_context_fingerprint = file.memory_context_fingerprint
+    translation_file_path = file.translation_file_path
+    source_file_path = file.source_file_path
+
+    logger.info(f"Processing file '{translation_file}' for language '{target_language}'...")
+
+    preflight = _check_queue_file_before_translation(run, file)
+    if preflight is None:
+        return None
+    file_ledger_entries, raw_git_changed_keys, newly_added_keys = preflight
 
     # Load files
     parsed_lines, target_translations = adapter.parse_file(translation_file_path)
