@@ -3,7 +3,7 @@ import logging
 import os
 import shutil
 import tempfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -136,3 +136,24 @@ def integration_test_environment(integration_test_paths):
     # Teardown after each test
     if os.path.exists(paths['mock_glossary_path']):
         os.remove(paths['mock_glossary_path'])
+
+
+@pytest.fixture
+def skip_retry_backoff(monkeypatch):
+    """Run the pipeline's retry logic without waiting for the backoff delay.
+
+    A mocked model that returns an unusable response makes the pipeline retry
+    with exponential backoff (about 5 s, then 10 s). The retry decisions, the
+    attempt count and the log messages stay real; only the wait is skipped.
+    The sleep is replaced only while ``_handle_retry`` runs, so other code that
+    sleeps is not affected.
+    """
+    import localize.translate_localization_files as pipeline
+
+    real_handle_retry = pipeline._handle_retry
+
+    async def handle_retry_without_waiting(*args, **kwargs):
+        with patch.object(pipeline.asyncio, "sleep", new=AsyncMock()):
+            return await real_handle_retry(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_handle_retry", handle_retry_without_waiting)

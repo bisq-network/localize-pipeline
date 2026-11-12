@@ -24,6 +24,10 @@ from localize.translation_memory import (
 
 # All fixtures are now defined in conftest.py and are auto-discovered by pytest.
 
+# Several tests here use a mocked model whose reply is not valid review JSON,
+# so the review step retries. Skip the real backoff wait (about 15 s per file).
+pytestmark = pytest.mark.usefixtures("skip_retry_backoff")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["app_xx.properties", "missing_de.properties"])
