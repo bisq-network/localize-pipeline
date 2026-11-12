@@ -2593,6 +2593,37 @@ def copy_files_to_translation_queue(
             shutil.copy2(source_file_path, dest_path)
             logger.info(f"Copied translation file '{source_file_path}' to '{dest_path}'.")
 
+def _discover_queue_files(
+        translation_queue_folder: str,
+) -> Tuple[List[Tuple[str, LocalizationProfile]], Dict[str, List[str]]]:
+    """Find the files to translate in the queue folder.
+
+    Returns:
+        - The target files with their localization profile, sorted by path.
+        - A skip record for each file that has a supported format but matches
+          no target locale profile. Source files and hidden files are ignored.
+    """
+    localization_files: List[Tuple[str, LocalizationProfile]] = []
+    skipped_files: Dict[str, List[str]] = {}
+    for root, dirs, files in os.walk(translation_queue_folder):
+        dirs.sort()
+        for name in files:
+            if name.startswith("."):
+                continue
+            relative_path = os.path.relpath(os.path.join(root, name), translation_queue_folder)
+            relative_path = relative_path.replace('\\', '/')
+            profile = find_target_localization_profile(relative_path)
+            if profile:
+                localization_files.append((relative_path, profile))
+            elif not is_source_localization_file(relative_path) and any(
+                item.localization_format.is_supported_file(relative_path)
+                for item in _iter_localization_profiles()
+            ):
+                skipped_files[relative_path] = ["No supported target locale profile."]
+    localization_files.sort(key=lambda item: item[0])
+    return localization_files, skipped_files
+
+
 async def process_translation_queue(
         translation_queue_folder: str,
         translated_queue_folder: str,
@@ -2616,24 +2647,7 @@ async def process_translation_queue(
         - Total number of keys translated across all files.
         Run metrics are attached to the result as ``result.run_metrics``.
     """
-    localization_files: List[Tuple[str, LocalizationProfile]] = []
-    skipped_files: Dict[str, List[str]] = {}
-    for root, dirs, files in os.walk(translation_queue_folder):
-        dirs.sort()
-        for name in files:
-            if name.startswith("."):
-                continue
-            relative_path = os.path.relpath(os.path.join(root, name), translation_queue_folder)
-            relative_path = relative_path.replace('\\', '/')
-            profile = find_target_localization_profile(relative_path)
-            if profile:
-                localization_files.append((relative_path, profile))
-            elif not is_source_localization_file(relative_path) and any(
-                item.localization_format.is_supported_file(relative_path)
-                for item in _iter_localization_profiles()
-            ):
-                skipped_files[relative_path] = ["No supported target locale profile."]
-    localization_files.sort(key=lambda item: item[0])
+    localization_files, skipped_files = _discover_queue_files(translation_queue_folder)
     safeguards = config.run_safeguards if not DRY_RUN else None
     if safeguards and not _sample:
         # Run the normal translation/serialization validators in an isolated
