@@ -96,6 +96,13 @@ _CAPACITY_FAILURE_MARKERS = (
     "billing_hard_limit_reached",
     "credit balance is too low",
 )
+_APOSTROPHE_VARIANTS = str.maketrans(
+    {
+        "\N{LEFT SINGLE QUOTATION MARK}": "'",
+        "\N{RIGHT SINGLE QUOTATION MARK}": "'",
+        "\N{MODIFIER LETTER APOSTROPHE}": "'",
+    }
+)
 
 _MAX_RESULT_BYTES = 2 * 1024 * 1024
 _EVIDENCE_PERMISSION_PROFILE = "guardian_evidence"
@@ -725,15 +732,25 @@ def to_guardian_assessments(
     return tuple(assessments)
 
 
+def _comparable_diagnostic(output: str) -> str:
+    """Fold case and apostrophe style so ASCII markers match CLI prose.
+
+    Codex CLI 0.160.1 writes its usage-limit message with U+2019 as the
+    apostrophe, on stdout only.
+    """
+
+    return output.casefold().translate(_APOSTROPHE_VARIANTS)
+
+
 def _is_authentication_failure(output: str) -> bool:
-    lowered = output.casefold()
+    lowered = _comparable_diagnostic(output)
     return any(marker in lowered for marker in _AUTHENTICATION_FAILURE_MARKERS)
 
 
 def _is_capacity_failure(output: str) -> bool:
     """Return whether an immediate retry cannot restore provider capacity."""
 
-    lowered = output.casefold()
+    lowered = _comparable_diagnostic(output)
     return any(marker in lowered for marker in _CAPACITY_FAILURE_MARKERS)
 
 
