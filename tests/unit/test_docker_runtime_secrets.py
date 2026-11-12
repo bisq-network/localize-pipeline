@@ -71,7 +71,7 @@ def test_image_source_is_readable_without_granting_non_owner_write(tmp_path, res
 
 def test_image_build_checks_cli_as_unprivileged_runtime_user():
     dockerfile = _dockerfile()
-    assert "RUN gosu appuser python3.11 -m localize.cli --help" in dockerfile
+    assert "RUN gosu appuser python3 -m localize.cli --help" in dockerfile
     workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
     assert "chmod -R go-rwx localize" in workflow
     assert workflow.index("chmod -R go-rwx localize") < workflow.index("name: Build Docker Image")

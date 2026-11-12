@@ -43,6 +43,10 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Changed
 
+- The Docker image now runs Python 3.12 from the Ubuntu 24.04 archive in a
+  virtual environment at `/opt/venv`, instead of Python 3.11 from the
+  deadsnakes PPA. Image builds no longer depend on Launchpad. Use `python3`,
+  not `python3.11`, for commands run inside the container.
 - Move orchestration, format handling, and model-provider implementations into
   `localize.core`, `localize.formats`, and `localize.providers`. Their documented
   public exports are unchanged. Direct imports of former root implementation
