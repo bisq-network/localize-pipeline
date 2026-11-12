@@ -25,6 +25,7 @@ override or secret.
 | `REVIEW_MODEL_NAME` | Python pipeline, Action wrapper | Overrides the holistic-review model. An enabled semantic review inherits this override only when `semantic_review.model` is omitted, empty, or null; an explicit semantic model remains authoritative. |
 | `MODEL_REASONING_EFFORT` | Python pipeline | Overrides `model_reasoning_effort` for translation drafts. |
 | `REVIEW_REASONING_EFFORT` | Python pipeline | Overrides `review_reasoning_effort` for holistic review. |
+| `HOLISTIC_REVIEW_CHUNK_SIZE` | Python pipeline | Overrides `holistic_review_chunk_size`, the number of keys sent in one holistic-review request; the config default is `30`. |
 | `PROCESS_ALL_FILES` | Python pipeline, Action wrapper | When true, process all discoverable translation files rather than changed files only. |
 
 ## Runtime Controls
@@ -35,9 +36,12 @@ override or secret.
 | `LOCALIZE_SMOKE_ONLY` | `update-translations.sh` | Runs the smoke path and exits before Transifex, translation, commit, or PR work. |
 | `TX_PULL_TIMEOUT` | `update-translations.sh` | Total timeout in seconds for all `tx pull` attempts and retry delays; defaults to `3600`. |
 | `MAX_FILES_PER_PR` | `update-translations.sh` | Maximum files per generated PR batch; defaults to `90`. |
-| `TRANSLATION_FILTER_GLOB` | Python pipeline, local runner, shell scripts | Filters translation files by basename glob. The `translation_file_filter_glob` config key sets this when the environment does not. |
+| `TRANSLATION_FILTER_GLOB` | Python pipeline, shell scripts | Filters translation files by basename glob. The `translation_file_filter_glob` config key sets this when the environment does not. |
 | `TRANSLATION_QUALITY_AUDIT_SCOPE` | `update-translations.sh` | Optional CLI override for quality-gate audit scope. When unset, the gate uses config. |
 | `LOCALIZE_ALLOW_RESET_LEDGER` | Python pipeline | Allows a corrupt translation-key ledger to be backed up and reset. Default behavior fails closed. |
+| `LOCALIZE_STATE_DIR` | `update-translations.sh` | Directory for the run lock and the Git source baseline; defaults to `state` inside the log directory. |
+| `LOCALIZE_DISABLE_ENTRY_POINT_PLUGINS` | Python pipeline | When true, does not load format plugins that installed packages register through entry points. |
+| `GUARDIAN_QUALITY_REPORT_ENABLED` | `update-translations.sh` | When `true`, publishes the typed quality report for the Guardian after a PR is created. See [guardian.md](guardian.md). |
 | `HEALTHCHECK_URL` | `update-translations.sh` | Optional URL pinged after successful server runs. Logs record the HTTP status only; for `hc-ping.com` URLs, only an exact `OK` response counts as accepted. |
 
 ## Docker And Repository Controls
@@ -47,6 +51,15 @@ override or secret.
 | `APPUSER_UID` | Docker entrypoint | UID for the unprivileged runtime user and mounted volume ownership. |
 | `APPUSER_GID` | Docker entrypoint | GID for the unprivileged runtime user and mounted volume ownership. |
 | `REPO_CLEANUP_STRATEGY` | Docker entrypoint | Handles dirty target repos before checkout: `auto`, `force`, or `skip`. |
+| `REPO_STASH_CHANGES` | Docker entrypoint | When `true` (default), stashes local changes in the target repo before the reset. When `false`, the reset discards them. |
+| `REPO_PRESERVE_STASH` | Docker entrypoint | When `true` (default), keeps that stash for manual recovery. When `false`, drops it after a successful checkout. |
+| `CHOWN_TARGET_REPO_RECURSIVE` | Docker entrypoint | When `true`, changes the owner of the whole target repo volume to the runtime user. Defaults to `false`. |
+| `LOG_DIR_MODE` | Docker entrypoint | Permission mode for `/app/logs`; defaults to `0755`. |
+| `APP_RUNTIME_DIR_MODE` | Docker entrypoint | Permission mode for the runtime queue directories; defaults to `0755`. |
+| `ALLOW_INSECURE_SSH` | Docker entrypoint | When `true`, disables SSH host key verification. Development only. |
+| `ALLOW_RUN_AS_ROOT` | Docker entrypoint | When `true`, runs as root if the image has no `appuser`. Not recommended. |
+| `CONTAINER_NAME` | Docker Compose | Container name; defaults to `translator-service`. |
+| `VOLUME_NAME` | Docker Compose | Name of the target repo volume; defaults to `target-repo-data`. |
 | `LOCALIZE_ALLOW_UNVERIFIED_IMAGE` | Docker entrypoint | When true, runs an image that `scripts/deploy-build.sh` did not stamp with a merged commit. Local development only; never set it in production. |
 | `DEPLOY_REMOTE` | `scripts/deploy-build.sh` | Remote that points to upstream; defaults to `origin`. |
 | `DEPLOY_BRANCH` | `scripts/deploy-build.sh` | Upstream branch that counts as merged; defaults to `main`. |
