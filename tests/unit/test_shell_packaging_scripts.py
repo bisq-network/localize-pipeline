@@ -1,5 +1,9 @@
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -43,6 +47,61 @@ def test_docker_cleanup_does_not_prune_shared_volumes_or_tagged_images():
     assert "docker image prune -a" not in script
     assert 'docker image prune -f --filter "dangling=true" 2>&1' not in script
     assert 'docker image prune -f --filter "dangling=true" --filter "until=168h"' in script
+
+
+_DF_TABLE = (
+    "Filesystem 1K-blocks Used Available Use% Mounted on\n"
+    "/dev/stub 1000000 400000 600000 40% /\n"
+)
+_GNU_DF_STUB = f"""#!/bin/sh
+case "$1" in
+  --output=pcent) printf 'Use%%\\n 40%%\\n' ;;
+  *) printf '%s' '{_DF_TABLE}' ;;
+esac
+"""
+
+
+def _run_docker_cleanup(tmp_path, install_dir, df_stub):
+    """Run a copy of the cleanup script with stub `docker` and `df` commands."""
+    project = tmp_path / "parent" / "project"
+    script_dir = project / install_dir
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / "docker-cleanup.sh"
+    shutil.copy(REPO_ROOT / "scripts" / "docker-cleanup.sh", script)
+    script.chmod(0o755)
+
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    for name, body in (
+        ("docker", '#!/bin/sh\necho "stub docker $*"\n'),
+        ("df", df_stub),
+    ):
+        stub = stub_bin / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o755)
+
+    result = subprocess.run(
+        [str(script)],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return project, result
+
+
+@pytest.mark.parametrize("install_dir", ["scripts", "."])
+def test_docker_cleanup_logs_inside_the_project(tmp_path, install_dir):
+    """The checkout copy and the installed root copy use the same log file."""
+    project, result = _run_docker_cleanup(tmp_path, install_dir, _GNU_DF_STUB)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
+    assert "stub docker container prune" in log_text
+    assert "Disk before cleanup: 0 GB available (40% used)" in log_text
+    assert "Docker cleanup completed successfully" in log_text
+    assert not (project.parent / "logs").exists()
 
 
 def test_entrypoint_insecure_ssh_preserves_identity_config():

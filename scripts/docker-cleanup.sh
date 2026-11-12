@@ -27,7 +27,13 @@ set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# The script runs from <project>/scripts/ in a checkout, or from the project
+# root when setup-cron-cleanup.sh installed a copy there.
+if [ "$(basename "$SCRIPT_DIR")" = "scripts" ]; then
+    PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+else
+    PROJECT_ROOT="$SCRIPT_DIR"
+fi
 LOG_FILE="${PROJECT_ROOT}/logs/docker-cleanup.log"
 DATE=$(date "+%Y-%m-%d %H:%M:%S")
 
