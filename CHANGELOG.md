@@ -9,6 +9,14 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Added
 
+- Build production images with `scripts/deploy-build.sh`, which refuses
+  commits that a fresh fetch does not show on upstream `main` and refuses local
+  edits. It builds from a clean `git archive` export of the commit, and the
+  image records that commit. The entrypoint refuses to run an image without the
+  record. **Operators:** images built with a plain `docker compose build` no
+  longer start; local development sets `LOCALIZE_ALLOW_UNVERIFIED_IMAGE=true`
+  in its local `docker/.env`. Images and commits from before this change do not
+  enforce the check.
 - Bound provider requests with an opt-in persistent rolling 24-hour budget,
   validate a small isolated sample before the full queue, and reuse exact
   validated outputs after restarts. The Bisq 2 and Bisq Mobile profiles enable
@@ -39,6 +47,10 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Changed
 
+- The Docker image now runs Python 3.12 from the Ubuntu 24.04 archive in a
+  virtual environment at `/opt/venv`, instead of Python 3.11 from the
+  deadsnakes PPA. Image builds no longer depend on Launchpad. Use `python3`,
+  not `python3.11`, for commands run inside the container.
 - Move orchestration, format handling, and model-provider implementations into
   `localize.core`, `localize.formats`, and `localize.providers`. Their documented
   public exports are unchanged. Direct imports of former root implementation

@@ -108,28 +108,23 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies, add repositories, and clean up in a single layer.
+# Install system dependencies and clean up in a single layer. Every package,
+# Python included, comes from the Ubuntu archive of the pinned base image.
+# The build adds no PPA, so a Launchpad outage cannot block it.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        gnupg \
-        software-properties-common && \
     apt-get install -y --no-install-recommends --only-upgrade \
         apt \
         libapt-pkg6.0t64 && \
-    add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
+        ca-certificates \
+        curl \
         git \
+        gnupg \
         jq \
-        python3.11 \
-        python3.11-venv \
-        python3-pip \
-        openssh-client && \
-    apt-get remove -y software-properties-common && \
-    apt-get autoremove -y && \
+        openssh-client \
+        python3.12 \
+        python3.12-venv && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -150,8 +145,13 @@ RUN gosu --version
 RUN groupadd --gid 9999 appuser && \
     useradd --uid 9999 --gid 9999 --shell /bin/bash --create-home appuser
 
-# Make python3.11 the default python3
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+# Ubuntu marks its Python as externally managed (PEP 668), so dependencies go
+# into a virtual environment. Putting it first on PATH makes every `python3`
+# call in the image and its scripts use it. --copies keeps a real interpreter
+# in the venv: code that resolves sys.executable, such as the Guardian sandbox
+# runner, would otherwise reach /usr/bin/python3.12 without the dependencies.
+RUN python3.12 -m venv --copies /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # Private deploy and GPG keys are mounted as runtime secrets and installed by
 # docker-entrypoint.sh so they never persist in image layers.
@@ -163,7 +163,7 @@ WORKDIR /app
 
 # Copy source and install python dependencies
 COPY requirements.txt .
-RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # COPY preserves checkout modes, including root-only files from umask 077.
@@ -174,7 +174,7 @@ RUN chmod -R a+rX /app && \
 
 # A root-only smoke check misses unreadable modules after privilege drop.
 # This requires neither runtime credentials nor a model call.
-RUN gosu appuser python3.11 -m localize.cli --help
+RUN gosu appuser python3 -m localize.cli --help
 
 # Set entrypoint
 ENTRYPOINT ["/app/docker/docker-entrypoint.sh"]
@@ -185,3 +185,14 @@ RUN chmod 644 /etc/ssh/ssh_known_hosts
 
 # Default command is the orchestration script so bare docker run uses PR gating.
 CMD ["/app/update-translations.sh"]
+
+# scripts/deploy-build.sh sets this only after proving that the commit is
+# merged into upstream main. docker-entrypoint.sh refuses to run without it.
+# Declared last so a new commit does not invalidate earlier cached layers.
+ARG LOCALIZE_SOURCE_COMMIT=""
+LABEL org.opencontainers.image.revision="${LOCALIZE_SOURCE_COMMIT}"
+RUN rm -f /app/.source-commit && \
+    if [ -n "${LOCALIZE_SOURCE_COMMIT}" ]; then \
+        printf '%s\n' "${LOCALIZE_SOURCE_COMMIT}" > /app/.source-commit && \
+        chmod 644 /app/.source-commit; \
+    fi
