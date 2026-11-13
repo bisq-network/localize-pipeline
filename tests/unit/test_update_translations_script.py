@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # The session autouse fixture patches this module by name.
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 _TRANSLATE_MODULE = importlib.import_module("localize.translate_localization_files")
@@ -310,6 +312,80 @@ def test_config_file_is_normalized_before_late_quality_gate_call():
     quality_gate_index = script.index("localize.translation_quality_gate")
 
     assert normalize_index < quality_gate_index
+
+
+def _run_main_path_until_target_root_check(tmp_path, config_text):
+    """Run the main path from config resolution to the first config-value check."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_text, encoding="utf-8")
+    script = (REPO_ROOT / "update-translations.sh").read_text()
+    config_helpers = script[
+        script.index("resolve_config_file() {") : script.index(
+            "run_smoke_only_if_requested() {"
+        )
+    ]
+    source_helpers = script[
+        script.index("normalize_translation_source() {") : script.index(
+            "sanitize_state_component() {"
+        )
+    ]
+    start = script.index('resolve_config_file\nlog "Using configuration file')
+    end = script.index('if [ ! -d "$TARGET_PROJECT_ROOT" ]; then', start)
+    main_path = script[start:end]
+    # yq prints nothing for a file it cannot parse, and `get_config_value`
+    # turns that into an empty value for every key.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_yq = fake_bin / "yq"
+    fake_yq.write_text("#!/usr/bin/env bash\nexit 1\n")
+    fake_yq.chmod(0o755)
+    harness = f"""
+set -euo pipefail
+log() {{ printf '%s\\n' "$1"; }}
+SCRIPT_DIR={str(REPO_ROOT)!r}
+APP_ROOT={str(REPO_ROOT)!r}
+{config_helpers}
+{source_helpers}
+{main_path}
+"""
+
+    env = dict(
+        os.environ,
+        PATH=f"{fake_bin}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+        TRANSLATOR_CONFIG_FILE=str(config_file),
+    )
+    result = subprocess.run(["bash", "-c", harness], text=True, capture_output=True, env=env)
+    return config_file, result
+
+
+@pytest.mark.parametrize(
+    ("config_text", "problem"),
+    [
+        ("target_project_root: [unclosed\n", "cannot be read as YAML"),
+        ("- target_project_root\n- input_folder\n", "must contain a YAML mapping"),
+        ("just a sentence\n", "must contain a YAML mapping"),
+    ],
+)
+def test_broken_config_stops_the_script_with_the_real_problem(tmp_path, config_text, problem):
+    config_file, result = _run_main_path_until_target_root_check(tmp_path, config_text)
+
+    assert result.returncode != 0
+    assert problem in result.stdout, result.stdout + result.stderr
+    assert f"'{config_file}'" in result.stdout
+    assert "TARGET_PROJECT_ROOT is not set" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    ["", "# only a comment\n", "input_folder: resources\n"],
+)
+def test_config_without_target_root_still_reports_the_missing_key(tmp_path, config_text):
+    config_file, result = _run_main_path_until_target_root_check(tmp_path, config_text)
+
+    assert result.returncode == 1
+    assert f"TARGET_PROJECT_ROOT is not set in {config_file}" in result.stdout, (
+        result.stdout + result.stderr
+    )
 
 
 def test_validation_summary_is_reset_before_translation_script_runs():

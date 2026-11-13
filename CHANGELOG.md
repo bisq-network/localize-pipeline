@@ -45,6 +45,13 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   and `smoke` reject the same files. A missing or empty config file still
   means default settings. **Operators:** a broken config file now stops the
   run before any model request; fix the file that the error names.
+- Stop `update-translations.sh` with the real problem when its config file is
+  broken: invalid YAML, content that is not a mapping of settings, text that
+  is not UTF-8, or a file that cannot be read. Earlier the script read every
+  setting as empty and stopped with a misleading `TARGET_PROJECT_ROOT is not
+  set` error. The script now checks the file with the reader that `localize
+  run` uses, so both reject the same files. An empty config file, or one
+  without `target_project_root`, still reports the missing setting.
 - Stop the run when the glossary file exists but is not a readable JSON
   object. Earlier the run continued with an empty glossary and produced
   translations without the required terms. This also applies to dry runs.

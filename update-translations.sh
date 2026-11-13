@@ -119,6 +119,33 @@ resolve_config_file() {
     export TRANSLATOR_CONFIG_FILE="$CONFIG_FILE"
 }
 
+# Read the config with the reader that `localize run` uses, so the script and
+# the run reject the same files. yq reads a broken file as empty, so without
+# this check the script stops with a misleading "TARGET_PROJECT_ROOT is not
+# set" error. An empty file passes; the missing-key checks report it.
+ensure_config_file_is_usable() {
+    local app_root="${APP_ROOT:-/app}"
+    if [ ! -d "$app_root" ]; then
+        app_root="$SCRIPT_DIR"
+    fi
+    local problem
+    if ! problem=$(cd "$app_root" && python3 - "$CONFIG_FILE" 2>&1 <<'PY'
+import sys
+
+from localize.config_file import ConfigLoadError, read_config_payload
+
+try:
+    read_config_payload(sys.argv[1])
+except ConfigLoadError as exc:
+    print(exc)
+    sys.exit(1)
+PY
+    ); then
+        log "$problem" "ERROR"
+        return 1
+    fi
+}
+
 run_smoke_only_if_requested() {
     if [[ "${LOCALIZE_SMOKE_ONLY:-false}" != "true" ]]; then
         return 0
@@ -566,6 +593,7 @@ log "Starting Git and Transifex validation..."
 # Use the environment variable if it's set, otherwise default to config.yaml in the CWD.
 resolve_config_file
 log "Using configuration file: $CONFIG_FILE"
+ensure_config_file_is_usable || exit 1
 
 # Helper function to parse values from config.yaml robustly using yq
 get_config_value() {
