@@ -29,6 +29,7 @@ This project has three supported surfaces:
 | --- | --- |
 | `localize/cli.py` | `localize formats/validate/check/doctor/smoke/run/init/guardian/bootstrap-pr/quality-gate/memory`. |
 | `localize/app_config.py` | Loads `config.yaml`, dotenv files and environment overrides into the typed `AppConfig`; `validate_config` reports configuration problems. |
+| `localize/config_file.py` | Reads `config.yaml` and rejects one that cannot be parsed or is not a mapping. |
 | `localize/logging_config.py` | Logger setup for console and rotating file output. |
 | `localize/bootstrap_pr.py` | Self-service onboarding branch and PR generation. |
 | `localize/init_config.py` | Config scaffolding and locale detection. |

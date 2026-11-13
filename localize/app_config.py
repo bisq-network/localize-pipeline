@@ -7,9 +7,9 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Pattern, Tuple
 
-import yaml
 from dotenv import load_dotenv
 
+from localize.config_file import read_config_payload
 from localize.glossary import GlossaryLoadError, read_glossary_payload
 from localize.ignore_keys import compile_ignore_key_patterns
 from localize.logging_config import setup_logger
@@ -455,43 +455,27 @@ def _load_dotenv_files(project_root: str) -> None:
 
 
 def _load_yaml_config(project_root: str) -> Dict[str, Any]:
-    """Load YAML configuration file with enhanced error handling and path resolution."""
+    """Load the YAML configuration file.
+
+    A missing or empty file means default settings, so local development runs
+    without a config file. A file that exists but cannot be used raises
+    ``ConfigLoadError``.
+    """
     config_file = _resolve_config_file_path(project_root)
 
-    config = {}
-    try:
-        # Check if file exists and is readable
-        if not os.path.exists(config_file):
-            print(f"Warning: Configuration file '{config_file}' not found. Using default configuration.",
-                  file=sys.stderr)
-            print(f"Tip: Create a config.yaml file in '{project_root}' or set TRANSLATOR_CONFIG_FILE environment variable.",
-                  file=sys.stderr)
-            return config
+    if not os.path.exists(config_file):
+        print(f"Warning: Configuration file '{config_file}' not found. Using default configuration.",
+              file=sys.stderr)
+        print(f"Tip: Create a config.yaml file in '{project_root}' or set TRANSLATOR_CONFIG_FILE environment variable.",
+              file=sys.stderr)
+        return {}
 
-        if not os.access(config_file, os.R_OK):
-            print(f"Error: Configuration file '{config_file}' exists but is not readable. Check file permissions.",
-                  file=sys.stderr)
-            return config
-
-        with open(config_file, 'r', encoding='utf-8') as config_file_stream:
-            loaded_config = yaml.safe_load(config_file_stream)
-            if loaded_config is None:
-                print(f"Warning: Configuration file '{config_file}' is empty. Using default configuration.",
-                      file=sys.stderr)
-            elif isinstance(loaded_config, dict):
-                config = loaded_config
-                print(f"Successfully loaded configuration from: {config_file}", file=sys.stderr)
-            else:
-                print(f"Error: Configuration file '{config_file}' must contain a YAML dictionary. Using defaults.",
-                      file=sys.stderr)
-
-    except yaml.YAMLError as e:
-        print(f"Error: Invalid YAML in configuration file '{config_file}': {e}", file=sys.stderr)
-        print("Please check your YAML syntax. Using default configuration.", file=sys.stderr)
-    except OSError as e:
-        print(f"Error: Could not read configuration file '{config_file}': {e}", file=sys.stderr)
-        print("Using default configuration.", file=sys.stderr)
-
+    config = read_config_payload(config_file)
+    if not config:
+        print(f"Warning: Configuration file '{config_file}' is empty. Using default configuration.",
+              file=sys.stderr)
+    else:
+        print(f"Successfully loaded configuration from: {config_file}", file=sys.stderr)
     return config
 
 
