@@ -35,6 +35,17 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 
 ### Fixed
 
+- Stop the run when the config file exists but cannot be used: invalid
+  YAML, content that is not a mapping of settings (for example a list or an
+  explicit `null`), text that is not UTF-8, or a file that cannot be read,
+  including one in a directory the run cannot enter. Earlier the run printed an
+  error and continued with default settings. Those point at a placeholder
+  repository, so the run failed later with an unrelated error about a missing
+  input folder. This also applies to dry runs. `localize run` now names the
+  file and the problem in one line, and `localize check`, `validate`, `doctor`
+  and `smoke` reject the same files. A missing or empty config file still
+  means default settings. **Operators:** a broken config file now stops the
+  run before any model request; fix the file that the error names.
 - Stop the run when the glossary file exists but is not a readable JSON
   object. Earlier the run continued with an empty glossary and produced
   translations without the required terms. This also applies to dry runs.

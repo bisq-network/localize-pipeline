@@ -26,6 +26,7 @@ from localize.app_config import (
     validate_config,
 )
 from localize.bootstrap_pr import BootstrapPrOptions, create_bootstrap_pr
+from localize.config_file import ConfigLoadError, config_file_missing, read_config_payload
 from localize.formats import list_localization_adapters, list_localization_formats
 from localize.init_config import main as init_config_main
 from localize.formats.profiles import load_localization_profiles
@@ -40,13 +41,8 @@ from localize.translation_memory import (
 
 
 def _load_config_file(config_path: Path) -> dict[str, Any]:
-    with config_path.open("r", encoding="utf-8") as file:
-        payload = yaml.safe_load(file)
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict):
-        raise ValueError("Configuration file must contain a YAML mapping.")
-    return payload
+    """Read the config the way the run reads it, so preflight rejects the same files."""
+    return read_config_payload(str(config_path))
 
 
 def _effective_api_base_url(config: dict[str, Any]) -> str | None:
@@ -112,7 +108,7 @@ def _cmd_formats(_args: argparse.Namespace) -> int:
 def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> int:
     config_path = Path(args.config).expanduser().resolve()
     _load_cli_dotenv()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     try:
@@ -199,7 +195,7 @@ def _load_checked_config(config_path: Path) -> tuple[dict[str, Any], list[Config
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     try:
@@ -251,7 +247,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 def _cmd_smoke(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     try:
@@ -274,14 +270,19 @@ def _cmd_smoke(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     _load_cli_dotenv()
     os.environ["TRANSLATOR_CONFIG_FILE"] = str(config_path)
     if args.dry_run:
         os.environ["LOCALIZE_DRY_RUN"] = "true"
-    runtime = importlib.import_module("localize.translate_localization_files")
+    try:
+        # Importing the runtime loads the config; a broken file stops the run here.
+        runtime = importlib.import_module("localize.translate_localization_files")
+    except ConfigLoadError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     try:
         result = asyncio.run(runtime.main())
     except Exception as exc:
