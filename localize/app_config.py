@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional, Pattern, Tuple
 
 from dotenv import load_dotenv
 
-from localize.config_file import read_config_payload
+from localize.config_file import config_file_missing, read_config_payload
 from localize.glossary import GlossaryLoadError, read_glossary_payload
 from localize.ignore_keys import compile_ignore_key_patterns
 from localize.logging_config import setup_logger
@@ -463,7 +463,7 @@ def _load_yaml_config(project_root: str) -> Dict[str, Any]:
     """
     config_file = _resolve_config_file_path(project_root)
 
-    if not os.path.exists(config_file):
+    if config_file_missing(config_file):
         print(f"Warning: Configuration file '{config_file}' not found. Using default configuration.",
               file=sys.stderr)
         print(f"Tip: Create a config.yaml file in '{project_root}' or set TRANSLATOR_CONFIG_FILE environment variable.",
