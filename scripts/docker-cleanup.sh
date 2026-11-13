@@ -15,24 +15,25 @@
 #   scripts/deploy-build.sh.
 # - Logs all actions with before/after disk metrics
 #
-# Usage:
-#   ./docker-cleanup.sh
+# Usage (from the project checkout):
+#   ./scripts/docker-cleanup.sh
 #
 # Recommended schedule: Weekly (e.g., cron job every Sunday 2 AM)
 #
 # Installation:
-#   1. Copy this script to your project directory
-#   2. Make executable: chmod +x docker-cleanup.sh
-#   3. Test manually: ./docker-cleanup.sh
-#   4. Add to cron: see docs/maintenance/disk-space-management.md
+#   sudo ./scripts/setup-cron-cleanup.sh /path/to/project
+#   The cron job runs this script inside the checkout. Do not copy it into the
+#   project root: scripts/deploy-build.sh refuses untracked files.
+#   See docs/maintenance/disk-space-management.md
 
 set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The script runs from <project>/scripts/ in a checkout, or from the project
-# root when setup-cron-cleanup.sh installed a copy there. The project root holds
-# scripts/docker-cleanup.sh, which also covers a project folder named scripts.
+# root, where older versions of setup-cron-cleanup.sh installed a copy. The
+# project root holds scripts/docker-cleanup.sh, which also covers a project
+# folder named scripts.
 if [ -f "$SCRIPT_DIR/scripts/docker-cleanup.sh" ]; then
     PROJECT_ROOT="$SCRIPT_DIR"
 elif [ "$(basename "$SCRIPT_DIR")" = "scripts" ]; then
