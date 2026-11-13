@@ -62,6 +62,11 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   oversized suggestions stay as findings for manual resolution.
 - Resolve relative input folders against the target checkout in the quality
   gate and semantic review, and stop when a changed entry's source is missing.
+- Guardian now recognizes the Codex CLI usage-limit message written with a
+  typographic apostrophe (`You’ve hit your usage limit`). Before, it retried
+  immediately and reported `CodexTransientError`. Now it opens the
+  model-capacity circuit, as documented. **Operators:** a poll that hits the
+  limit now stops scheduled polls for the rest of that local day.
 
 ### Changed
 

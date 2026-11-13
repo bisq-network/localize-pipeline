@@ -873,6 +873,68 @@ def test_codex_driver_does_not_retry_exhausted_plan_allowance(tmp_path, monkeypa
     assert calls == 1
 
 
+# Codex CLI 0.160.1 reports an exhausted plan allowance only as JSONL events on
+# stdout, with a typographic apostrophe (U+2019) and nothing on stderr.
+_CLI_USAGE_LIMIT_MESSAGE = (
+    "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/"
+    "usage to purchase more credits or try again at Nov 13th, 2026 11:03 AM."
+)
+_CLI_USAGE_LIMIT_STDOUT = "\n".join(
+    (
+        json.dumps({"type": "thread.started"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps(
+            {"type": "error", "message": _CLI_USAGE_LIMIT_MESSAGE},
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {"type": "turn.failed", "error": {"message": _CLI_USAGE_LIMIT_MESSAGE}},
+            ensure_ascii=False,
+        ),
+    )
+)
+
+
+def test_codex_driver_classifies_cli_jsonl_usage_limit_as_capacity(
+    tmp_path, monkeypatch
+):
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    calls = 0
+
+    def fake_run(argv, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout=_CLI_USAGE_LIMIT_STDOUT,
+            stderr="",
+        )
+
+    monkeypatch.setattr(codex, "run_bounded_process", fake_run)
+
+    with pytest.raises(codex.CodexCapacityError, match="capacity"):
+        codex.CodexDriver(model="gpt-6-sol").run(
+            codex.CodexTask(prompt="review", evidence_dir=evidence_dir)
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.parametrize("apostrophe", ["'", "’", "‘", "ʼ"])
+def test_failure_markers_ignore_apostrophe_style(apostrophe):
+    assert codex._is_capacity_failure(  # noqa: SLF001
+        f"You{apostrophe}ve hit your usage limit."
+    )
+    assert codex._is_authentication_failure(  # noqa: SLF001
+        f"Not signed in; run {apostrophe}codex login{apostrophe} first."
+    )
+    assert not codex._is_capacity_failure(  # noqa: SLF001
+        "API Error: connection closed mid-response"
+    )
+
+
 def test_codex_driver_retries_transient_failure_once(tmp_path, monkeypatch):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
