@@ -19,13 +19,24 @@ class SampleValidationError(RuntimeError):
     """The bounded sample failed; the remaining queue must not run."""
 
 
+_PACKAGE_ROOT = Path(__file__).parent
+# Subpackages that translation runs never import. The Guardian is the separate
+# PR-review monitor; only the `localize guardian` command loads it, and
+# tests/unit/test_code_fingerprint.py fails if any other module imports it.
+# Everything else is hashed, so a new translation module needs no registration.
+_FINGERPRINT_EXCLUDED = frozenset({"guardian"})
+
+
 @lru_cache(maxsize=1)
 def code_fingerprint():
     """Invalidate checkpoints after changes to prompts, parsing or validation."""
     digest = hashlib.sha256()
-    root = Path(__file__).parent
+    root = _PACKAGE_ROOT
     for path in sorted(root.rglob("*.py")):
-        digest.update(str(path.relative_to(root)).encode())
+        relative = path.relative_to(root)
+        if relative.parts[0] in _FINGERPRINT_EXCLUDED:
+            continue
+        digest.update(str(relative).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 

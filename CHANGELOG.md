@@ -84,6 +84,12 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   public exports are unchanged. Direct imports of former root implementation
   modules must use the new paths; see the
   [import migration guide](docs/repository-structure.md#migrating-implementation-imports).
+- Guardian code no longer counts toward the run-safeguard code fingerprint.
+  Guardian-only deploys now keep accepted checkpoints, so in-flight files are
+  not translated again. Changes to any other module under `localize/` still
+  invalidate them. **Operators:** the deploy that ships this change
+  invalidates checkpoints one last time, because the fingerprint input
+  changes.
 
 ## [0.1.21] - 2026-09-15
 
