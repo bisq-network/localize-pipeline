@@ -59,13 +59,20 @@ tail -50 logs/docker-cleanup.log
 
 ### setup-cron-cleanup.sh
 
-Automated installation script for setting up the Docker cleanup as a weekly cron job.
+Installs a weekly cron job that runs `scripts/docker-cleanup.sh` inside a
+checkout of this repository.
 
 **What it does:**
-- Copies docker-cleanup.sh to your project directory
-- Makes the script executable
-- Creates a weekly cron job in `/etc/cron.weekly/`
-- Tests the cleanup script
+- Checks that the project path contains `scripts/docker-cleanup.sh`
+- Creates or replaces the cron job in `/etc/cron.weekly/`
+- Runs the cleanup once as a test
+
+The job runs the script inside the checkout, so a deployment that checks out a
+newer commit also updates the cleanup. The setup copies nothing into the
+checkout, because `scripts/deploy-build.sh` refuses to build while untracked
+files are present. Older versions copied the script to
+`{project}/docker-cleanup.sh`. If that copy exists, rerun the setup and then
+delete the copy.
 
 **Usage:**
 ```bash
@@ -80,12 +87,11 @@ sudo ./scripts/setup-cron-cleanup.sh
 **Requirements:**
 - Must be run as root (use `sudo`)
 - Docker must be installed
-- Project directory must exist
+- The project path must be a checkout of this repository
 
 **What gets installed:**
-- Cleanup script in project directory
 - Cron job in `/etc/cron.weekly/docker-cleanup-{project-name}`
-- Logs directory for cleanup output
+- Logs in `{project}/logs/docker-cleanup.log`
 
 ## Service Health Check
 
@@ -120,7 +126,9 @@ For complete disk space management including log rotation and systemd journal li
 
 ## Customization
 
-You can adjust the cleanup retention periods by editing `docker-cleanup.sh`:
+To adjust the cleanup retention periods, change `docker-cleanup.sh` through a
+pull request. Do not edit it on a server: `deploy-build.sh` refuses to build
+from a checkout with local edits.
 
 ```bash
 # Keep containers for 48 hours instead of 24

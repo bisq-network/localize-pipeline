@@ -62,22 +62,24 @@ sudo ./scripts/setup-cron-cleanup.sh /path/to/your/project
 
 Option B - Manual setup:
 ```bash
-# 1. Copy script to your project
-cp scripts/docker-cleanup.sh /path/to/your/project/
-chmod +x /path/to/your/project/docker-cleanup.sh
-
-# 2. Test the script
+# 1. Test the script in your checkout
 cd /path/to/your/project
-./docker-cleanup.sh
+./scripts/docker-cleanup.sh
 
-# 3. Create weekly cron job
+# 2. Create weekly cron job
 sudo bash -c 'cat > /etc/cron.weekly/docker-cleanup-myproject << EOF
 #!/bin/bash
-cd /path/to/your/project && ./docker-cleanup.sh
+cd /path/to/your/project && ./scripts/docker-cleanup.sh
 EOF'
 
 sudo chmod +x /etc/cron.weekly/docker-cleanup-myproject
 ```
+
+Both options run the script inside the checkout, so a deployment that checks
+out a newer commit also updates the cleanup. Do not copy the script into the
+project root: `scripts/deploy-build.sh` refuses to build while untracked files
+are present. Older versions of the setup script made such a copy
+(`/path/to/your/project/docker-cleanup.sh`); rerun the setup, then delete it.
 
 ### 2. Log Rotation Configuration
 
@@ -230,7 +232,7 @@ docker system df -v
 
 # 2. Run cleanup script immediately
 cd /path/to/your/project
-./docker-cleanup.sh
+./scripts/docker-cleanup.sh
 
 # 3. For aggressive cleanup (removes ALL unused Docker data)
 # WARNING: Removes ALL unused images, not just 7+ days old
@@ -247,7 +249,9 @@ sudo logrotate -f /etc/logrotate.d/your-project-name
 
 ### Adjust Cleanup Retention Periods
 
-Edit `docker-cleanup.sh` to change retention:
+Change retention in `scripts/docker-cleanup.sh` through a pull request. Do not
+edit the script on a server: `scripts/deploy-build.sh` refuses to build from a
+checkout with local edits.
 
 ```bash
 # Keep containers for 48 hours instead of 24
@@ -268,7 +272,7 @@ sudo mv /etc/cron.weekly/docker-cleanup-myproject /etc/cron.daily/
 
 # Or create custom crontab entry for specific time
 sudo crontab -e
-# Add: 0 2 * * 0 /path/to/your/project/docker-cleanup.sh  # Every Sunday 2 AM
+# Add: 0 2 * * 0 cd /path/to/your/project && ./scripts/docker-cleanup.sh  # Every Sunday 2 AM
 ```
 
 ### Adjust Log Retention
@@ -309,10 +313,10 @@ find / -name "*.log" -type f -size +50M -exec du -h {} + 2>/dev/null | sort -rh
 
 ### Cleanup Script Not Running
 
-1. **Verify script permissions**:
+1. **Verify the script exists and is executable** (the repository ships it as
+   executable; a changed mode counts as a local edit for the deploy gate):
 ```bash
-ls -lh /path/to/your/project/docker-cleanup.sh
-chmod +x /path/to/your/project/docker-cleanup.sh
+ls -lh /path/to/your/project/scripts/docker-cleanup.sh
 ```
 
 2. **Check cron job exists and is executable**:
@@ -324,7 +328,7 @@ sudo chmod +x /etc/cron.weekly/docker-cleanup-myproject
 3. **Test script manually**:
 ```bash
 cd /path/to/your/project
-./docker-cleanup.sh
+./scripts/docker-cleanup.sh
 ```
 
 4. **Check cron execution logs**:
