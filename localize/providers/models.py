@@ -320,6 +320,11 @@ def _aisuite_capabilities_for_model(
     )
 
 
+# Upper bound for remembered token counts per provider instance. Entries are
+# short prompt fragments, so the cache stays in the low megabytes.
+_TOKEN_COUNT_CACHE_MAX_ENTRIES = 50_000
+
+
 class OpenAICompatibleProvider:
     """OpenAI-compatible chat-completion provider.
 
@@ -339,6 +344,7 @@ class OpenAICompatibleProvider:
         self._prices = prices if prices is not None else DEFAULT_PRICES
         self._usage_tracker = usage_tracker or UsageTracker(prices=self._prices)
         self._supports_openai_reasoning_effort = supports_openai_reasoning_effort
+        self._token_count_cache: Dict[tuple[str, str], int] = {}
         self.safeguards = None
 
     async def create_chat_completion(
@@ -378,8 +384,18 @@ class OpenAICompatibleProvider:
         return response
 
     def count_tokens(self, text: str, model_name: str) -> int:
-        """Count tokens with a provider-local fallback chain."""
+        """Count tokens with a provider-local fallback chain.
+
+        The prompt builder counts the same glossary, system prompt and context
+        examples again for every key, so tokenizer results are remembered per
+        provider instance. Whitespace-split fallback counts are not remembered.
+        """
         tokenizer_model_name = model_name.split(":", 1)[1] if ":" in model_name else model_name
+        cache = self._token_count_cache
+        cache_key = (tokenizer_model_name, text)
+        cached_count = cache.get(cache_key)
+        if cached_count is not None:
+            return cached_count
         try:
             encoding = tiktoken.encoding_for_model(tokenizer_model_name)
         except Exception:
@@ -392,9 +408,13 @@ class OpenAICompatibleProvider:
                     return len(text.split())
 
         try:
-            return len(encoding.encode(text))
+            token_count = len(encoding.encode(text))
         except Exception:
             return len(text.split())
+        if len(cache) >= _TOKEN_COUNT_CACHE_MAX_ENTRIES:
+            cache.clear()
+        cache[cache_key] = token_count
+        return token_count
 
     def estimate_run_cost(
         self,

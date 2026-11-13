@@ -21,12 +21,15 @@ This project has three supported surfaces:
 | `update-translations.sh` | Docker/server orchestration: prepare source, run CLI, publish PRs. |
 | `requirements.in` / `requirements.txt` | Production dependency input and lockfile. |
 | `requirements-dev.in` / `requirements-dev.txt` | Development/test dependency input and lockfile. |
+| `scripts/` | Host-side operations: the production image build gate, the service health check, and Docker disk cleanup. See `scripts/README.md`. |
 
 ## Python Package
 
 | Path | Purpose |
 | --- | --- |
-| `localize/cli.py` | `localize formats/init/check/validate/run/bootstrap-pr/memory`. |
+| `localize/cli.py` | `localize formats/validate/check/doctor/smoke/run/init/guardian/bootstrap-pr/quality-gate/memory`. |
+| `localize/app_config.py` | Loads `config.yaml`, dotenv files and environment overrides into the typed `AppConfig`; `validate_config` reports configuration problems. |
+| `localize/logging_config.py` | Logger setup for console and rotating file output. |
 | `localize/bootstrap_pr.py` | Self-service onboarding branch and PR generation. |
 | `localize/init_config.py` | Config scaffolding and locale detection. |
 | `localize/core/pipeline.py` | Format-agnostic orchestration with injected steps. |
@@ -52,10 +55,18 @@ This project has three supported surfaces:
 | `localize/queue_cleanup.py` | Clears validated queue contents while keeping queue roots and mounts. |
 | `localize/translation_memory.py` | Exact-match translation memory store, import/export, fuzzy suggestions, and conflict handling. |
 | `localize/translate_localization_files.py` | Runtime translation pipeline. |
+| `localize/translation_prompts.py` | Builds the translation system prompt. |
+| `localize/json_response.py` | Provider-neutral JSON-mode request arguments and tolerant parsing of JSON model replies. |
+| `localize/glossary.py` | Reads the glossary file and rejects one that cannot be parsed. |
+| `localize/ignore_keys.py` | Compiles and applies the configured key-exclusion patterns. |
+| `localize/source_identical_acceptance.py` | Exact, operator-reviewed exemptions for translations that intentionally equal the source. |
+| `localize/translation_publication.py` | Keeps skipped files out of the published change and retains their diagnostic inputs. |
+| `localize/atomic_io.py` | Atomic text and JSON file writes for pipeline state and reports. |
 | `localize/translation_quality_gate.py` | Deterministic PR quality gate. |
 | `localize/translation_semantic_reviewer.py` | AI semantic review sidecar. |
 | `localize/semantic_remediation.py` | Optional safe auto-application of AI review suggestions. |
 | `localize/semantic_quality.py` | Semantic QA rule evaluation. |
+| `localize/guardian/` | Optional, self-hosted application that reviews generated translation pull requests. See `docs/guardian.md`. |
 
 Downstream projects should import from:
 
@@ -117,6 +128,7 @@ plugins that imported them directly must update those imports:
 | `profiles/bisq-mobile/` | Sanitized Bisq mobile production-shape profile and glossary. |
 | `examples/generic-java-properties/` | Small Java `.properties` example. |
 | `examples/generic-json/` | Small JSON example. |
+| `examples/guardian.config.yaml` | Example Guardian configuration. |
 
 Profiles package project-specific config and glossary assets. Docker mounts
 `profiles/${TRANSLATOR_PROFILE:-bisq}/config.yaml` and `glossary.json` as the
@@ -128,8 +140,11 @@ active runtime profile.
 | --- | --- |
 | `docker/Dockerfile` | Builds the production image. |
 | `docker/docker-compose.yml` | Defines the `translator` service and mounted target repo volume. |
+| `docker/docker-compose.ci.yml` | Compose override with empty placeholder secrets, for runs without deploy or signing keys. |
 | `docker/docker-entrypoint.sh` | Configures SSH/GPG/Git and hands off to `update-translations.sh`. |
 | `docker/.env.example` | Template for runtime secrets and instance identity. |
+| `docker/translator-cron` | Template for the host cron job that runs the service. |
+| `docker/ssh_known_hosts` | Pinned SSH host keys for Git operations in the container. |
 | `secrets/` | Gitignored deploy and signing keys. |
 
 The supported server model is Docker Compose plus cron. This repository does not
@@ -155,9 +170,13 @@ OPENAI_API_KEY=sk-test-key venv/bin/pytest -q
 | --- | --- |
 | `docs/github-action.md` | GitHub Action setup and inputs. |
 | `docs/localization-cli.md` | CLI, plugins, custom adapters, and public API. |
+| `docs/how-to-run-locally.md` | Running the pipeline on a development machine. |
 | `docs/new-project-deployment.md` | Docker Compose server deployment. |
+| `docs/environment-variables.md` | Environment variable reference. |
 | `docs/run-safeguards.md` | Request budgets, sample validation and checkpoint recovery. |
 | `docs/new-format-checklist.md` | Required tests/docs for adding localization formats. |
 | `docs/adding-new-locales.md` | Locale onboarding workflow. |
+| `docs/guardian.md` | Guardian setup and operation. |
+| `docs/repository-structure.md` | This document. |
 | `docs/maintenance/` | Host maintenance and disk cleanup. |
-| `docs/llm/` | Historical debugging notes, not the public usage guide. |
+| `docs/index.html` and `docs/assets/` | Public documentation site. |

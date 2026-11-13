@@ -97,6 +97,66 @@ def test_provider_count_tokens_strips_provider_prefix_for_tiktoken():
     encoding_for_model.assert_called_once_with("gpt-4o")
 
 
+def test_provider_count_tokens_encodes_each_text_once_per_model():
+    """Repeated prompt fragments reuse the first tokenizer result."""
+    provider = OpenAICompatibleProvider(client=None)
+    fake_encoding = MagicMock()
+    fake_encoding.encode.side_effect = lambda text: text.split()
+
+    with patch(
+        "localize.providers.models.tiktoken.encoding_for_model",
+        return_value=fake_encoding,
+    ):
+        assert provider.count_tokens("one two three", "gpt-4o") == 3
+        assert provider.count_tokens("one two three", "gpt-4o") == 3
+        assert provider.count_tokens("one two three", "openai:gpt-4o") == 3
+        assert provider.count_tokens("one two", "gpt-4o") == 2
+        assert provider.count_tokens("one two three", "other-model") == 3
+
+    assert [call.args[0] for call in fake_encoding.encode.call_args_list] == [
+        "one two three",
+        "one two",
+        "one two three",
+    ]
+
+
+def test_provider_count_tokens_does_not_remember_fallback_counts():
+    """A tokenizer failure must not fix the rough whitespace count for later calls."""
+    provider = OpenAICompatibleProvider(client=None)
+    broken_encoding = MagicMock()
+    broken_encoding.encode.side_effect = RuntimeError("tokenizer unavailable")
+    working_encoding = MagicMock()
+    working_encoding.encode.return_value = [1, 2, 3, 4, 5]
+
+    with patch(
+        "localize.providers.models.tiktoken.encoding_for_model",
+        return_value=broken_encoding,
+    ):
+        assert provider.count_tokens("one two three", "gpt-4o") == 3
+    with patch(
+        "localize.providers.models.tiktoken.encoding_for_model",
+        return_value=working_encoding,
+    ):
+        assert provider.count_tokens("one two three", "gpt-4o") == 5
+
+
+def test_provider_token_count_cache_is_bounded(monkeypatch):
+    """The remembered counts cannot grow without limit in a long run."""
+    monkeypatch.setattr("localize.providers.models._TOKEN_COUNT_CACHE_MAX_ENTRIES", 2)
+    provider = OpenAICompatibleProvider(client=None)
+    fake_encoding = MagicMock()
+    fake_encoding.encode.side_effect = lambda text: text.split()
+
+    with patch(
+        "localize.providers.models.tiktoken.encoding_for_model",
+        return_value=fake_encoding,
+    ):
+        for text in ("a", "a b", "a b c", "a b c d"):
+            provider.count_tokens(text, "gpt-4o")
+
+    assert len(provider._token_count_cache) <= 2
+
+
 def test_provider_cost_estimate_uses_provider_price_table():
     provider = OpenAICompatibleProvider(
         client=None,

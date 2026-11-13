@@ -16855,52 +16855,6 @@ class GuardianState:
                 occurred_at=occurred,
             )
 
-    def record_remediation_successor_publication(
-        self,
-        *,
-        draft_key: str,
-        publication_key: str,
-        source_pulls: Sequence[HistoricalPullReference],
-        edit_hashes: Sequence[str],
-        changed_paths: Sequence[str],
-        actor_id: int,
-        actor_type: str,
-        publication_actor_id: int,
-        publication_actor_type: str,
-        occurred_at: datetime | None = None,
-    ) -> RemediationSuccessorPublication:
-        """Finalize a published successor that already has a durable intent."""
-
-        if not isinstance(publication_key, str) or not _SHA256_RE.fullmatch(
-            publication_key
-        ):
-            raise ValueError("publication_key must be a SHA-256 digest.")
-        draft, normalized_sources, normalized_edits, normalized_paths = (
-            self._validated_remediation_successor_inputs(
-                draft_key=draft_key,
-                source_pulls=source_pulls,
-                edit_hashes=edit_hashes,
-                changed_paths=changed_paths,
-                actor_id=actor_id,
-                actor_type=actor_type,
-                publication_actor_id=publication_actor_id,
-                publication_actor_type=publication_actor_type,
-            )
-        )
-        with self._connection:
-            return self._record_remediation_successor_publication_in_transaction(
-                draft=draft,
-                publication_key=publication_key,
-                source_pulls=normalized_sources,
-                edit_hashes=normalized_edits,
-                changed_paths=normalized_paths,
-                actor_id=actor_id,
-                actor_type=actor_type,
-                publication_actor_id=publication_actor_id,
-                publication_actor_type=publication_actor_type,
-                occurred_at=occurred_at or _now(),
-            )
-
     def _bounded_remediation_coverages_linked_to_draft(
         self,
         draft_key: str,
