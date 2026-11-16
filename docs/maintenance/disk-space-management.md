@@ -31,13 +31,17 @@ This project provides ready-to-deploy scripts and configurations for automated c
 **Location**: [`scripts/docker-cleanup.sh`](../../scripts/docker-cleanup.sh)
 
 **What it does**:
-- Removes stopped containers older than 24 hours
+- Removes stopped containers older than 24 hours that this checkout's
+  `docker/docker-compose.yml` created
 - Removes dangling images (untagged leftovers from builds) older than 7 days
 - Removes build cache older than 7 days
 - Logs cleanup actions with before/after disk metrics
 
 **Safety features**:
 - Preserves running containers and their images
+- Leaves stopped containers of other projects on the same host alone. Docker
+  shares images and build cache across projects, so those two steps cover the
+  whole host.
 - Keeps all tagged images. A rebuild moves the image tag to the new build, so
   the previous build becomes a dangling image. The 7-day limit counts from
   when an image was built, so the next cleanup after a rebuild can remove the
@@ -254,8 +258,10 @@ edit the script on a server: `scripts/deploy-build.sh` refuses to build from a
 checkout with local edits.
 
 ```bash
-# Keep containers for 48 hours instead of 24
-docker container prune -f --filter "until=48h"
+# Keep containers for 48 hours instead of 24. Keep the label filter, so
+# containers of other projects on the host stay.
+docker container prune -f --filter "until=48h" \
+    --filter "label=com.docker.compose.project.working_dir=$COMPOSE_DIR"
 
 # Keep dangling images for 14 days instead of 7
 docker image prune -f --filter "dangling=true" --filter "until=336h"  # 336h = 14 days

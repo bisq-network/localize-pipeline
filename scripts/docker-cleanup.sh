@@ -3,12 +3,15 @@
 # Purpose: Prevent disk space accumulation from Docker images and build cache
 #
 # This script safely removes:
-# - Stopped containers older than 24 hours
-# - Dangling images older than 7 days
-# - Build cache older than 7 days
+# - Stopped containers older than 24 hours that this checkout's
+#   docker/docker-compose.yml created
+# - Dangling images older than 7 days (on the whole host)
+# - Build cache older than 7 days (on the whole host)
 #
 # Safety features:
 # - Preserves running containers and their images
+# - Leaves stopped containers of other projects on the host alone. Some keep
+#   one-shot init containers that their services depend on.
 # - Keeps tagged images. A rebuild leaves the previous build untagged. The
 #   7-day limit counts from when an image was built, so the next cleanup can
 #   remove that build. Roll back by building an earlier merged commit with
@@ -74,9 +77,22 @@ if ! [[ "$BEFORE_PERCENT" =~ ^[0-9]+$ ]]; then
 fi
 echo "[$DATE] Disk before cleanup: ${BEFORE_GB} GB available (${BEFORE_PERCENT}% used)" | tee -a "$LOG_FILE"
 
-# Remove stopped containers older than 24 hours
-echo "[$DATE] Removing old containers..." | tee -a "$LOG_FILE"
-docker container prune -f --filter "until=24h" 2>&1 | tee -a "$LOG_FILE"
+# Remove stopped containers older than 24 hours, but only those created from
+# this checkout's compose file. Docker prunes host-wide, and other projects on
+# the host may keep stopped one-shot init containers that their services
+# depend on. Compose labels each container with the folder of its compose
+# file, written as the path it was given, so check the path as given and the
+# path with symlinks resolved.
+echo "[$DATE] Removing this project's stopped containers older than 24 hours..." | tee -a "$LOG_FILE"
+COMPOSE_DIRS=("$PROJECT_ROOT/docker")
+RESOLVED_COMPOSE_DIR="$(cd "$PROJECT_ROOT" && pwd -P)/docker"
+if [ "$RESOLVED_COMPOSE_DIR" != "${COMPOSE_DIRS[0]}" ]; then
+    COMPOSE_DIRS+=("$RESOLVED_COMPOSE_DIR")
+fi
+for COMPOSE_DIR in "${COMPOSE_DIRS[@]}"; do
+    docker container prune -f --filter "until=24h" \
+        --filter "label=com.docker.compose.project.working_dir=$COMPOSE_DIR" 2>&1 | tee -a "$LOG_FILE"
+done
 
 # Remove older dangling images while preserving tagged images used for rollback.
 echo "[$DATE] Removing dangling images older than 7 days..." | tee -a "$LOG_FILE"

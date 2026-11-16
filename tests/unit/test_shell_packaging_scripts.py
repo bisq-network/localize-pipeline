@@ -56,6 +56,9 @@ def test_cleanup_docs_do_not_promise_or_recommend_what_the_script_avoids():
         assert "Removes unused Docker volumes" not in text, guide
         assert "Removes unused images" not in text, guide
         assert 'docker image prune -f --filter "dangling=true"' in text, guide
+        # A container prune without the label filter would reach other projects.
+        assert 'docker container prune -f --filter "until=48h"\n' not in text, guide
+        assert "label=com.docker.compose.project.working_dir=" in text, guide
 
 
 _DF_TABLE = (
@@ -240,6 +243,76 @@ def test_docker_cleanup_falls_back_when_df_lacks_gnu_options(tmp_path):
     assert "Disk before cleanup: 0 GB available (40% used)" in log_text
     assert "stub docker builder prune" in log_text
     assert "Docker cleanup completed successfully" in log_text
+
+
+_COMPOSE_DIR_LABEL = "label=com.docker.compose.project.working_dir="
+
+
+def _container_prune_calls(log_text):
+    """Return the arguments of each `docker container prune` the stub saw."""
+    return [
+        line.split("stub docker container prune ", 1)[1].split(" --filter ")
+        for line in log_text.splitlines()
+        if "stub docker container prune " in line
+    ]
+
+
+def test_docker_cleanup_prunes_only_containers_of_this_checkout(tmp_path):
+    """Docker prunes containers host-wide. Other projects on the host keep
+    stopped one-shot init containers that their services depend on, so the
+    cleanup may only remove containers created from this checkout's
+    docker/docker-compose.yml. Compose labels each container with that
+    folder."""
+    project = _checkout(tmp_path, "my project")
+
+    result = subprocess.run(
+        [str(project / "scripts" / "docker-cleanup.sh")],
+        cwd=tmp_path,
+        env=_stub_env(tmp_path, _GNU_DF_STUB),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
+    calls = _container_prune_calls(log_text)
+    assert calls, log_text
+    compose_dirs = {str(project / "docker"), str(project.resolve() / "docker")}
+    seen_dirs = set()
+    for call in calls:
+        assert "until=24h" in call, call
+        labels = [arg for arg in call if arg.startswith(_COMPOSE_DIR_LABEL)]
+        assert len(labels) == 1, call
+        seen_dirs.add(labels[0][len(_COMPOSE_DIR_LABEL):])
+    assert seen_dirs == compose_dirs
+
+
+def test_docker_cleanup_through_a_symlink_also_prunes_the_resolved_folder(tmp_path):
+    """Compose records the compose folder by the path it was given. A job that
+    reaches the checkout through a symlink covers both spellings."""
+    project = _checkout(tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(project, target_is_directory=True)
+
+    result = subprocess.run(
+        [str(link / "scripts" / "docker-cleanup.sh")],
+        cwd=tmp_path,
+        env=_stub_env(tmp_path, _GNU_DF_STUB),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
+    seen_dirs = {
+        arg[len(_COMPOSE_DIR_LABEL):]
+        for call in _container_prune_calls(log_text)
+        for arg in call
+        if arg.startswith(_COMPOSE_DIR_LABEL)
+    }
+    assert seen_dirs == {str(link / "docker"), str(project.resolve() / "docker")}
 
 
 def test_entrypoint_insecure_ssh_preserves_identity_config():

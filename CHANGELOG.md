@@ -67,6 +67,12 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   absolute path into the job, and warns about a copy from an older setup.
   **Operators:** rerun `scripts/setup-cron-cleanup.sh`, then delete
   `docker-cleanup.sh` from the project root.
+- `scripts/docker-cleanup.sh` removes only stopped containers that the
+  checkout's `docker/docker-compose.yml` created. It removed every stopped
+  container on the host older than 24 hours, including those of other
+  projects. Some projects keep stopped one-shot init containers that their
+  services wait for. Dangling images and build cache are shared, so their
+  cleanup still covers the whole host.
 - `scripts/docker-cleanup.sh` no longer stops when `df` lacks the GNU
   options; its fallback now runs.
 - Retry recognized transient Transifex import failures up to three times
