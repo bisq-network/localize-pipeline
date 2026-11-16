@@ -31,12 +31,25 @@ This project provides ready-to-deploy scripts and configurations for automated c
 **Location**: [`scripts/docker-cleanup.sh`](../../scripts/docker-cleanup.sh)
 
 **What it does**:
-- Removes stopped containers older than 24 hours
+- Removes stopped containers older than 24 hours that carry the label
+  `network.bisq.localize-pipeline.cleanup=true`
 - Removes dangling images (untagged leftovers from builds) older than 7 days
-- Removes build cache older than 7 days
+  that carry the same label
+- Removes unused build cache older than 7 days. Build cache cannot be filtered
+  by label, so this step is host-wide
 - Logs cleanup actions with before/after disk metrics
 
+The script removes only this pipeline's own containers and images, so it is
+safe on a host that also runs other projects. The `translator` service in
+`docker/docker-compose.yml` sets the label on its containers, and
+`docker/Dockerfile` bakes it into the image. The script does not filter on
+`com.docker.compose.project`: the compose file lives in `docker/`, so its
+default project name is `docker`, which another project on the host can share.
+
 **Safety features**:
+- Never removes a container or image without the label. Another project's
+  exited one-shot containers (for example init services that other services
+  wait on with `service_completed_successfully`) stay in place
 - Preserves running containers and their images
 - Keeps all tagged images. A rebuild moves the image tag to the new build, so
   the previous build becomes a dangling image. The 7-day limit counts from
@@ -47,6 +60,21 @@ This project provides ready-to-deploy scripts and configurations for automated c
 - Never removes Docker volumes
 - Logs all actions to `logs/docker-cleanup.log` in the project directory
 - Provides disk usage metrics
+
+**Build cache is host-wide**: BuildKit keeps one build cache per host and its
+records carry no labels, so the cache step prunes unused records older than
+7 days for every project on the host. It is regenerable: the next build of any
+project recomputes the layers it needs. No container, image or volume is
+removed.
+
+**Objects from before the label**: stopped translator containers and dangling
+images created before the label existed have none, so the script skips them.
+Remove those once by hand. List them with `docker ps -a --filter status=exited`
+or `docker image ls --filter dangling=true`, confirm each one belongs to this
+pipeline (for example `docker image inspect --format '{{.Config.Entrypoint}}' ID`
+shows `/app/docker/docker-entrypoint.sh`), and then `docker rm` or
+`docker image rm` it by ID. Images built after the label was added are covered
+from the next rebuild on.
 
 **Installation**:
 
@@ -235,7 +263,9 @@ cd /path/to/your/project
 ./scripts/docker-cleanup.sh
 
 # 3. For aggressive cleanup (removes ALL unused Docker data)
-# WARNING: Removes ALL unused images, not just 7+ days old
+# WARNING: Removes ALL unused images, not just 7+ days old, and every
+# project's stopped containers and unused volumes on a shared host. Do not use
+# it on a host that runs other projects.
 docker system prune -a -f --volumes
 
 # 4. Vacuum journals immediately
@@ -254,15 +284,20 @@ edit the script on a server: `scripts/deploy-build.sh` refuses to build from a
 checkout with local edits.
 
 ```bash
-# Keep containers for 48 hours instead of 24
-docker container prune -f --filter "until=48h"
+# Keep containers for 48 hours instead of 24 (keep the label filter)
+docker container prune -f --filter "until=48h" --filter "label=${CLEANUP_LABEL}"
 
-# Keep dangling images for 14 days instead of 7
-docker image prune -f --filter "dangling=true" --filter "until=336h"  # 336h = 14 days
+# Keep dangling images for 14 days instead of 7 (keep the label filter)
+docker image prune -f --filter "dangling=true" --filter "until=336h" --filter "label=${CLEANUP_LABEL}"  # 336h = 14 days
 
 # Keep build cache for 30 days
 docker builder prune -f --filter "until=720h"  # 720h = 30 days
 ```
+
+`CLEANUP_LABEL` is set at the top of the script. Keep the `label` filter on the
+container and image commands: without it they prune other projects' containers
+and images on a shared host. The build cache command has no label filter; it is
+host-wide.
 
 ### Change Cleanup Frequency
 

@@ -6,6 +6,13 @@ services:
       context: .. # Build context is the project root
       dockerfile: docker/Dockerfile # Path to Dockerfile from project root
     init: true
+    # scripts/docker-cleanup.sh removes stopped containers only when they carry
+    # this label, so it never touches another project's containers on a shared
+    # host. Do not use com.docker.compose.project for that: this file lives in
+    # docker/, so its default project name is "docker", which other projects
+    # can share. Keep the value in sync with the script and the Dockerfile.
+    labels:
+      network.bisq.localize-pipeline.cleanup: "true"
     # The entrypoint is defined in the Dockerfile.
     # By default, run the main orchestration script. Can be overridden for debugging.
     command: ["/app/update-translations.sh"]
