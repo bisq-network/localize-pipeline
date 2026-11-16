@@ -58,6 +58,88 @@ def test_cleanup_docs_do_not_promise_or_recommend_what_the_script_avoids():
         assert 'docker image prune -f --filter "dangling=true"' in text, guide
 
 
+# The label that marks this pipeline's own Docker objects. Compose sets it on
+# the translator container, the Dockerfile bakes it into the image, and
+# docker-cleanup.sh prunes only objects that carry it. Do not use
+# com.docker.compose.project: the compose file lives in docker/, so its default
+# project name is "docker", which another project on a shared host can also have.
+CLEANUP_LABEL = "network.bisq.localize-pipeline.cleanup=true"
+
+
+def _docker_cleanup_commands(script_text):
+    """Return the `docker ... prune` command lines of the cleanup script."""
+    return [
+        line.strip()
+        for line in script_text.splitlines()
+        if line.lstrip().startswith("docker ") and " prune" in line
+    ]
+
+
+def test_docker_cleanup_prunes_only_containers_and_images_with_the_pipeline_label():
+    """A host-wide prune would delete another project's exited one-shot
+    containers, such as the init services other Compose services wait on."""
+    script = (REPO_ROOT / "scripts" / "docker-cleanup.sh").read_text(encoding="utf-8")
+    commands = _docker_cleanup_commands(script)
+
+    scoped = [c for c in commands if c.startswith(("docker container prune", "docker image prune"))]
+    assert len(scoped) == 2, commands
+    for command in scoped:
+        assert '--filter "label=${CLEANUP_LABEL}"' in command, command
+    assert 'CLEANUP_LABEL="' + CLEANUP_LABEL + '"' in script
+    # The header comment may name what it avoids; the commands must not use it.
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    assert "com.docker.compose.project" not in code
+    assert "docker system prune" not in code
+    # Containers keep the 24-hour age limit; dangling images keep their 7 days.
+    container = next(c for c in scoped if c.startswith("docker container prune"))
+    image = next(c for c in scoped if c.startswith("docker image prune"))
+    assert '--filter "until=24h"' in container
+    assert '--filter "dangling=true"' in image
+    assert '--filter "until=168h"' in image
+
+
+def test_docker_cleanup_passes_the_label_to_docker(tmp_path):
+    """Run the script against a stub docker and read the arguments it passes."""
+    project, result = _run_docker_cleanup(tmp_path, "scripts", _GNU_DF_STUB)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
+    container_line = next(
+        line for line in log_text.splitlines() if "stub docker container prune" in line
+    )
+    image_line = next(line for line in log_text.splitlines() if "stub docker image prune" in line)
+    assert f"--filter label={CLEANUP_LABEL}" in container_line
+    assert f"--filter label={CLEANUP_LABEL}" in image_line
+    assert "until=24h" in container_line
+    assert "dangling=true" in image_line and "until=168h" in image_line
+
+
+def test_docker_cleanup_label_matches_compose_and_dockerfile():
+    """The script, the translator service and the image must agree on one label."""
+    key, value = CLEANUP_LABEL.split("=", 1)
+    compose = yaml.safe_load((REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8"))
+
+    labels = compose["services"]["translator"]["labels"]
+    if isinstance(labels, list):
+        labels = dict(item.split("=", 1) for item in labels)
+    assert labels[key] == value
+    assert f'LABEL {key}="{value}"' in _dockerfile_instructions()
+
+
+def test_docker_cleanup_scope_is_documented():
+    """The guides say what is scoped and what is not, so nobody expects a
+    host-wide cleanup or a cleanup of containers built before the label."""
+    for guide in ("scripts/README.md", "docs/maintenance/disk-space-management.md"):
+        text = (REPO_ROOT / guide).read_text(encoding="utf-8")
+
+        assert CLEANUP_LABEL in text, guide
+        assert "build cache" in text.lower() and "host-wide" in text, guide
+        assert "before the label" in text, guide
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("## Unreleased", 1)[1].split("\n## ", 1)[0]
+    assert CLEANUP_LABEL in unreleased
+
+
 _DF_TABLE = (
     "Filesystem 1K-blocks Used Available Use% Mounted on\n"
     "/dev/stub 1000000 400000 600000 40% /\n"

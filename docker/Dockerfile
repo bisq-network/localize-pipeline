@@ -186,6 +186,11 @@ RUN chmod 644 /etc/ssh/ssh_known_hosts
 # Default command is the orchestration script so bare docker run uses PR gating.
 CMD ["/app/update-translations.sh"]
 
+# Marks this pipeline's images, so scripts/docker-cleanup.sh prunes only its own
+# dangling images and never another project's on a shared host. Keep the value
+# in sync with that script and docker/docker-compose.yml.
+LABEL network.bisq.localize-pipeline.cleanup="true"
+
 # scripts/deploy-build.sh sets this only after proving that the commit is
 # merged into upstream main. docker-entrypoint.sh refuses to run without it.
 # Declared last so a new commit does not invalidate earlier cached layers.

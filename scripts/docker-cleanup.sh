@@ -1,18 +1,37 @@
 #!/bin/bash
 # Automated Docker cleanup for translation projects
-# Purpose: Prevent disk space accumulation from Docker images and build cache
+# Purpose: Prevent disk space accumulation from this pipeline's Docker
+# containers, images and build cache
 #
-# This script safely removes:
-# - Stopped containers older than 24 hours
-# - Dangling images older than 7 days
-# - Build cache older than 7 days
+# This script removes only this pipeline's own Docker objects, so it is safe
+# on a host that also runs other projects:
+# - Stopped containers older than 24 hours that carry the pipeline label
+# - Dangling images older than 7 days that carry the pipeline label
+# - Build cache older than 7 days (host-wide, see below)
+#
+# The label is network.bisq.localize-pipeline.cleanup=true. Compose sets it on
+# the translator container (docker/docker-compose.yml) and the Dockerfile
+# bakes it into the image. Do not filter on com.docker.compose.project: the
+# compose file lives in docker/, so its default project name is "docker", and
+# another project on the host can have the same name.
 #
 # Safety features:
+# - Never touches containers or images without the label, so another
+#   project's exited one-shot containers (for example init services that
+#   other services wait on) and its images stay in place
+# - Containers created before the label existed have none, so they are skipped
+#   and need a one-time manual removal. The same holds for images built before
+#   the label existed.
 # - Preserves running containers and their images
 # - Keeps tagged images. A rebuild leaves the previous build untagged. The
 #   7-day limit counts from when an image was built, so the next cleanup can
 #   remove that build. Roll back by building an earlier merged commit with
 #   scripts/deploy-build.sh.
+# - Build cache cannot be filtered by label. BuildKit keeps one cache per
+#   host, so the build cache step prunes unused cache older than 7 days
+#   host-wide. It is regenerable cache: the next build of any project on the
+#   host recomputes the layers it needs, and no container, image or volume is
+#   removed.
 # - Logs all actions with before/after disk metrics
 #
 # Usage (from the project checkout):
@@ -42,6 +61,8 @@ else
     PROJECT_ROOT="$SCRIPT_DIR"
 fi
 LOG_FILE="${PROJECT_ROOT}/logs/docker-cleanup.log"
+# Must match the labels in docker/docker-compose.yml and docker/Dockerfile.
+CLEANUP_LABEL="network.bisq.localize-pipeline.cleanup=true"
 DATE=$(date "+%Y-%m-%d %H:%M:%S")
 
 # Ensure log directory exists
@@ -74,16 +95,19 @@ if ! [[ "$BEFORE_PERCENT" =~ ^[0-9]+$ ]]; then
 fi
 echo "[$DATE] Disk before cleanup: ${BEFORE_GB} GB available (${BEFORE_PERCENT}% used)" | tee -a "$LOG_FILE"
 
-# Remove stopped containers older than 24 hours
-echo "[$DATE] Removing old containers..." | tee -a "$LOG_FILE"
-docker container prune -f --filter "until=24h" 2>&1 | tee -a "$LOG_FILE"
+# Remove stopped containers older than 24 hours. Only containers that carry the
+# pipeline label match; other projects' containers are left alone.
+echo "[$DATE] Removing old containers labelled ${CLEANUP_LABEL}..." | tee -a "$LOG_FILE"
+docker container prune -f --filter "until=24h" --filter "label=${CLEANUP_LABEL}" 2>&1 | tee -a "$LOG_FILE"
 
-# Remove older dangling images while preserving tagged images used for rollback.
-echo "[$DATE] Removing dangling images older than 7 days..." | tee -a "$LOG_FILE"
-docker image prune -f --filter "dangling=true" --filter "until=168h" 2>&1 | tee -a "$LOG_FILE"
+# Remove older dangling images that carry the pipeline label while preserving
+# tagged images used for rollback.
+echo "[$DATE] Removing dangling images labelled ${CLEANUP_LABEL} older than 7 days..." | tee -a "$LOG_FILE"
+docker image prune -f --filter "dangling=true" --filter "until=168h" --filter "label=${CLEANUP_LABEL}" 2>&1 | tee -a "$LOG_FILE"
 
-# Remove build cache older than 7 days
-echo "[$DATE] Removing old build cache..." | tee -a "$LOG_FILE"
+# Remove build cache older than 7 days. Build cache has no labels to filter on,
+# so this step is host-wide. It only removes regenerable, unused cache.
+echo "[$DATE] Removing old build cache (host-wide, regenerable)..." | tee -a "$LOG_FILE"
 docker builder prune -f --filter "until=168h" 2>&1 | tee -a "$LOG_FILE"
 
 # Get disk usage after cleanup (in KB for robustness across systems)
