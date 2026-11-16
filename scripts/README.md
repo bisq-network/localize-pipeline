@@ -26,15 +26,29 @@ never enter the image. See [the server guide](../docs/new-project-deployment.md#
 
 ### docker-cleanup.sh
 
-Automated Docker cleanup script that prevents disk space accumulation from Docker images and build cache.
+Automated Docker cleanup script that prevents disk space accumulation from this
+pipeline's Docker containers, images and build cache. It removes only this
+pipeline's own objects, so it is safe on a host that also runs other projects.
 
 **What it does:**
-- Removes stopped containers older than 24 hours
+- Removes stopped containers older than 24 hours that carry the label
+  `network.bisq.localize-pipeline.cleanup=true`
 - Removes dangling images (untagged leftovers from builds) older than 7 days
-- Removes build cache older than 7 days
+  that carry the same label
+- Removes unused build cache older than 7 days. Build cache cannot be filtered
+  by label, so this step is host-wide; see below
 - Logs all actions with before/after disk metrics
 
+**What carries the label:** the `translator` service in
+`docker/docker-compose.yml` sets it on its containers, and `docker/Dockerfile`
+bakes it into the image. The script does not filter on
+`com.docker.compose.project`: the compose file lives in `docker/`, so its
+default project name is `docker`, which another project on the host can share.
+
 **Safety features:**
+- Never removes a container or image without the label. Another project's
+  exited one-shot containers, such as init services that other services wait
+  on with `service_completed_successfully`, stay in place
 - Preserves running containers and their images
 - Keeps all tagged images. A rebuild moves the image tag to the new build, so
   the previous build becomes a dangling image. The 7-day limit counts from
@@ -44,6 +58,21 @@ Automated Docker cleanup script that prevents disk space accumulation from Docke
   rebuild.
 - Never removes Docker volumes
 - Provides detailed logging of all cleanup operations
+
+**Build cache is host-wide.** BuildKit keeps one build cache per host and
+records in it carry no labels. The cache step prunes unused records older than
+7 days for every project on the host. It is regenerable: the next build of any
+project recomputes the layers it needs, and no container, image or volume is
+removed.
+
+**Objects from before the label.** Stopped translator containers and dangling
+images created before the label existed have none, so the script skips them.
+Remove those once by hand: list them with `docker ps -a --filter status=exited`
+or `docker image ls --filter dangling=true`, confirm each one belongs to this
+pipeline (for example `docker image inspect --format '{{.Config.Entrypoint}}' ID`
+shows `/app/docker/docker-entrypoint.sh`), and then `docker rm` or
+`docker image rm` it by ID. Images built after the label was added are covered
+from the next rebuild on.
 
 **Usage:**
 ```bash
@@ -131,11 +160,15 @@ pull request. Do not edit it on a server: `deploy-build.sh` refuses to build
 from a checkout with local edits.
 
 ```bash
-# Keep containers for 48 hours instead of 24
-docker container prune -f --filter "until=48h"
+# Keep containers for 48 hours instead of 24 (keep the label filter)
+docker container prune -f --filter "until=48h" --filter "label=${CLEANUP_LABEL}"
 
-# Keep dangling images for 14 days instead of 7
-docker image prune -f --filter "dangling=true" --filter "until=336h"
+# Keep dangling images for 14 days instead of 7 (keep the label filter)
+docker image prune -f --filter "dangling=true" --filter "until=336h" --filter "label=${CLEANUP_LABEL}"
 ```
+
+`CLEANUP_LABEL` is set at the top of the script. Keep the `label` filter on both
+commands: without it they prune other projects' containers and images on a
+shared host.
 
 See the [maintenance documentation](../docs/maintenance/disk-space-management.md#customization) for more options.

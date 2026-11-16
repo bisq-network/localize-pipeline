@@ -76,6 +76,19 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   `docker-cleanup.sh` from the project root.
 - `scripts/docker-cleanup.sh` no longer stops when `df` lacks the GNU
   options; its fallback now runs.
+- `scripts/docker-cleanup.sh` now prunes only this pipeline's own Docker
+  objects. Its container and dangling-image prunes were host-wide, so on a host
+  shared with another project they would delete that project's exited one-shot
+  containers, such as init services that other services wait on. Both prunes
+  now match the label `network.bisq.localize-pipeline.cleanup=true`, which
+  `docker/docker-compose.yml` sets on the translator container and
+  `docker/Dockerfile` bakes into the image. The build cache prune still cannot
+  be filtered by label, so it stays host-wide; it removes only unused,
+  regenerable cache older than 7 days. **Operators:** stopped containers and
+  dangling images from before the label have none and are skipped; remove them
+  once by hand (see
+  [disk space management](docs/maintenance/disk-space-management.md)). Images
+  built after this change carry the label.
 - Retry recognized transient Transifex import failures up to three times
   within `TX_PULL_TIMEOUT`. Permanent and unknown errors still stop the run.
 - Clear queue contents instead of deleting queue roots, so non-root
