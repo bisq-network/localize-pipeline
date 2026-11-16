@@ -26,7 +26,7 @@ from localize.app_config import (
     validate_config,
 )
 from localize.bootstrap_pr import BootstrapPrOptions, create_bootstrap_pr
-from localize.config_file import ConfigLoadError, read_config_payload
+from localize.config_file import ConfigLoadError, config_file_missing, read_config_payload
 from localize.formats import list_localization_adapters, list_localization_formats
 from localize.init_config import main as init_config_main
 from localize.formats.profiles import load_localization_profiles
@@ -108,7 +108,7 @@ def _cmd_formats(_args: argparse.Namespace) -> int:
 def _cmd_validate_config(args: argparse.Namespace, *, success_message: str) -> int:
     config_path = Path(args.config).expanduser().resolve()
     _load_cli_dotenv()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     try:
@@ -195,7 +195,7 @@ def _load_checked_config(config_path: Path) -> tuple[dict[str, Any], list[Config
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     try:
@@ -247,7 +247,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 def _cmd_smoke(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     try:
@@ -270,7 +270,7 @@ def _cmd_smoke(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     config_path = Path(args.config).expanduser().resolve()
-    if not config_path.exists():
+    if config_file_missing(config_path):
         print(f"error: configuration file not found: {config_path}", file=sys.stderr)
         return 1
     _load_cli_dotenv()

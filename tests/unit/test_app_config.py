@@ -18,6 +18,20 @@ from localize.formats.metadata import JSON_FORMAT, JAVA_PROPERTIES_FORMAT
 from localize.formats.layouts import SUFFIX_LAYOUT
 
 
+@pytest.fixture(autouse=True)
+def _config_presence_follows_patched_os_path_exists(monkeypatch):
+    """These tests fake the config file by patching ``os.path.exists``.
+
+    The loader checks for the file with ``os.stat``, which would see the real
+    filesystem instead (a developer's own ``config.yaml``, for example). The
+    real check is covered in ``test_config_file_loading.py``.
+    """
+    monkeypatch.setattr(
+        "localize.app_config.config_file_missing",
+        lambda path: not os.path.exists(path),
+    )
+
+
 class TestAppConfig:
     """Test cases for the AppConfig dataclass."""
 

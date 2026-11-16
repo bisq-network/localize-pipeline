@@ -35,8 +35,6 @@ def test_cron_cleanup_setup_uses_run_parts_safe_names_and_quoted_script():
     assert "set -euo pipefail" in script
     assert "sed 's/[^a-zA-Z0-9_-]/-/g'" in script
     assert "printf -v PROJECT_PATH_Q '%q' \"$PROJECT_PATH\"" in script
-    assert "cat > \"$CRON_FILE\" <<'EOF'" in script
-    assert "PROJECT_PATH_Q_PLACEHOLDER" in script
 
 
 def test_docker_cleanup_does_not_prune_shared_volumes_or_tagged_images():
@@ -96,8 +94,21 @@ def _run_docker_cleanup(tmp_path, install_dir, df_stub, project_name="project", 
         copy.chmod(0o755)
     script = copies[0]
 
+    result = subprocess.run(
+        [str(script)],
+        cwd=tmp_path,
+        env=_stub_env(tmp_path, df_stub),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return project, result
+
+
+def _stub_env(tmp_path, df_stub):
+    """Return an environment whose PATH starts with stub `docker` and `df`."""
     stub_bin = tmp_path / "bin"
-    stub_bin.mkdir()
+    stub_bin.mkdir(exist_ok=True)
     for name, body in (
         ("docker", '#!/bin/sh\necho "stub docker $*"\n'),
         ("df", df_stub),
@@ -105,16 +116,93 @@ def _run_docker_cleanup(tmp_path, install_dir, df_stub, project_name="project", 
         stub = stub_bin / name
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o755)
+    return {**os.environ, "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}"}
 
+
+def _checkout(tmp_path, project_name="project"):
+    """Create a project folder that holds the cleanup script like a checkout."""
+    project = tmp_path / "parent" / project_name
+    script = project / "scripts" / "docker-cleanup.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "scripts" / "docker-cleanup.sh", script)
+    script.chmod(0o755)
+    return project
+
+
+def _run_cron_setup(tmp_path, project_arg):
+    """Run setup-cron-cleanup.sh against a temporary cron directory."""
+    cron_dir = tmp_path / "cron.weekly"
+    cron_dir.mkdir()
+    env = {**_stub_env(tmp_path, _GNU_DF_STUB), "CLEANUP_CRON_DIR": str(cron_dir)}
     result = subprocess.run(
-        [str(script)],
+        [str(REPO_ROOT / "scripts" / "setup-cron-cleanup.sh"), str(project_arg)],
         cwd=tmp_path,
-        env={**os.environ, "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}"},
+        env=env,
         capture_output=True,
         text=True,
         timeout=60,
     )
-    return project, result
+    return cron_dir, env, result
+
+
+def _project_files(project):
+    return sorted(str(p.relative_to(project)) for p in project.rglob("*") if p.is_file())
+
+
+def test_cron_cleanup_job_runs_the_checkout_script_without_copying_it(tmp_path):
+    """The job runs scripts/docker-cleanup.sh in place. A copy in the project
+    root would be an untracked file, and deploy-build.sh refuses to build
+    from a checkout with untracked files."""
+    name = "my project & $(touch PWNED)"
+    project = _checkout(tmp_path, name)
+
+    # A relative path must still give a job that works from any directory.
+    cron_dir, env, result = _run_cron_setup(tmp_path, Path("parent") / name)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _project_files(project) == ["logs/docker-cleanup.log", "scripts/docker-cleanup.sh"]
+    jobs = list(cron_dir.iterdir())
+    assert [job.name for job in jobs] == ["docker-cleanup-my-project-touch-PWNED"]
+    job = jobs[0]
+    assert os.access(job, os.X_OK)
+    assert "./scripts/docker-cleanup.sh" in job.read_text(encoding="utf-8")
+
+    (project / "logs" / "docker-cleanup.log").unlink()
+    run = subprocess.run(
+        ["/bin/bash", str(job)], cwd="/", env=env, capture_output=True, text=True, timeout=60
+    )
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    log_text = (project / "logs" / "docker-cleanup.log").read_text(encoding="utf-8")
+    assert "Docker cleanup completed successfully" in log_text
+    assert not list(tmp_path.rglob("PWNED"))
+
+
+def test_cron_cleanup_setup_refuses_a_folder_that_is_not_a_checkout(tmp_path):
+    project = tmp_path / "parent" / "project"
+    project.mkdir(parents=True)
+
+    cron_dir, _env, result = _run_cron_setup(tmp_path, project)
+
+    assert result.returncode != 0
+    assert "scripts/docker-cleanup.sh" in result.stderr
+    assert list(cron_dir.iterdir()) == []
+    assert not (project / "logs").exists()
+
+
+def test_cron_cleanup_setup_warns_about_a_copy_from_an_older_setup(tmp_path):
+    """Older versions copied the script into the project root. The setup
+    names that copy so the operator can delete it, and leaves it in place."""
+    project = _checkout(tmp_path)
+    old_copy = project / "docker-cleanup.sh"
+    shutil.copy(REPO_ROOT / "scripts" / "docker-cleanup.sh", old_copy)
+
+    _cron_dir, _env, result = _run_cron_setup(tmp_path, project)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(old_copy) in result.stderr
+    assert "deploy-build.sh" in result.stderr
+    assert old_copy.exists()
 
 
 @pytest.mark.parametrize("install_dir", ["scripts", "."])

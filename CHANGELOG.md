@@ -36,8 +36,9 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 ### Fixed
 
 - Stop the run when the config file exists but cannot be used: invalid
-  YAML, content that is not a mapping of settings (for example a list), text
-  that is not UTF-8, or a file that cannot be read. Earlier the run printed an
+  YAML, content that is not a mapping of settings (for example a list or an
+  explicit `null`), text that is not UTF-8, or a file that cannot be read,
+  including one in a directory the run cannot enter. Earlier the run printed an
   error and continued with default settings. Those point at a placeholder
   repository, so the run failed later with an unrelated error about a missing
   input folder. This also applies to dry runs. `localize run` now names the
@@ -64,10 +65,15 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
 - `scripts/docker-cleanup.sh` writes `logs/docker-cleanup.log` inside the
   project when it runs from the copy that `setup-cron-cleanup.sh` installs in
   the project root. That copy logged to the parent directory of the project.
-  **Operators:** an installed copy does not update itself. Run
-  `scripts/setup-cron-cleanup.sh` again, or copy the script again, to get the
-  fix. Earlier cleanup logs are in `logs/` in the parent directory of the
-  project.
+  Earlier cleanup logs are in `logs/` in the parent directory of the project.
+- `scripts/setup-cron-cleanup.sh` no longer copies `docker-cleanup.sh` into the
+  project root. The weekly job now runs `scripts/docker-cleanup.sh` inside the
+  checkout, so a deployment also updates the cleanup. The copy was an untracked
+  file, and `scripts/deploy-build.sh` refuses to build while one is present.
+  The setup now stops when the project path is not a checkout, writes an
+  absolute path into the job, and warns about a copy from an older setup.
+  **Operators:** rerun `scripts/setup-cron-cleanup.sh`, then delete
+  `docker-cleanup.sh` from the project root.
 - `scripts/docker-cleanup.sh` no longer stops when `df` lacks the GNU
   options; its fallback now runs.
 - Retry recognized transient Transifex import failures up to three times
@@ -96,6 +102,12 @@ stable `1.0.0`, minor releases may still refine public APIs with migration notes
   public exports are unchanged. Direct imports of former root implementation
   modules must use the new paths; see the
   [import migration guide](docs/repository-structure.md#migrating-implementation-imports).
+- Guardian code no longer counts toward the run-safeguard code fingerprint.
+  Guardian-only deploys now keep accepted checkpoints, so in-flight files are
+  not translated again. Changes to any other module under `localize/` still
+  invalidate them. **Operators:** the deploy that ships this change
+  invalidates checkpoints one last time, because the fingerprint input
+  changes.
 
 ## [0.1.21] - 2026-09-15
 

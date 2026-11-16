@@ -41,8 +41,10 @@ Identical retries reuse these results. The normal semantic and publication
 gates still run; cached translation-stage output is not semantic approval.
 The checkpoint fingerprint includes source and target content, selected keys,
 models, glossary, policy and pipeline code. Changes to those inputs invalidate
-the checkpoint. Existing translation memory can still supply drafts, which
-then receive the current review and validation.
+the checkpoint. Pipeline code means every module under `localize/` except the
+Guardian package, which translation runs never import. Existing translation
+memory can still supply drafts, which then receive the current review and
+validation.
 
 While safeguards are enabled, the source key ledger is written only after the
 translated files have been copied back. A budget or sample stop therefore
