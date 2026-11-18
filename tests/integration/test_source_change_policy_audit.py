@@ -102,14 +102,24 @@ def test_changed_target_and_source_are_audited_once(tmp_path):
 
 
 def test_unconfigured_source_change_does_not_trigger_a_new_heuristic_audit(tmp_path):
-    repo, folder, _, _, config, _ = _case(tmp_path, CASES[0])
+    repo, folder, _, _, config, base = _case(tmp_path, CASES[0])
     config.write_text("supported_locales: [{code: de, name: German}]\n")
     output = tmp_path / "report.json"
-    # Invalid context must not cause Git work when there are no configured rules.
-    result = _gate(repo, folder, config, output, base="missing-ref")
+    # Deterministic Properties validation uses Git context without adding heuristics.
+    result = _gate(repo, folder, config, output, base=base)
     assert output.exists(), result.stderr
     assert result.returncode == 0
     assert json.loads(output.read_text())["semantic_qa"]["findings_count"] == 0
+
+
+def test_properties_source_audit_requires_valid_context_without_semantic_rules(tmp_path):
+    repo, folder, _, _, config, _ = _case(tmp_path, CASES[0])
+    config.write_text("supported_locales: [{code: de, name: German}]\n")
+    output = tmp_path / "report.json"
+    result = _gate(repo, folder, config, output, base="missing-ref")
+    assert result.returncode != 0
+    assert "Git context is unavailable" in result.stderr
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("blocking", [False, True])

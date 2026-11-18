@@ -73,6 +73,7 @@ from localize.translation_memory import (
 )
 from localize.formats.validation import (
     check_placeholder_parity,
+    check_messageformat_apostrophes,
     check_encoding_and_mojibake,
     find_glossary_mismatches,
     find_disallowed_control_characters,
@@ -1190,6 +1191,10 @@ def run_pre_translation_validation(
             continue
         source_value = source_translations.get(key, "")
         target_value = target_translations.get(key, "")
+        if adapter.localization_format.id == JAVA_PROPERTIES_FORMAT.id:
+            for side, value in (("source", source_value), ("translation", target_value)):
+                if not check_messageformat_apostrophes(source_value, value):
+                    errors.append(f"MessageFormat apostrophes must be doubled in {side} for key `{key}`.")
         if not check_placeholder_parity(source_value, target_value):
             message = f"Placeholder mismatch for key `{key}`."
             if changed_keys_for_run is None or key in changed_keys_for_run:
@@ -1262,6 +1267,15 @@ def run_post_translation_validation(
                     continue
                 source_value = source_translations.get(key, "")
                 target_value = final_translations.get(key, "")
+                if effective_format.id == JAVA_PROPERTIES_FORMAT.id:
+                    for side, value in (("source", source_value), ("translation", target_value)):
+                        if not check_messageformat_apostrophes(source_value, value):
+                            is_valid = False
+                            logger.error(
+                                "Post-translation validation failed for '%s': MessageFormat "
+                                "apostrophes must be doubled in %s for key '%s'.",
+                                filename, side, key,
+                            )
                 if not check_placeholder_parity(source_value, target_value):
                     source_placeholders = list(extract_placeholder_tokens(source_value).elements())
                     target_placeholders = list(extract_placeholder_tokens(target_value).elements())
@@ -1346,6 +1360,7 @@ def run_per_key_validation_with_summary(
         locale: str = "",
         accepted_source_identical_translations: Optional[Mapping[str, Mapping[str, str]]] = None,
         decode_properties_whitespace: bool = False,
+        localization_format: Optional[LocalizationFormat] = None,
 ) -> Tuple[Dict[str, str], Dict[str, object]]:
     """
     Validates each translation key individually and selectively reverts failed keys.
@@ -1377,6 +1392,7 @@ def run_per_key_validation_with_summary(
     failed_keys = []
     control_character_keys = []
     placeholder_mismatch_keys = []
+    messageformat_keys = []
     empty_target_keys = []
     glossary_mismatch_keys = []
     source_identical_keys = []
@@ -1467,6 +1483,19 @@ def run_per_key_validation_with_summary(
             valid_translations[key] = source_value
             continue
 
+        effective_format = localization_format or LOCALIZATION_FORMAT
+        if effective_format.id == JAVA_PROPERTIES_FORMAT.id and not (
+            check_messageformat_apostrophes(source_value, source_value)
+            and check_messageformat_apostrophes(source_value, target_value)
+        ):
+            failed_keys.append(key)
+            messageformat_keys.append(key)
+            logger.warning(
+                "Key '%s' failed MessageFormat apostrophe validation in '%s'.", key, filename
+            )
+            valid_translations[key] = source_value
+            continue
+
         # Validate placeholder parity for this key
         if check_placeholder_parity(source_value, target_value):
             # Validation passed - keep the translation
@@ -1509,12 +1538,14 @@ def run_per_key_validation_with_summary(
         "failed_keys": failed_keys,
         "control_character_keys": control_character_keys,
         "placeholder_mismatch_keys": placeholder_mismatch_keys,
+        "messageformat_keys": messageformat_keys,
         "empty_target_keys": empty_target_keys,
         "glossary_mismatch_keys": glossary_mismatch_keys,
         "source_identical_keys": source_identical_keys,
         "reverted_keys_count": len(failed_keys),
         "control_character_findings_count": len(control_character_keys),
         "placeholder_failures_count": len(placeholder_mismatch_keys),
+        "messageformat_failures_count": len(messageformat_keys),
         "empty_target_failures_count": len(empty_target_keys),
         "glossary_failures_count": len(glossary_mismatch_keys),
         "source_identical_failures_count": len(source_identical_keys),
@@ -3643,6 +3674,7 @@ def _validate_file_translations(
         locale=language_code,
         accepted_source_identical_translations=ACCEPTED_SOURCE_IDENTICAL_TRANSLATIONS,
         decode_properties_whitespace=localization_format.id == JAVA_PROPERTIES_FORMAT.id,
+        localization_format=localization_format,
     )
     failed_keys = set(per_key_summary["failed_keys"]).union(model_failed_keys)
     increment_run_metric(run.run_metrics, "model_translation_failed_count", len(failed_keys))

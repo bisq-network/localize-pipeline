@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from localize.formats.profiles import load_localization_profiles
 from localize.formats.placeholders import placeholder_profile
@@ -59,6 +60,37 @@ def test_semantic_remediation_skips_suggestions_that_break_placeholders(tmp_path
     assert result.applied_count == 0
     assert result.skipped_count == 1
     assert "hello=Hallo\n" in target_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("suggestion", [
+    r"L'adresse \u007b0\u007d", r"L'''adresse \u007b0\u007d",
+])
+@pytest.mark.parametrize("custom_metadata", [False, True])
+def test_semantic_remediation_checks_decoded_messageformat_before_writing(tmp_path, suggestion, custom_metadata):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    (resources / "messages.properties").write_text(
+        r"address=Address \u007b0\u007d" + "\n", encoding="utf-8",
+    )
+    target = resources / "messages_fr.properties"
+    before = r"address=Adresse \u007b0\u007d" + "\n"
+    target.write_text(before, encoding="utf-8")
+    result = apply_semantic_review_suggestions(
+        repo_root=str(tmp_path), input_folder=str(resources),
+        findings=[{
+            "file": target.name, "key": "address", "severity": "error",
+            "suggested_value": suggestion,
+        }],
+        locale_codes=["fr"],
+        localization_profiles=load_localization_profiles({"localization_format": (
+            {"id": "java_properties", "display_name": "Custom Properties"}
+            if custom_metadata else "java_properties"
+        )}),
+        changed_identities={(target.name, "address")},
+    )
+    assert result.applied_count == 0
+    assert result.skipped[0]["reason"] == "suggestion breaks MessageFormat apostrophe escaping"
+    assert target.read_text(encoding="utf-8") == before
 
 
 def test_semantic_remediation_rejects_source_absent_numeric_constraints(tmp_path):
@@ -221,7 +253,7 @@ def test_semantic_remediation_applies_json_locale_directory_suggestion(tmp_path)
                 "file": "de/common.json",
                 "key": "/hello",
                 "severity": "error",
-                "suggested_value": "Hallo {0}",
+                "suggested_value": "L'adresse {0}",
             }
         ],
         locale_codes=["de"],
@@ -237,7 +269,7 @@ def test_semantic_remediation_applies_json_locale_directory_suggestion(tmp_path)
     )
 
     assert result.applied_count == 1
-    assert json.loads(target_path.read_text(encoding="utf-8"))["hello"] == "Hallo {0}"
+    assert json.loads(target_path.read_text(encoding="utf-8"))["hello"] == "L'adresse {0}"
 
 
 def test_semantic_remediation_rejects_unchanged_entries(tmp_path):

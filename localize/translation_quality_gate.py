@@ -57,7 +57,7 @@ from localize.semantic_quality import (
     resolve_input_folder,
 )
 from localize.source_identical_acceptance import is_accepted_source_identical, normalize_acceptances
-from localize.formats.validation import find_disallowed_control_characters
+from localize.formats.validation import check_messageformat_apostrophes, find_disallowed_control_characters
 
 
 @dataclass
@@ -561,6 +561,69 @@ def analyze_all_translation_entries_for_profiles(
     )
 
 
+
+def audit_messageformat_apostrophes(
+    repo_root: str,
+    input_folder: str,
+    locale_codes: Sequence[str],
+    localization_profiles: Sequence[LocalizationProfile],
+    changed_files: Sequence[str],
+    source_affected_changes: Sequence[TranslationChange] = (),
+    ignore_key_patterns: Sequence[Pattern[str]] = (),
+) -> Dict[str, Any]:
+    """Check all keys in submitted Properties files and source-affected entries.
+
+    Read actual final files rather than trusting a previous validation summary.
+    Other files/localization formats stay outside this publication's scope.
+    """
+    root = Path(repo_root).resolve()
+    folder = resolve_input_folder(repo_root, input_folder)
+    entries: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    for profile in dict.fromkeys(localization_profiles):
+        fmt, layout = profile.localization_format, profile.localization_layout
+        if fmt.id != JAVA_PROPERTIES_FORMAT.id:
+            continue
+        adapter = get_localization_adapter(fmt)
+        for change in source_affected_changes:
+            if layout.is_target_file(change.file, locale_codes, fmt):
+                entries[(change.file, change.key)] = (change.source_value, change.new_value)
+        for filename in changed_files:
+            path = Path(filename)
+            target = (root / path).resolve() if not path.is_absolute() else path.resolve()
+            try:
+                relative = target.relative_to(folder).as_posix()
+            except ValueError:
+                continue
+            if not layout.is_target_file(relative, locale_codes, fmt):
+                continue
+            if not target.exists():
+                # A staged deletion has no output value to validate. Do not
+                # silently skip a live target that disappeared unexpectedly.
+                repository_relative = target.relative_to(root).as_posix()
+                deleted = subprocess.run(
+                    ["git", "diff", "--cached", "--name-only", "--diff-filter=D", "-z",
+                     "--no-ext-diff", "--", repository_relative],
+                    cwd=root, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, check=True,
+                )
+                if repository_relative in deleted.stdout.split("\0"):
+                    continue
+            source = folder / layout.source_path_for_target(relative, locale_codes, fmt)
+            _, source_values = adapter.parse_file(str(source))
+            _, target_values = adapter.parse_file(str(target))
+            for key in source_values.keys() & target_values.keys():
+                entries[(relative, key)] = (source_values[key], target_values[key])
+    failures = []
+    checked = 0
+    for (filename, key), (source, target) in sorted(entries.items()):
+        if is_ignored_key(key, ignore_key_patterns):
+            continue
+        checked += 1
+        for side, value in (("source", source), ("translation", target)):
+            if not check_messageformat_apostrophes(source, value):
+                failures.append({"file": filename, "key": key, "side": side})
+    return {"checked_entries_count": checked, "failures_count": len(failures), "failures": failures}
+
 def load_quality_gate_config(
     config_path: str,
 ) -> Tuple[QualityGateConfig, List[str], List[str], List[SemanticRule]]:
@@ -702,6 +765,7 @@ def _aggregate_validation(
         "reverted_keys_count": 0,
         "control_character_findings_count": 0,
         "placeholder_failures_count": 0,
+        "messageformat_failures_count": 0,
         "model_translation_failed_count": 0,
         "model_translation_failed_keys": {},
     }
@@ -716,6 +780,9 @@ def _aggregate_validation(
         )
         totals["placeholder_failures_count"] += int(
             file_summary.get("placeholder_failures_count", 0)
+        )
+        totals["messageformat_failures_count"] += int(
+            file_summary.get("messageformat_failures_count", 0)
         )
         totals["model_translation_failed_count"] += int(
             file_summary.get("model_translation_failed_count", 0)
@@ -843,7 +910,9 @@ def build_quality_gate_report(
     changed_files: Sequence[str],
     input_folder: str,
     config: QualityGateConfig,
+    messageformat_audit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    messageformat_audit = messageformat_audit or {"checked_entries_count": 0, "failures_count": 0, "failures": []}
     validation_totals = _aggregate_validation(
         validation_summary, changed_files, input_folder
     )
@@ -922,6 +991,8 @@ def build_quality_gate_report(
         blocking_reasons.append(
             "Placeholder parity failures require manual resolution."
         )
+    if messageformat_audit["failures_count"] or validation_totals["messageformat_failures_count"]:
+        blocking_reasons.append("MessageFormat apostrophes must be doubled; repair the reported source or translation keys.")
     if validation_totals["model_translation_failed_count"]:
         blocking_reasons.append("Model translation failures require manual resolution.")
 
@@ -948,6 +1019,7 @@ def build_quality_gate_report(
         "source_identical": source_stats.to_dict(),
         "semantic_qa": semantic_qa,
         "validation": validation_totals,
+        "messageformat": messageformat_audit,
         "pipeline_warnings_count": len(pipeline_warnings),
         "pipeline_warnings": pipeline_warnings,
         "thresholds": config.to_dict(),
@@ -1059,6 +1131,17 @@ def render_quality_gate_markdown(report: Dict[str, Any]) -> str:
             "",
         ]
     )
+
+    messageformat = report.get("messageformat", {})
+    if messageformat.get("failures"):
+        lines.extend(["### MessageFormat Apostrophe Failures", ""])
+        for failure in messageformat["failures"]:
+            lines.append(
+                f"- `{_escape_markdown_report_text(failure['file'], 160)}` "
+                f"`{_escape_markdown_report_text(failure['key'], 160)}` "
+                f"({failure['side']}): double literal apostrophes."
+            )
+        lines.append("")
 
     model_failure_keys = validation.get("model_translation_failed_keys", {})
     if isinstance(model_failure_keys, Mapping) and model_failure_keys:
@@ -1216,6 +1299,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         accepted_source_identical_translations=config.accepted_source_identical_translations,
         require_source=True,
     )
+    source_affected_changes = (
+        source_affected_translation_entries(
+            args.repo_root, args.input_folder, locale_codes,
+            localization_profiles, args.source_diff_base,
+        ) if args.source_diff_base and (
+            semantic_rules or any(profile.localization_format.id == JAVA_PROPERTIES_FORMAT.id
+                                  for profile in localization_profiles)
+        ) else []
+    )
+    messageformat_audit = audit_messageformat_apostrophes(
+        args.repo_root, args.input_folder, locale_codes, localization_profiles,
+        args.changed_files, source_affected_changes, config.ignore_key_patterns,
+    )
     audit_scope = args.audit_scope or config.semantic_qa_audit_scope
     if audit_scope == "all":
         semantic_stats = analyze_all_translation_entries_for_profiles(
@@ -1229,12 +1325,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ignore_key_patterns=config.ignore_key_patterns,
         )
     else:
-        source_affected_changes = (
-            source_affected_translation_entries(
-                args.repo_root, args.input_folder, locale_codes,
-                localization_profiles, args.source_diff_base,
-            ) if semantic_rules and args.source_diff_base else []
-        )
         semantic_stats = analyze_semantic_qa_changes_for_profiles(
             diff_text=diff_text,
             repo_root=args.repo_root,
@@ -1254,6 +1344,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         changed_files=args.changed_files,
         input_folder=args.input_folder,
         config=config,
+        messageformat_audit=messageformat_audit,
     )
     write_report(report, args.output_json, args.output_markdown)
     return 1 if report["blocking"] else 0

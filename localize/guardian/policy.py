@@ -15,12 +15,14 @@ from typing import Any, Iterable, Mapping, Sequence
 import yaml
 
 from localize.formats import get_localization_adapter
+from localize.formats.metadata import JAVA_PROPERTIES_FORMAT
 from localize.guardian.models import ProposedReplacement
 from localize.guardian.path_globs import matches_any_path_glob
 from localize.formats.profiles import LocalizationProfile, load_localization_profiles
 from localize.formats.placeholders import DEFAULT_PLACEHOLDER_PROFILE, placeholder_profile
 from localize.formats.validation import (
     check_encoding_and_mojibake,
+    check_messageformat_apostrophes,
     check_placeholder_parity,
     find_disallowed_control_characters,
     find_glossary_mismatches,
@@ -436,6 +438,13 @@ def apply_replacements(
                 if not check_placeholder_parity(source_value, proposal.proposed_value):
                     raise PatchPolicyError(
                         f"Proposed value for {relative_path}:{proposal.key} breaks placeholder parity."
+                    )
+                if (
+                    profile.localization_format.id == JAVA_PROPERTIES_FORMAT.id
+                    and not check_messageformat_apostrophes(source_value, proposal.proposed_value)
+                ):
+                    raise PatchPolicyError(
+                        f"Proposed value for {relative_path}:{proposal.key} breaks MessageFormat apostrophe escaping."
                     )
                 locale_glossary = dict(glossary.get(locale, {}))
                 locale_glossary.update({term: term for term in brand_terms})

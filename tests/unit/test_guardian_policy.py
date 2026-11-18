@@ -84,6 +84,51 @@ def test_applies_exact_properties_value_and_preserves_all_other_bytes(tmp_path):
     ) == after
 
 
+@pytest.mark.parametrize("value", ["L'adresse {0}", "L'''adresse {0}", r"L\u0027adresse {0}"])
+@pytest.mark.parametrize("custom_metadata", [False, True])
+def test_rejects_messageformat_apostrophe_without_writing(tmp_path, value, custom_metadata):
+    config = _write_properties_project(tmp_path)
+    if custom_metadata:
+        settings = yaml.safe_load(config.read_text(encoding="utf-8"))
+        settings["localization_format"] = {"id": "java_properties", "display_name": "Custom Properties"}
+        config.write_text(yaml.safe_dump(settings), encoding="utf-8")
+    source = tmp_path / "l10n/Messages_en.properties"
+    target = tmp_path / "l10n/Messages_ru.properties"
+    source.write_text("push=Address {0}\n", encoding="utf-8")
+    target.write_text("push=Adresse {0}\n", encoding="utf-8")
+    before = target.read_bytes()
+
+    with pytest.raises(PatchPolicyError, match="MessageFormat apostrophe"):
+        apply_replacements(
+            repo_root=tmp_path,
+            pipeline_config_path=config,
+            allowed_paths=("l10n/*.properties",),
+            replacements=(_replacement(
+                source_value="Address {0}", expected_value="Adresse {0}",
+                proposed_value=value,
+            ),),
+            max_changes=20,
+        )
+    assert target.read_bytes() == before
+
+
+def test_accepts_doubled_messageformat_apostrophe(tmp_path):
+    config = _write_properties_project(tmp_path)
+    (tmp_path / "l10n/Messages_en.properties").write_text("push=Address {0}\n", encoding="utf-8")
+    target = tmp_path / "l10n/Messages_ru.properties"
+    target.write_text("push=Adresse {0}\n", encoding="utf-8")
+    result = apply_replacements(
+        repo_root=tmp_path, pipeline_config_path=config,
+        allowed_paths=("l10n/*.properties",),
+        replacements=(_replacement(
+            source_value="Address {0}", expected_value="Adresse {0}",
+            proposed_value="L''adresse {0}",
+        ),), max_changes=20,
+    )
+    assert result.changed_files == ("l10n/Messages_ru.properties",)
+    assert target.read_text(encoding="utf-8") == "push=L''adresse {0}\n"
+
+
 def test_existing_control_in_unedited_key_does_not_block_replacement(tmp_path):
     config = _write_properties_project(tmp_path)
     target = tmp_path / "l10n/Messages_ru.properties"
@@ -556,11 +601,12 @@ def test_enforces_change_limit_and_unique_target_keys(tmp_path):
         )
 
 
-def test_applies_json_string_value_without_changing_other_structure(tmp_path):
+@pytest.mark.parametrize("placeholder", ["{name}", "{0}"])
+def test_applies_json_string_value_without_changing_other_structure(tmp_path, placeholder):
     locales = tmp_path / "locales"
     locales.mkdir()
-    source = {"dialog": {"message": "Hello {name}", "keep": "Same"}}
-    target = {"dialog": {"message": "Привет {name}", "keep": "То же"}}
+    source = {"dialog": {"message": f"Hello {placeholder}", "keep": "Same"}}
+    target = {"dialog": {"message": f"Привет {placeholder}", "keep": "То же"}}
     (locales / "messages.json").write_text(
         json.dumps(source, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -590,13 +636,13 @@ def test_applies_json_string_value_without_changing_other_structure(tmp_path):
         replacements=(_replacement(
             path="locales/messages_ru.json",
             key="/dialog/message",
-            expected_value="Привет {name}",
-            proposed_value="Здравствуйте, {name}",
-            source_value="Hello {name}",
+            expected_value=f"Привет {placeholder}",
+            proposed_value=f"L'adresse {placeholder}",
+            source_value=f"Hello {placeholder}",
         ),),
         max_changes=20,
     )
 
     assert json.loads(target_path.read_text(encoding="utf-8")) == {
-        "dialog": {"message": "Здравствуйте, {name}", "keep": "То же"}
+        "dialog": {"message": f"L'adresse {placeholder}", "keep": "То же"}
     }
