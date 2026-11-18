@@ -45,3 +45,26 @@ the [server guide](new-project-deployment.md#5-build).
 input open by default; add `--interactive=false` when a script must not pass
 input to the container. No local Compose override or SSH agent forwarding is
 required.
+
+### Java MessageFormat apostrophes
+
+For Java Properties values whose English source contains a numeric argument
+such as `{0}` or `{0,number}`, literal ASCII apostrophes must be doubled. For
+example, `L'adresse {0}` must be written as `L''adresse {0}`. Odd runs such as
+`'''` also fail. Java character and Unicode escapes are decoded before this
+check, so `\u0027` and `\'` cannot hide a single apostrophe. Typographic
+apostrophes such as `’` are unaffected.
+
+The queue validates existing values, including keys unchanged by the current
+run, before model calls and again before writing. Generated values continue to
+use the existing apostrophe escaping. The publication quality gate independently
+checks every key in submitted Properties files, plus translations affected by a
+source-only change. It reports the file, key and failing source/translation side;
+it does not silently repair existing values. Repair the reported entries in the
+translation source of truth before rerunning. Ignored keys, JSON and unrelated
+files outside the publication scope are excluded.
+
+This enforces the pipeline's literal-apostrophe convention, not the complete
+Java MessageFormat grammar. Intentional quote syntax (for example, quoted braces
+or quotes inside a date subformat) is outside this convention. The check does not
+replace a Java rendering audit for malformed braces or other formatting errors.

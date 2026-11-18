@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 from localize.formats.adapters import get_localization_adapter
+from localize.formats.metadata import JAVA_PROPERTIES_FORMAT
 from localize.formats.profiles import LocalizationProfile
 from localize.formats.placeholders import strip_placeholder_tokens
 from localize.formats.validation import (
+    check_messageformat_apostrophes,
     check_placeholder_parity,
     find_disallowed_control_characters,
 )
@@ -223,6 +225,12 @@ def apply_semantic_review_suggestions(
             continue
         if not check_placeholder_parity(source_value, escaped_value):
             _skip(result, finding, "suggestion does not preserve source placeholders")
+            continue
+        if (
+            profile.localization_format.id == JAVA_PROPERTIES_FORMAT.id
+            and not check_messageformat_apostrophes(source_value, escaped_value)
+        ):
+            _skip(result, finding, "suggestion breaks MessageFormat apostrophe escaping")
             continue
 
         for line in reversed(parsed_lines):

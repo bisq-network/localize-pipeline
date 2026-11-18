@@ -1,6 +1,6 @@
 from typing import Dict, List, Mapping, Set, Tuple
 import re
-from localize.formats.properties import parse_properties_file, reassemble_file
+from localize.formats.properties import decode_properties_value, parse_properties_file, reassemble_file
 from localize.formats.placeholders import extract_placeholder_tokens
 
 _ALLOWED_CONTROL_CODEPOINTS = {0x09, 0x0A, 0x0D}
@@ -86,6 +86,18 @@ def check_placeholder_parity(base_string: str, target_string: str) -> bool:
     """
     return extract_placeholder_tokens(base_string) == extract_placeholder_tokens(target_string)
 
+
+
+def check_messageformat_apostrophes(source_value: str, target_value: str) -> bool:
+    """Enforce literal apostrophe pairs in argument-bearing Java properties.
+
+    This is the project's literal-apostrophe convention, not a general Java
+    MessageFormat grammar validator. Decode Properties escapes first so Unicode
+    and backslash-escaped apostrophes cannot bypass the check.
+    """
+    if not re.search(r"\{[0-9]+[},]", decode_properties_value(source_value)):
+        return True
+    return not re.search(r"(?<!')'(?:'')*(?!')", decode_properties_value(target_value))
 
 def _glossary_term_pattern(term: str) -> re.Pattern[str]:
     """Compile the boundary-aware, case-insensitive glossary matching rule."""

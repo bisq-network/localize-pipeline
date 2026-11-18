@@ -88,29 +88,36 @@ def _unescape_key(raw_key: str) -> str:
     malformed ``\\uXXXX`` input is preserved literally so one bad upstream key
     cannot abort an otherwise recoverable localization run.
     """
-    stripped_key = _strip_unescaped_boundary_whitespace(raw_key)
+    return decode_properties_value(_strip_unescaped_boundary_whitespace(raw_key))
+
+
+def decode_properties_value(value: str) -> str:
+    r"""Decode Java character/Unicode escapes without trimming value whitespace.
+
+    Malformed Unicode escapes remain literal, matching the tolerant key parser.
+    """
     unescaped: list[str] = []
     index = 0
-    while index < len(stripped_key):
-        char = stripped_key[index]
+    while index < len(value):
+        char = value[index]
         if char != '\\':
             unescaped.append(char)
             index += 1
             continue
 
-        if index + 1 >= len(stripped_key):
+        if index + 1 >= len(value):
             # loadConvert discards a trailing lone backslash.
             index += 1
             continue
 
-        next_char = stripped_key[index + 1]
+        next_char = value[index + 1]
         if next_char in _JAVA_CHARACTER_ESCAPES:
             unescaped.append(_JAVA_CHARACTER_ESCAPES[next_char])
             index += 2
             continue
 
         if next_char == 'u':
-            digits = stripped_key[index + 2:index + 6]
+            digits = value[index + 2:index + 6]
             if len(digits) == 4 and all(digit in _HEX_DIGITS for digit in digits):
                 unescaped.append(chr(int(digits, 16)))
                 index += 6
