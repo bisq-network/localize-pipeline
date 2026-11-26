@@ -47,6 +47,7 @@ from localize.semantic_remediation import (
     apply_semantic_review_suggestions,
     semantic_review_finding_signature,
 )
+from localize.source_identical_acceptance import normalize_acceptances
 from localize.translation_quality_gate import (
     get_staged_diff,
     load_quality_gate_localization_profiles,
@@ -632,6 +633,9 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         or None
     )
     try:
+        accepted_source_identical_translations = normalize_acceptances(
+            config.get("accepted_source_identical_translations")
+        )
         semantic_review_enabled, model = resolve_semantic_review_model(
             config,
             review_model_name=effective_review_model,
@@ -772,6 +776,7 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
             locale_codes=locales,
             localization_profiles=localization_profiles,
             changed_identities=changed_identities,
+            accepted_source_identical_translations=accepted_source_identical_translations,
         )
         append_semantic_review_remediations(args.validation_summary, remediation)
         applied = remediation.applied_finding_signatures

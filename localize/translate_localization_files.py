@@ -1639,12 +1639,23 @@ Provide the translation **of the Value only**, following the instructions above.
         base_delay = 1
         source_echo_feedback = ""
 
-        for attempt in range(1, max_retries + 1):  # type: ignore[arg-type]
+        source_echo_count = 0
+        for attempt in range(1, max_retries + 1):
+            model = MODEL_NAME
+            reasoning_effort = MODEL_REASONING_EFFORT
+            if (
+                attempt == max_retries
+                and source_echo_count >= 2
+                and REVIEW_MODEL_NAME != MODEL_NAME
+            ):
+                model = REVIEW_MODEL_NAME
+                reasoning_effort = REVIEW_REASONING_EFFORT
+                logger.info("Using the review model on the final draft attempt for key '%s'.", key)
             try:
                 # Use chat completion API
                 async with rate_limiter:
                     response = await MODEL_PROVIDER.create_chat_completion(
-                        model=MODEL_NAME,
+                        model=model,
                         messages=[
                             ChatCompletionSystemMessageParam(role="system", content=system_prompt),
                             ChatCompletionUserMessageParam(role="user", content=prompt.format(
@@ -1658,7 +1669,7 @@ Provide the translation **of the Value only**, following the instructions above.
                         temperature=0.3,
                         timeout=60.0,
                         **chat_reasoning_effort_kwargs(
-                            MODEL_PROVIDER, MODEL_NAME, MODEL_REASONING_EFFORT,
+                            MODEL_PROVIDER, model, reasoning_effort,
                         ),
                         **({"completion_token_limit": MODEL_MAX_COMPLETION_TOKENS}
                            if MODEL_MAX_COMPLETION_TOKENS is not None else {}),
@@ -1688,6 +1699,7 @@ Provide the translation **of the Value only**, following the instructions above.
                     )
                 ):
                     logger.warning("Translation echoed the source for key '%s'; retrying within the model attempt budget.", key)
+                    source_echo_count += 1
                     source_echo_feedback = (
                         "\nThe previous response repeated the English source. "
                         f"Rephrase it naturally in {target_language}, preserving exactly "
