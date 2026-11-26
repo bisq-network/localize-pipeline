@@ -146,3 +146,34 @@ async def test_review_exact_source_identical_acceptance_does_not_retry(monkeypat
     )
     assert result == {"conversation.open": "Private chat"}
     retry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement", ["How long dis offer don dey: {0}", None])
+async def test_repeated_pidgin_source_echo_uses_review_model_on_final_attempt(monkeypatch, replacement):
+    source = "Offer age: {0}"
+    key = "mobile.bisqEasy.offerbook.offerCard.age.a11y"
+    provider = MagicMock()
+    provider.count_tokens.return_value = 1
+    provider.is_retryable_error.return_value = False
+
+    async def complete(*, model, **kwargs):
+        return _response(replacement if model == "review-model" and replacement else source)
+
+    provider.create_chat_completion = AsyncMock(side_effect=complete)
+    monkeypatch.setattr(pipeline, "MODEL_PROVIDER", provider)
+    monkeypatch.setattr(pipeline, "MODEL_NAME", "draft-model")
+    monkeypatch.setattr(pipeline, "REVIEW_MODEL_NAME", "review-model")
+    monkeypatch.setattr(pipeline, "DRY_RUN", False)
+    monkeypatch.setattr(pipeline, "NAME_TO_CODE", {"nigerian pidgin": "pcm"})
+    monkeypatch.setattr(pipeline.asyncio, "sleep", AsyncMock())
+
+    result = await pipeline.translate_text_async(
+        source, key, {}, {key: source}, "Nigerian Pidgin", {},
+        asyncio.Semaphore(1), _NoLimit(), 0,
+    )
+
+    assert result == (0, replacement or source, replacement is not None)
+    assert [call.kwargs["model"] for call in provider.create_chat_completion.await_args_list] == [
+        "draft-model", "draft-model", "draft-model", "draft-model", "review-model",
+    ]

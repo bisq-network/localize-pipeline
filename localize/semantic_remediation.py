@@ -16,6 +16,8 @@ from localize.formats.validation import (
     check_placeholder_parity,
     find_disallowed_control_characters,
 )
+from localize.semantic_quality import normalize_value
+from localize.source_identical_acceptance import is_accepted_source_identical
 
 
 @dataclass
@@ -131,13 +133,15 @@ def apply_semantic_review_suggestions(
     locale_codes: Sequence[str],
     localization_profiles: Sequence[LocalizationProfile],
     changed_identities: Iterable[tuple[str, str]],
+    accepted_source_identical_translations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> SemanticRemediationResult:
     """Apply error-level AI review suggestions that pass deterministic checks.
 
     Suggestions are intentionally conservative: the finding must name a changed
     target file/key, provide ``suggested_value``, map to a configured format
     profile, preserve source placeholder parity, and avoid introducing numeric
-    requirements that are absent from the authoritative source.
+    requirements that are absent from the authoritative source. Repeating the
+    source requires an exact, reviewed exception for that locale and key.
     """
     result = SemanticRemediationResult()
     input_path = _input_folder_path(repo_root, input_folder)
@@ -223,6 +227,19 @@ def apply_semantic_review_suggestions(
             continue
         if not check_placeholder_parity(source_value, escaped_value):
             _skip(result, finding, "suggestion does not preserve source placeholders")
+            continue
+
+        locale = profile.localization_layout.extract_locale(
+            relative_file, locale_codes, profile.localization_format,
+        ) or ""
+        if (
+            normalize_value(source_value) == normalize_value(escaped_value)
+            and not is_accepted_source_identical(
+                locale, key, source_value, escaped_value,
+                accepted_source_identical_translations or {},
+            )
+        ):
+            _skip(result, finding, "suggestion repeats the source without an exact reviewed exception")
             continue
 
         for line in reversed(parsed_lines):

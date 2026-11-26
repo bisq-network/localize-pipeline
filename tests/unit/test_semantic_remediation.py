@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from localize.formats.profiles import load_localization_profiles
 from localize.formats.placeholders import placeholder_profile
 from localize.semantic_remediation import apply_semantic_review_suggestions
@@ -333,3 +335,34 @@ def test_semantic_remediation_skips_duplicate_changed_identity(tmp_path):
     assert result.skipped_count == 1
     assert result.skipped[0]["reason"] == "duplicate finding for changed entry"
     assert "hello=Hallo {0}" in target_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_semantic_remediation_requires_exact_approval_for_pidgin_source_echo(tmp_path, approved):
+    resources = tmp_path / "resources"
+    resources.mkdir()
+    key = "mobile.bisqEasy.offerbook.offerCard.price.floatAbove"
+    source = "+{0} vs market"
+    localized = "+{0} pass market price"
+    (resources / "mobile.properties").write_text(f"{key}={source}\n", encoding="utf-8")
+    target = resources / "mobile_pcm.properties"
+    target.write_text(f"{key}={localized}\n", encoding="utf-8")
+
+    result = apply_semantic_review_suggestions(
+        repo_root=str(tmp_path),
+        input_folder=str(resources),
+        findings=[{
+            "file": target.name, "key": key, "severity": "error",
+            "suggested_value": source,
+        }],
+        locale_codes=["pcm"],
+        localization_profiles=load_localization_profiles({"localization_format": "java_properties"}),
+        changed_identities={(target.name, key)},
+        accepted_source_identical_translations={
+            "pcm": {key: source if approved else "Previous English source"},
+        },
+    )
+
+    assert result.applied_count == (1 if approved else 0)
+    assert result.skipped_count == (0 if approved else 1)
+    assert target.read_text(encoding="utf-8") == f"{key}={source if approved else localized}\n"

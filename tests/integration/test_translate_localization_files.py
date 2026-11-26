@@ -1172,13 +1172,15 @@ async def test_source_echo_content_retry_preserves_mixed_batch_and_failure_evide
         'app_de.properties': pipeline.build_file_key_ledger(sources, sources, failed_keys=set(sources)),
     })
     calls = {"draft_echo": 0, "review": 0}
+    draft_models = []
 
     async def completion(**kwargs):
-        if kwargs['model'] == 'content-test-draft':
-            prompt = kwargs['messages'][1]['content']
+        prompt = kwargs['messages'][1]['content']
+        if '**Text to Translate:**' in prompt:
             value = targets['conversation.close']
             if 'Key: conversation.open\n' in prompt:
                 calls['draft_echo'] += 1
+                draft_models.append(kwargs['model'])
                 value = (sources['conversation.open'] if stage == 'draft' and
                          (not recover or calls['draft_echo'] == 1) else targets['conversation.open'])
         else:
@@ -1233,4 +1235,6 @@ async def test_source_echo_content_retry_preserves_mixed_batch_and_failure_evide
     expected_draft_calls = (2 if recover else 5) if stage == 'draft' else 1
     expected_review_calls = (2 if recover else 3) if stage == 'review' else 1
     assert calls['draft_echo'] == expected_draft_calls
+    if stage == 'draft' and not recover:
+        assert draft_models == ['content-test-draft'] * 4 + ['content-test-review']
     assert calls['review'] == expected_review_calls
