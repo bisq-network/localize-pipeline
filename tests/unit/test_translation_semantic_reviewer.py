@@ -305,6 +305,35 @@ async def test_semantic_reviewer_rejects_malformed_config_without_traceback(
 
 
 @pytest.mark.asyncio
+async def test_semantic_reviewer_rejects_invalid_source_exception_policy_before_review(
+    tmp_path, caplog,
+):
+    config = tmp_path / "config.yaml"
+    summary = tmp_path / "translation_validation_summary.json"
+    config.write_text(
+        "semantic_review:\n  enabled: true\n  auto_apply_error_suggestions: true\n"
+        "accepted_source_identical_translations: []\n",
+        encoding="utf-8",
+    )
+    with patch(
+        "localize.translation_semantic_reviewer.get_staged_diff",
+        return_value="",
+    ) as staged_diff:
+        exit_code = await _run([
+            "--repo-root", str(tmp_path),
+            "--input-folder", str(tmp_path),
+            "--config", str(config),
+            "--validation-summary", str(summary),
+            "--changed-files", "mobile_pcm.properties",
+        ])
+
+    assert exit_code == 1
+    assert "accepted_source_identical_translations must be a locale/key/value map" in caplog.text
+    staged_diff.assert_not_called()
+    assert not summary.exists()
+
+
+@pytest.mark.asyncio
 async def test_semantic_reviewer_inherits_effective_review_model_override(
     tmp_path, monkeypatch
 ):

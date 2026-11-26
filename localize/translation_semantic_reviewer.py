@@ -633,6 +633,9 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
         or None
     )
     try:
+        accepted_source_identical_translations = normalize_acceptances(
+            config.get("accepted_source_identical_translations")
+        )
         semantic_review_enabled, model = resolve_semantic_review_model(
             config,
             review_model_name=effective_review_model,
@@ -765,9 +768,6 @@ async def _run(argv: Optional[Sequence[str]]) -> int:
     semantic_review_incomplete = bool(failed_batches or failed_locales)
 
     if _auto_apply_suggestions_enabled(config, semantic_review_config):
-        accepted_source_identical_translations = normalize_acceptances(
-            config.get("accepted_source_identical_translations")
-        )
         changed_identities = {(change.file, change.key) for change in changes}
         remediation = apply_semantic_review_suggestions(
             repo_root=args.repo_root,
